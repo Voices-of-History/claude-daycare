@@ -161,6 +161,10 @@ pub mod paths {
     pub fn visit_report(visit_id: &str) -> String {
         format!("/api/daycare/visits/{visit_id}/report")
     }
+
+    pub fn visit_transcript(visit_id: &str) -> String {
+        format!("/api/daycare/visits/{visit_id}/transcript")
+    }
 }
 
 #[cfg(test)]

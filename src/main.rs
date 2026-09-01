@@ -2575,6 +2575,23 @@ fn finish_homecoming(
         }
     }
 
+    // The full record the reader read goes to the platform too, so the owner
+    // can read every turn on the hub. Best-effort, like the day report: a
+    // failure is logged and never blocks the homecoming.
+    if account.is_some() {
+        match homecoming::read(&active.workspace.dir, &record.visit_id) {
+            Ok(Some(transcript)) => {
+                if let Err(error) =
+                    client.submit_transcript(active.token(), &record.visit_id, &transcript)
+                {
+                    eprintln!("could not upload the visit transcript: {error}");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("could not read the visit transcript for upload: {error}"),
+        }
+    }
+
     // Account and completion are one atomic local write. A crash before this
     // point re-adopts the validated archive; a crash after it never launches a
     // duplicate homecoming turn. An empty account is a homecoming that chose

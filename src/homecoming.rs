@@ -249,6 +249,18 @@ pub fn write(workspace_dir: &Path, visit_id: &str, text: &str) -> Result<Transcr
     })
 }
 
+/// Read back the transcript `write` left for this visit, for upload to the
+/// platform at homecoming. `None` when no transcript was rendered.
+pub fn read(workspace_dir: &Path, visit_id: &str) -> Result<Option<String>> {
+    let path = workspace_dir
+        .join(TRANSCRIPT_DIR)
+        .join(format!("{}.md", sanitize_segment(visit_id)));
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(std::fs::read_to_string(&path)?))
+}
+
 /// The reader's prompt: a fresh session, told where the record is, told to
 /// read all of it before it decides anything, then the ordinary homecoming
 /// ask (`facts_and_reflection`: any match facts, then the reflection).

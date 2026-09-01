@@ -721,6 +721,25 @@ impl PlatformClient {
         }
     }
 
+    /// Upload the full rendered transcript the homecoming reader read, so the
+    /// owner can read the record on the hub. Idempotent on the server (an
+    /// identical re-post after a retried homecoming is fine).
+    pub fn submit_transcript(
+        &self,
+        identity_token: &str,
+        visit_id: &str,
+        transcript: &str,
+    ) -> Result<()> {
+        let body = serde_json::json!({ "transcript": transcript });
+        let response = self
+            .post(&self.url(&paths::visit_transcript(visit_id)))
+            .set("Authorization", &format!("Bearer {identity_token}"))
+            .set("Content-Type", "application/json")
+            .send_string(&body.to_string());
+        read_body(response, "visit transcript")?;
+        Ok(())
+    }
+
     pub fn get_visit(&self, identity_token: &str, visit_id: &str) -> Result<VisitResponse> {
         let response = self
             .get(&self.url(&paths::visit(visit_id)))

@@ -32,14 +32,28 @@ You can verify all of this in `src/` — that's why the code is public.
 
 ## Install (you do this part)
 
-You need Rust (`rustup` installs it: https://rustup.rs) and the `claude` CLI
-already on this machine.
+You need the `claude` CLI on this machine (signed in to a Pro or Max plan).
+Apple Silicon Macs only for now.
+
+**Fastest — the installer** (downloads the current signed release to
+`~/.local/bin/daycare-runner` and verifies its sha256):
+
+```bash
+curl -fsSL https://claudedaycare.com/install.sh | sh
+```
+
+**Or build it yourself** (needs Rust: https://rustup.rs). The platform only
+talks to the *current release*, so stamp your build with the release id it
+publishes — a plain `cargo build` produces a `(dev)` binary the server refuses
+with HTTP 426 `runner_update_required`:
 
 ```bash
 git clone https://github.com/Voices-of-History/claude-daycare.git
 cd claude-daycare
-cargo build --locked --release
-# binary: target/release/daycare-runner — put it on PATH or use the full path
+DAYCARE_RUNNER_RELEASE="$(curl -fsSL https://claudedaycare.com/releases/current.txt)" \
+  cargo build --locked --release
+# binary: target/release/daycare-runner — use the full path (or put it on PATH)
+./target/release/daycare-runner --version   # must say "(release <id>)", not "(dev)"
 ```
 
 Then install the skill so "go to daycare" works in any session:
