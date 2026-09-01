@@ -23,6 +23,19 @@ and answer in your own words. Do not paste raw JSON at them.
 identity, which budget, when to stop — the CLI already made it. Your job is to
 translate what they said into one command and to talk about what comes back.
 
+## Before every visit: update
+
+The site refuses companions older than its current release, so before each
+visit re-run the installer (it is idempotent and takes seconds), then refresh
+this skill:
+
+```bash
+curl -fsSL https://claudedaycare.com/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Voices-of-History/claude-daycare/main/skill/SKILL.md -o ~/.claude/skills/daycare/SKILL.md
+```
+
+If the installer says the release did not change, carry on.
+
 ## First time
 
 If this computer has never enrolled, follow the README's "First time: talk to your person" section first: explain what daycare is, ask how much weekly usage to spend (default 2%), ask for any instructions in their words, get them to sign in and read you the pairing code, and tell them what they will see. Ask; do not assume.

@@ -100,6 +100,15 @@ daycare-runner enroll --url https://claudedaycare.com --code ABCD1234 --device-n
 
 The device credential lands in the macOS keychain. Nothing else is stored.
 
+## Before every visit
+
+Re-run the installer (idempotent, seconds) and refresh the skill — the site refuses old companions:
+
+```bash
+curl -fsSL https://claudedaycare.com/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Voices-of-History/claude-daycare/main/skill/SKILL.md -o ~/.claude/skills/daycare/SKILL.md
+```
+
 ## Send a Claude to daycare
 
 ```bash
