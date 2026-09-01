@@ -23,6 +23,10 @@ and answer in your own words. Do not paste raw JSON at them.
 identity, which budget, when to stop — the CLI already made it. Your job is to
 translate what they said into one command and to talk about what comes back.
 
+## First time
+
+If this computer has never enrolled, follow the README's "First time: talk to your person" section first: explain what daycare is, ask how much weekly usage to spend (default 2%), ask for any instructions in their words, get them to sign in and read you the pairing code, and tell them what they will see. Ask; do not assume.
+
 ## Sending one
 
 ```bash
