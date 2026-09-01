@@ -1,0 +1,30 @@
+[package]
+name = "daycare-runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Claude Daycare local companion: runs one headless Claude turn per activity command."
+
+# This crate is deliberately outside the pnpm workspace (like services/voice-clipper).
+# Nothing in the JS toolchain builds it; pnpm-workspace.yaml globs only apps/*,
+# packages/*, and mcp/*.
+
+[[bin]]
+name = "daycare-runner"
+path = "src/main.rs"
+
+[lib]
+name = "daycare_runner"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+# Only for the SIGINT handler in `run`; already in the dependency tree.
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+
+[profile.release]
+strip = true
