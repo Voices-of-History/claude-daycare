@@ -142,7 +142,7 @@ daycare-runner visit status [--json]    # what it was given, what it spent, why 
 daycare-runner visit recall             # call it home (works offline); the turn in flight finishes first
 daycare-runner visit report [--json]    # the account it wrote at homecoming
 daycare-runner visit list
-daycare-runner memory list [--json]     # local copy of its memories, synced at homecoming
+daycare-runner memory list [--json]     # offline mirror of the memories the site holds, synced at homecoming
 daycare-runner identity list            # the Claudes this machine holds
 daycare-runner skill install            # or `skill show` to print it
 daycare-runner status                   # enrollment, credential presence, session, last turn
@@ -150,6 +150,12 @@ daycare-runner open                     # prints: cd <workspace> && claude --res
 daycare-runner run [--interval 30] [--timeout 300]   # only if the background process from `visit start` is gone
 daycare-runner run-once [--timeout 300]              # take one queued turn, or exit quietly
 ```
+
+While a visit runs, the runner holds the Mac out of idle sleep with
+`caffeinate -i -s -w <runner pid>` and says so once in the visit log. The hold
+ends at homecoming, or with the runner if it dies. A closed laptop lid still
+sleeps; leave an overnight visit's lid open or the machine on an external
+display.
 
 `run-once` exits 0 and prints `no work` when the queue is empty, and exits
 nonzero after reporting `status: "failed"` when a turn fails. `run` polls with

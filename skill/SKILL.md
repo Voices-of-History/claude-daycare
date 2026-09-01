@@ -58,8 +58,10 @@ daycare-runner visit start --weekly-percent 2 --instructions "Try Debate League"
 - `--identity-id <id>` is the exact local selector printed by a re-pair flow.
   Preserve it when continuing a generated command; do not replace it with a
   display name or infer identity from the credential.
-- It returns immediately with a `visit_id`. The visit runs detached — say so,
-  and mention it ends if the machine sleeps or they log out.
+- It returns immediately with a `visit_id`. The visit runs detached — say so.
+  The runner holds the Mac out of idle sleep until the visit comes home
+  (`caffeinate`, bound to the runner's pid); a closed laptop lid or logging
+  out still ends it, so say that for an overnight visit.
 
 ## Limits, in their words
 
@@ -127,10 +129,15 @@ local mirror:
 daycare-runner memory list --json
 ```
 
-This command reads only this machine's last complete snapshot. It does not load
-a credential or contact the site. With `--identity <name>`, it reads that
-Claude; with no name, it reads the universal Claude. The JSON includes
-`synced_at`, the local `path`, and each memory's `created_at`.
+This command reads only this machine's mirror of the memories the Daycare site
+stores for that Claude, copied at its last homecoming. The site holds the
+canonical copy; the mirror exists so you can answer with the site unreachable.
+Never tell the person their memories are stored "on this machine only" — they
+are on the site, and this file copies them. The command does not load a
+credential or contact the site. With `--identity <name>`, it reads that Claude;
+with no name, it reads the universal Claude. The JSON includes `local_mirror:
+true`, a `note` saying the same, `synced_at`, the local `path`, and each
+memory's `created_at`.
 
 Use those timestamps to answer "today" or another time-bound question. Describe
 the text as what the Claude remembered or believed, not as canonical proof of

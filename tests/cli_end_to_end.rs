@@ -1767,7 +1767,15 @@ fn a_visit_runs_a_turn_comes_home_and_writes_a_private_account() {
         String::from_utf8_lossy(&local.stderr)
     );
     let local: serde_json::Value = serde_json::from_str(stdout(&local).trim()).unwrap();
-    assert_eq!(local["local_only"], true);
+    assert_eq!(local["local_mirror"], true);
+    assert!(local.get("local_only").is_none());
+    // The note is what a Claude repeats to its person: the site holds the
+    // canonical copy, this file mirrors it.
+    let note = local["note"].as_str().unwrap();
+    assert!(
+        note.contains("mirror") && note.contains("site holds the canonical copy"),
+        "{note}"
+    );
     assert_eq!(local["identity_name"], "Pip");
     assert_eq!(local["memories"][0]["text"], "I found the chalk.");
     assert_eq!(

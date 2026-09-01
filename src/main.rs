@@ -15,6 +15,7 @@ use daycare_runner::homecoming;
 use daycare_runner::identity::{
     project_root, token_account, Identities, Identity, IdentityKind, Selector,
 };
+use daycare_runner::keep_awake::{KeepAwake, HOLD_MESSAGE};
 use daycare_runner::keychain::{default_store, FileTokenStore, TokenStore};
 use daycare_runner::launch::{
     ambient_pulse_turn_prompt, is_homecoming_tool, match_prep_prompt, match_turn_prompt,
@@ -181,7 +182,8 @@ enum Commands {
         #[command(subcommand)]
         action: SkillAction,
     },
-    /// Read the local, offline copy of a Claude's Daycare memories.
+    /// Read this machine's offline mirror of a Claude's Daycare memories. The
+    /// site holds the canonical copy; the mirror is synced at every homecoming.
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
@@ -202,7 +204,8 @@ enum SkillAction {
 
 #[derive(Subcommand, Debug)]
 enum MemoryAction {
-    /// List the last complete memory snapshot synced at homecoming. No network.
+    /// List the memories in the local mirror: a copy of what the Daycare site
+    /// stores for this Claude, taken at its last homecoming. No network.
     List {
         #[command(flatten)]
         which: Which,
@@ -1865,6 +1868,8 @@ fn visit_command(
             // visit died before it ever polled. `setsid` makes it a session
             // leader with no controlling terminal, so only the machine sleeping
             // or the user logging out ends it, as the message below promises.
+            // The child then holds the Mac out of idle sleep for the visit's
+            // lifetime (`KeepAwake` in `run_visit`); a closed lid still sleeps.
             #[cfg(unix)]
             unsafe {
                 use std::os::unix::process::CommandExt;
@@ -1939,7 +1944,10 @@ fn visit_command(
                         "  recall: daycare-runner visit recall --visit {}",
                         record.visit_id
                     );
-                    println!("\nThe visit ends if this machine sleeps or you log out.");
+                    println!(
+                        "\nThe runner keeps this Mac from idle sleep until the visit comes home."
+                    );
+                    println!("A closed laptop lid or logging out still ends it.");
                 },
             );
             Ok(())
@@ -2264,6 +2272,12 @@ fn run_visit(
     let identities = Identities::load(layout)?;
     let active = activate(layout, store, &config, &identities, &record.identity_id)?;
     let mut consecutive_poll_errors = 0u32;
+    // Held for the whole visit, homecoming included: the guard lives until this
+    // function returns, and `-w` releases it if the runner dies first.
+    let _keep_awake = KeepAwake::for_this_visit();
+    if _keep_awake.is_some() {
+        out.say(format!("{}: {HOLD_MESSAGE}", active.identity.name));
+    }
 
     if record.homecoming_state == HomecomingState::AwaitingOutcome {
         return finish_homecoming(
@@ -3261,7 +3275,13 @@ fn skill_command(action: SkillAction, out: Out) -> Result<()> {
     }
 }
 
-/// Read only the snapshot already on this machine. This command deliberately
+/// What the local file is, in the words a Claude will repeat to its person.
+/// An earlier `local_only: true` was read as "stored on this machine only",
+/// which is false: the site holds these memories; this file mirrors them.
+const MIRROR_NOTE: &str = "This file is an offline mirror of the memories the Daycare site \
+stores for this Claude, copied at its last homecoming. The site holds the canonical copy.";
+
+/// Read only the mirror already on this machine. This command deliberately
 /// does not load config, credentials, or a platform client: the Q10 promise is
 /// that an ordinary Claude can remember a visit with the site unavailable.
 fn memory_command(layout: &Layout, action: MemoryAction, out: Out) -> Result<()> {
@@ -3281,7 +3301,8 @@ fn memory_command(layout: &Layout, action: MemoryAction, out: Out) -> Result<()>
             out.emit(
                 json!({
                     "ok": true,
-                    "local_only": true,
+                    "local_mirror": true,
+                    "note": MIRROR_NOTE,
                     "path": &path,
                     "identity_id": &mirror.identity_id,
                     "identity_name": &mirror.identity_name,
@@ -3290,10 +3311,11 @@ fn memory_command(layout: &Layout, action: MemoryAction, out: Out) -> Result<()>
                 }),
                 || {
                     println!(
-                        "{} — local copy synced {}",
+                        "{} — local mirror synced {}",
                         mirror.identity_name, mirror.synced_at
                     );
-                    println!("source: {}", path.display());
+                    println!("mirror: {}", path.display());
+                    println!("{MIRROR_NOTE}");
                     if mirror.memories.is_empty() {
                         println!("No saved memories in this snapshot.");
                     } else {

@@ -1399,6 +1399,158 @@ mod tests {
     }
 
     #[test]
+    fn a_four_hour_wall_ends_the_visit_on_the_hour_and_not_a_second_before() {
+        // The overnight shape: `--budget 4h`, nothing else named. `or_default`
+        // fills the other fields but must leave the explicit wall binding.
+        let budget = Budget {
+            wall_clock_secs: Some(4 * 3600),
+            ..Budget::default()
+        }
+        .or_default();
+        assert_eq!(budget.wall_clock_secs, Some(4 * 3600));
+        assert_eq!(budget.turns, Some(SAFETY_TURNS));
+
+        let mut ledger = Ledger::default();
+        for _ in 0..40 {
+            ledger.record_turn(true, Some(&usage(2_000, 800, 0.05)));
+        }
+        assert_eq!(
+            ledger.should_end(&budget, Duration::from_secs(4 * 3600 - 1)),
+            None
+        );
+        let reason = ledger
+            .should_end(&budget, Duration::from_secs(4 * 3600))
+            .expect("the wall ends it");
+        assert_eq!(reason, LocalEndReason::BudgetExpired);
+        assert_eq!(reason.to_wire(), VisitEndReason::BudgetExhausted);
+        assert_eq!(reason.explain(), "the visit spent everything it was given");
+    }
+
+    #[test]
+    fn an_unbounded_visit_hits_the_twelve_hour_safety_wall() {
+        // No budget named at all: the safety backstops are the only limits, so
+        // an overnight visit nobody watches still ends by morning.
+        let budget = Budget::default().or_default();
+        assert_eq!(budget.wall_clock_secs, Some(12 * 3600));
+        assert_eq!(SAFETY_WALL_CLOCK.as_secs(), 12 * 3600);
+
+        let mut ledger = Ledger::default();
+        ledger.record_turn(true, Some(&usage(1_000, 500, 0.02)));
+        assert_eq!(
+            ledger.should_end(&budget, Duration::from_secs(12 * 3600 - 1)),
+            None
+        );
+        assert_eq!(
+            ledger.should_end(&budget, Duration::from_secs(12 * 3600)),
+            Some(LocalEndReason::BudgetExpired)
+        );
+        // A longer explicit wall is still capped by nothing but itself: the
+        // safety wall only fills a field the user left empty.
+        let long = Budget {
+            wall_clock_secs: Some(16 * 3600),
+            ..Budget::default()
+        }
+        .or_default();
+        assert_eq!(long.wall_clock_secs, Some(16 * 3600));
+    }
+
+    /// The overnight block path, end to end, with a simulated clock: a limit
+    /// window whose reset is inside the max wait is slept through and play
+    /// resumes; a second block whose reset is past the max ends the visit
+    /// with `rate_limited`, which the hub shows as "your Claude account hit a
+    /// rate limit". No real time passes.
+    #[test]
+    fn a_long_visit_naps_through_one_block_and_ends_cleanly_on_a_far_one() {
+        let budget = Budget {
+            wall_clock_secs: Some(4 * 3600),
+            ..Budget::default()
+        }
+        .or_default();
+        let start: u64 = 1_788_400_000;
+        let mut ledger = Ledger::default();
+
+        // Hour one: healthy turns.
+        for _ in 0..6 {
+            ledger.record_turn(true, Some(&usage(2_000, 800, 0.05)));
+        }
+        let mut now = start + 3600;
+        let elapsed = |now: u64| Duration::from_secs(now - start);
+        assert_eq!(ledger.rate_limit_wait(now, &budget, elapsed(now)), None);
+        assert_eq!(ledger.should_end(&budget, elapsed(now)), None);
+
+        // A 429-shaped turn: rejected, reset 50 minutes out.
+        ledger.record_turn(false, Some(&limited_until(now as i64 + 3_000)));
+        let wait = ledger
+            .rate_limit_wait(now, &budget, elapsed(now))
+            .expect("a near reset is worth waiting for");
+        assert_eq!(wait.as_secs(), 3_000 + RATE_LIMIT_RESUME_BUFFER_SECS);
+        assert!(ledger.rate_limited);
+
+        // The loop sleeps that long, then asks again: the block clears itself.
+        now += wait.as_secs();
+        assert_eq!(ledger.rate_limit_wait(now, &budget, elapsed(now)), None);
+        assert!(!ledger.rate_limited);
+        assert_eq!(ledger.should_end(&budget, elapsed(now)), None);
+        ledger.record_turn(true, Some(&usage(2_000, 800, 0.05)));
+        // The failed turn is remembered but forgiven by the success.
+        assert_eq!(ledger.turns_failed, 1);
+        assert_eq!(ledger.consecutive_failures, 0);
+
+        // The reset exactly at the max wait still qualifies for a nap.
+        ledger.record_turn(
+            false,
+            Some(&limited_until(now as i64 + RATE_LIMIT_MAX_WAIT_SECS as i64)),
+        );
+        let budget_all_night = Budget {
+            wall_clock_secs: Some(12 * 3600),
+            ..Budget::default()
+        };
+        assert!(ledger
+            .rate_limit_wait(now, &budget_all_night, elapsed(now))
+            .is_some());
+        // But the 4-hour visit would not survive it, so it does not wait.
+        assert_eq!(ledger.rate_limit_wait(now, &budget, elapsed(now)), None);
+        assert!(ledger.rate_limited);
+        let reason = ledger
+            .should_end(&budget, elapsed(now))
+            .expect("a block it cannot outwait ends the visit");
+        assert_eq!(reason, LocalEndReason::RateLimited);
+        assert_eq!(reason.as_str(), "rate_limited");
+        assert_eq!(reason.explain(), "your Claude account hit a rate limit");
+        assert_eq!(reason.to_wire(), VisitEndReason::Error);
+    }
+
+    #[test]
+    fn a_reset_one_second_past_the_max_wait_is_a_wall_not_a_nap() {
+        let budget = Budget::default().or_default();
+        let now: u64 = 1_788_400_000;
+        let mut at_max = Ledger::default();
+        at_max.record_turn(
+            false,
+            Some(&limited_until(now as i64 + RATE_LIMIT_MAX_WAIT_SECS as i64)),
+        );
+        assert_eq!(
+            at_max
+                .rate_limit_wait(now, &budget, Duration::ZERO)
+                .map(|wait| wait.as_secs()),
+            Some(RATE_LIMIT_MAX_WAIT_SECS + RATE_LIMIT_RESUME_BUFFER_SECS)
+        );
+
+        let mut past_max = Ledger::default();
+        past_max.record_turn(
+            false,
+            Some(&limited_until(
+                now as i64 + RATE_LIMIT_MAX_WAIT_SECS as i64 + 1,
+            )),
+        );
+        assert_eq!(past_max.rate_limit_wait(now, &budget, Duration::ZERO), None);
+        assert_eq!(
+            past_max.should_end(&budget, Duration::ZERO),
+            Some(LocalEndReason::RateLimited)
+        );
+    }
+
+    #[test]
     fn a_far_reset_or_a_silent_one_still_ends_the_visit() {
         let budget = Budget::default().or_default();
         let now: u64 = 1_787_729_400;

@@ -12,6 +12,7 @@ pub mod config;
 pub mod error;
 pub mod homecoming;
 pub mod identity;
+pub mod keep_awake;
 pub mod keychain;
 pub mod launch;
 pub mod memory;
