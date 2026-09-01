@@ -144,6 +144,13 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         command.env_remove(name);
     }
     command.env_remove(DEVICE_TOKEN_ENV);
+    // A visit is one Claude Code session resumed turn after turn, so its
+    // context only grows. Left to defaults it ran to ~583k at 100 turns and
+    // only compacted near the 1M ceiling at 200 (2026-09-01 checkpoint test).
+    // Josh: "it should compact at 250k context just like my default setting"
+    // — 25% of a 1M window, regardless of what the owner's own settings say.
+    command.env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "1000000");
+    command.env("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "25");
     // The only place the device token exists outside the keychain. The
     // homecoming turn needs it too: it saves the visit's memories through the
     // same MCP server the visit used. The day report has no server to reach.
