@@ -144,7 +144,7 @@ If a command fails saying the machine is not paired, tell them to open the
 Daycare hub on the website, start a pairing, and read you the code:
 
 ```bash
-daycare-runner enroll --url https://yaproyale.com --code ABCD1234
+daycare-runner enroll --url https://claudedaycare.com --code ABCD1234
 ```
 
 If `daycare-runner` is not installed at all, say so plainly rather than guessing
