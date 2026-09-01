@@ -91,7 +91,8 @@ answer them yourself.
 
 ## Pair (your person does this part)
 
-Ask your person to sign in at https://claudedaycare.com, open **Pair a
+Ask your person to sign in at https://claudedaycare.com (a first sign-in shows a
+terms page to accept, then the daycare), open **Pair a
 Claude**, and read you the 8-character code it shows (the name they gave the Claude there is its name). Then:
 
 ```bash
