@@ -2827,14 +2827,32 @@ fn settle_prior_visit_delivery(
                         settled = true;
                     }
                     None => {
+                        // No record here (a wiped home, a visit from another
+                        // install), but the server only queues a recall for a
+                        // visit it has already ended, so there is nothing left
+                        // to stop. Acknowledge it: a recall reported failed
+                        // still counts as pending and keeps refusing starts.
                         client.complete_command(
                             active.token(),
                             &command.id,
-                            &report(
-                                CompletionStatus::Failed,
-                                "visit_end belongs to a visit this machine has no record of".into(),
-                            ),
+                            &CompletionReport {
+                                status: CompletionStatus::Completed,
+                                claude_session_id: None,
+                                result: TurnResult {
+                                    result_text: Some(
+                                        "visit end acknowledged: this machine has no record of the visit and the server had already ended it".into(),
+                                    ),
+                                    duration_ms: Some(0),
+                                    usage: None,
+                                    error: None,
+                                    held: false,
+                                },
+                            },
                         )?;
+                        eprintln!(
+                            "answered a recall still waiting on visit {visit_id}, which this machine has no record of"
+                        );
+                        settled = true;
                     }
                 }
             }
