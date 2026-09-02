@@ -2647,8 +2647,10 @@ fn finish_homecoming(
                 }
                 // The report is offered, never owed: an empty reply means the
                 // owner reads the visit's recorded facts and nothing more.
+                // The report is the Claude's own words and nothing else: no
+                // meter preamble, which the owner read as jargon on every
+                // homecoming. The weekly figure stays in the local ledger.
                 if let Some(report) = non_empty(report) {
-                    let report = with_weekly_usage(report, &record);
                     match client.submit_day_report(active.token(), &record.visit_id, &report) {
                         Ok(()) => day_report_delivered = true,
                         Err(error) => eprintln!("could not deliver the day report: {error}"),
@@ -2711,12 +2713,16 @@ fn finish_homecoming(
             "private_account": record.private_account,
             "day_report": record.day_report,
             "day_report_delivered": record.day_report_delivered,
+            "weekly_usage": weekly_usage_line(&record),
             "memory_sync": record.memory_sync,
         }),
         || {
             println!("{} came home — {}.", record.identity_name, reason.explain());
             if let Some(report) = &record.day_report {
                 println!("\nHow it tells it:\n{report}");
+            }
+            if let Some(usage) = weekly_usage_line(&record) {
+                println!("\n{usage}");
             }
             if let Some(account) = &record.private_account {
                 println!("\n{account}");
@@ -3162,6 +3168,7 @@ fn write_day_report(
     let mut attempt_path;
     let mut outcome;
     let mut waited_for_reset = false;
+    let message = day_report_message(record.end_reason);
     loop {
         attempt_path = layout.turn_file(&format!(
             "{}-dayreport-attempt-{}",
@@ -3175,7 +3182,7 @@ fn write_day_report(
             mode: SessionMode::Resume {
                 session_id: session_id.to_string(),
             },
-            message: DAY_REPORT_MESSAGE,
+            message: &message,
             device_token: active.token(),
             archive_path: &attempt_path,
             timeout,
@@ -3230,19 +3237,35 @@ fn clip_day_report(report: &str) -> String {
     report.chars().take(DAY_REPORT_MAX_CHARS).collect()
 }
 
-fn with_weekly_usage(report: String, record: &VisitRecord) -> String {
-    let Some(share) = record.ledger.weekly_share_used() else {
-        return report;
-    };
+/// The owner's meter reading for this visit, as one plain sentence — printed
+/// beside the day report on the machine, never written into it. The report is
+/// the Claude's own words and is shown verbatim on the hub, the homecoming
+/// card and the public landing; a paragraph about "the selected weekly
+/// account meter" led every one of those for a while.
+fn weekly_usage_line(record: &VisitRecord) -> Option<String> {
+    let share = record.ledger.weekly_share_used()?;
     let percent = share * 100.0;
     let displayed = if (percent - percent.round()).abs() < 0.05 {
         format!("{:.0}", percent)
     } else {
         format!("{percent:.1}")
     };
-    clip_day_report(&format!(
-        "Usage guard: your selected weekly account meter moved by {displayed} percentage points while this visit was running. This whole-point reading can include other Claude activity.\n\n{report}"
+    Some(format!(
+        "About {displayed}% of the weekly allowance was used while this visit ran (other Claude activity on the account counts too)."
     ))
+}
+
+/// The day-report prompt, with the visit's own stop reason attached so the
+/// Claude states it instead of guessing ("only one turn before time ran out"
+/// was written about a visit the site ended because the table was abandoned).
+fn day_report_message(end_reason: Option<LocalEndReason>) -> String {
+    match end_reason {
+        Some(reason) => format!(
+            "{DAY_REPORT_MESSAGE} This visit ended because {} — state that, do not guess why it ended.",
+            reason.explain()
+        ),
+        None => DAY_REPORT_MESSAGE.to_string(),
+    }
 }
 
 /// Follows the private diary in the same session, so the match facts the
@@ -3466,37 +3489,106 @@ fn skill_command(action: SkillAction, out: Out) -> Result<()> {
                 .map(|library| home.join(library).join("SKILL.md"))
                 .collect();
 
-            // Every destination is checked before any is written, so a refusal
+            // Every destination is read before any is written, so a refusal
             // leaves nothing half-installed and the two libraries never drift
             // into holding different versions of the same skill.
+            //
+            // Re-running is the normal way to upgrade, so an existing copy of
+            // OUR skill is replaced (with a .bak of the edited bytes), and a
+            // current copy is left alone. Only a file that is not Daycare's
+            // refuses — and the refusal does not coach an agent into --force;
+            // that flag is for a person who has looked at the file.
+            let existing: Vec<Option<String>> = paths
+                .iter()
+                .map(|path| match std::fs::read_to_string(path) {
+                    Ok(contents) => Ok(Some(contents)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(error) => Err(Error::new(format!(
+                        "could not read {}: {error}",
+                        path.display()
+                    ))),
+                })
+                .collect::<Result<_>>()?;
+
+            if existing
+                .iter()
+                .all(|contents| contents.as_deref() == Some(SKILL_MARKDOWN))
+            {
+                out.emit(
+                    json!({ "ok": true, "paths": paths, "changed": false }),
+                    || {
+                        println!("Daycare skill already installed and current.");
+                    },
+                );
+                return Ok(());
+            }
             if !force {
-                if let Some(existing) = paths.iter().find(|path| path.exists()) {
+                if let Some((path, _)) = paths
+                    .iter()
+                    .zip(&existing)
+                    .find(|(_, contents)| contents.as_deref().is_some_and(|c| !is_daycare_skill(c)))
+                {
                     return Err(Error::new(format!(
-                        "{} already exists; pass --force to replace it",
-                        existing.display()
+                        "{} holds a skill that is not Daycare's; leaving it alone (a person can re-run with --force)",
+                        path.display()
                     )));
                 }
             }
 
-            for path in &paths {
+            let mut backups = Vec::new();
+            for (path, contents) in paths.iter().zip(&existing) {
                 let dir = path.parent().expect("skill path always has a directory");
                 std::fs::create_dir_all(dir).map_err(|error| {
                     Error::new(format!("could not create {}: {error}", dir.display()))
                 })?;
+                if let Some(contents) = contents {
+                    if contents != SKILL_MARKDOWN {
+                        let backup = path.with_extension("md.bak");
+                        daycare_runner::paths::write_atomic(&backup, contents.as_bytes(), 0o644)?;
+                        backups.push(backup);
+                    }
+                }
                 daycare_runner::paths::write_atomic(path, SKILL_MARKDOWN.as_bytes(), 0o644)?;
             }
 
-            out.emit(json!({ "ok": true, "paths": paths }), || {
-                println!("Installed the Daycare skill:");
-                for path in &paths {
-                    println!("  {}", path.display());
-                }
-                println!("Nothing else in either directory was read or changed.");
-                println!("Start a new Claude Code session and say \"send my Claude to daycare\".");
-            });
+            let updated = existing.iter().any(Option::is_some);
+            out.emit(
+                json!({ "ok": true, "paths": paths, "changed": true, "backups": backups }),
+                || {
+                    println!(
+                        "{} the Daycare skill:",
+                        if updated { "Updated" } else { "Installed" }
+                    );
+                    for path in &paths {
+                        println!("  {}", path.display());
+                    }
+                    for backup in &backups {
+                        println!("  previous copy kept at {}", backup.display());
+                    }
+                    println!("Nothing else in either directory was read or changed.");
+                    if !updated {
+                        println!("Start a new Claude Code session and say \"send my Claude to daycare\".");
+                    }
+                },
+            );
             Ok(())
         }
     }
+}
+
+/// Ours, by the frontmatter name the skill file has always carried. An edited
+/// copy is still ours; a different skill that happens to live at the same path
+/// is not, and is never overwritten unasked.
+fn is_daycare_skill(contents: &str) -> bool {
+    let Some(rest) = contents.strip_prefix("---") else {
+        return false;
+    };
+    let Some(end) = rest.find("\n---") else {
+        return false;
+    };
+    rest[..end]
+        .lines()
+        .any(|line| line.trim() == "name: daycare")
 }
 
 /// What the local file is, in the words a Claude will repeat to its person.
@@ -4072,6 +4164,18 @@ mod tests {
         assert!(DAY_REPORT_MESSAGE.contains("An empty reply is fine"));
         assert!(DAY_REPORT_MESSAGE.contains("Do not call any tool"));
         assert!(!DAY_REPORT_MESSAGE.contains("daycare_memory_save"));
+    }
+
+    #[test]
+    fn the_day_report_prompt_states_the_stop_reason_instead_of_letting_claude_guess() {
+        let message = day_report_message(Some(LocalEndReason::ActivityEnded));
+        assert!(message.starts_with(DAY_REPORT_MESSAGE), "{message}");
+        assert!(
+            message.contains("This visit ended because what it went to do finished"),
+            "{message}"
+        );
+        assert!(message.contains("do not guess why it ended"), "{message}");
+        assert_eq!(day_report_message(None), DAY_REPORT_MESSAGE);
     }
 
     #[test]

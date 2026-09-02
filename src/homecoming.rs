@@ -65,7 +65,9 @@ pub fn render(layout: &Layout, record: &VisitRecord) -> Result<String> {
         let _ = writeln!(out, "Ended: {ended}");
     }
     if let Some(reason) = record.end_reason {
-        let _ = writeln!(out, "End reason: {reason:?}");
+        // The same sentence the owner reads on the site and at the runner's
+        // homecoming line, so the Claude cannot invent a fourth story.
+        let _ = writeln!(out, "End reason: {}", reason.explain());
     }
     match &record.instructions {
         Some(instructions) => {

@@ -81,6 +81,10 @@ struct CachedUtilization {
 struct CachedLimit {
     kind: String,
     group: String,
+    #[serde(default)]
+    percent: Option<f64>,
+    #[serde(default)]
+    resets_at: Option<String>,
     scope: Option<CachedScope>,
 }
 
@@ -201,6 +205,152 @@ fn parse_fresh_usage_screen(input: &[u8], requested_model: &str) -> Result<Fresh
     selected.cloned().ok_or_else(|| {
         Error::new("Claude /usage did not render an applicable weekly meter after refreshing")
     })
+}
+
+/// Anthropic's per-model usage endpoint is itself rate limited now and then.
+/// Claude's `/usage` then renders "Per-model breakdown unavailable (rate
+/// limited — try again in a moment)" after `Refreshing…` and never draws a
+/// `Current week` row, so the live parser cannot answer no matter how long
+/// the sampler waits. This is that screen, not a slow one.
+fn usage_screen_is_rate_limited(input: &[u8]) -> bool {
+    let screen = compact_terminal_text(input);
+    screen
+        .rsplit_once("refreshing")
+        .is_some_and(|(_, refreshed)| refreshed.contains("ratelimited"))
+}
+
+/// A weekly reading taken from Claude's own structured cache, used only when
+/// the live `/usage` refresh is rate limited. The selection rule is the live
+/// one: the `weekly_scoped` limit whose model matches the visit's model, else
+/// `weekly_all`. The 330 s freshness cutoff does not apply here — the cache
+/// is the best reading available — but a cache whose reset instant has
+/// already passed describes a window that no longer exists and is refused.
+struct CachedWeeklyReading {
+    snapshot: WeeklyUsageSnapshot,
+    fetched_at_ms: u64,
+}
+
+fn parse_cached_weekly_usage(
+    input: &[u8],
+    requested_model: &str,
+    now_ms: u64,
+) -> Result<CachedWeeklyReading> {
+    let cache: UsageCache = serde_json::from_slice(input)
+        .map_err(|error| Error::new(format!("Claude usage cache was not JSON: {error}")))?;
+    let fetched_at_ms = cache.cached_usage_utilization.fetched_at_ms;
+    let limits: Vec<CachedLimit> = cache
+        .cached_usage_utilization
+        .utilization
+        .limits
+        .into_iter()
+        .filter(|limit| limit.group == "weekly")
+        .collect();
+    let scoped: Vec<&CachedLimit> = limits
+        .iter()
+        .filter(|limit| limit.kind == "weekly_scoped")
+        .filter(|limit| {
+            limit
+                .scope
+                .as_ref()
+                .and_then(|scope| scope.model.as_ref())
+                .is_some_and(|model| {
+                    scope_matches_model(&compact_label(&model.display_name), requested_model)
+                })
+        })
+        .collect();
+    if scoped.len() > 1 {
+        return Err(Error::new(
+            "Claude's usage cache holds more than one applicable model-scoped weekly meter",
+        ));
+    }
+    let selected = match scoped.first() {
+        Some(limit) => *limit,
+        None => limits
+            .iter()
+            .find(|limit| limit.kind == "weekly_all")
+            .ok_or_else(|| Error::new("Claude's usage cache holds no weekly meter"))?,
+    };
+    let used_percentage = selected
+        .percent
+        .filter(|percent| percent.is_finite() && (0.0..=100.0).contains(percent))
+        .ok_or_else(|| Error::new("Claude's usage cache holds no valid weekly percentage"))?;
+    let resets_at_iso = selected
+        .resets_at
+        .as_deref()
+        .ok_or_else(|| Error::new("Claude's usage cache holds no weekly reset date"))?;
+    let (year, month, day) = parse_iso_date(resets_at_iso)
+        .ok_or_else(|| Error::new("Claude's usage cache holds an unreadable weekly reset date"))?;
+    let resets_at_secs = parse_iso_unix_secs(resets_at_iso)
+        .ok_or_else(|| Error::new("Claude's usage cache holds an unreadable weekly reset date"))?;
+    if resets_at_secs <= now_ms / 1000 {
+        return Err(Error::new(format!(
+            "Claude's cached weekly meter reset on {year}-{month:02}-{day:02}; refusing to guess at the new window"
+        )));
+    }
+    let scope = selected
+        .scope
+        .as_ref()
+        .and_then(|scope| scope.model.as_ref())
+        .map(|model| model.display_name.as_str())
+        .unwrap_or("account");
+    Ok(CachedWeeklyReading {
+        snapshot: WeeklyUsageSnapshot {
+            used_percentage,
+            resets_at: format!("live:{month}:{day}"),
+            meter_key: format!("{}:{scope}", selected.kind),
+        },
+        fetched_at_ms,
+    })
+}
+
+/// `YYYY-MM-DD` from the front of an ISO 8601 timestamp.
+fn parse_iso_date(value: &str) -> Option<(i64, u32, u32)> {
+    let mut parts = value.get(..10)?.split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some((year, month, day))
+}
+
+/// Unix seconds for an ISO 8601 timestamp such as
+/// `2026-09-02T06:59:59.742500+00:00` or `2026-09-02T06:59:59Z`. Handles the
+/// numeric offset forms Claude writes; fractional seconds are dropped.
+fn parse_iso_unix_secs(value: &str) -> Option<u64> {
+    let (year, month, day) = parse_iso_date(value)?;
+    let rest = value.get(10..)?;
+    let rest = rest.strip_prefix('T').or_else(|| rest.strip_prefix(' '))?;
+    let hour: i64 = rest.get(0..2)?.parse().ok()?;
+    let minute: i64 = rest.get(3..5)?.parse().ok()?;
+    let second: i64 = rest.get(6..8)?.parse().ok()?;
+    let tail = rest.get(8..)?;
+    let tail = match tail.find(|ch| ch == 'Z' || ch == '+' || ch == '-') {
+        Some(at) => &tail[at..],
+        None => "",
+    };
+    let offset_secs: i64 = match tail.chars().next() {
+        None | Some('Z') => 0,
+        Some(sign) => {
+            let sign = if sign == '-' { -1 } else { 1 };
+            let digits: String = tail[1..].chars().filter(char::is_ascii_digit).collect();
+            let hours: i64 = digits.get(0..2)?.parse().ok()?;
+            let minutes: i64 = digits.get(2..4).map_or(Some(0), |m| m.parse().ok())?;
+            sign * (hours * 3600 + minutes * 60)
+        }
+    };
+    // Howard Hinnant's days-from-civil.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let m = month as i64;
+    let d = day as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + hour * 3600 + minute * 60 + second - offset_secs;
+    u64::try_from(secs).ok()
 }
 
 fn parse_usage_percentage(reading: &str) -> Option<f64> {
@@ -480,6 +630,12 @@ fn sample_weekly_usage_once(
                 {
                     break Ok(snapshot);
                 }
+            } else if usage_screen_is_rate_limited(&screen) {
+                // Waiting cannot help: the live refresh will not draw a weekly
+                // row until Anthropic's limit lifts. Fall back to Claude's own
+                // cached reading at once instead of spending the timeout and
+                // two more attempts on the same screen.
+                break rate_limited_fallback(&cache, model, unix_millis());
             }
         }
         if child.0.try_wait()?.is_some() {
@@ -522,6 +678,19 @@ fn sample_weekly_usage_once(
         let _ = child.0.wait();
     }
     sample
+}
+
+fn rate_limited_fallback(cache: &[u8], model: &str, now_ms: u64) -> Result<WeeklyUsageSnapshot> {
+    let reading = parse_cached_weekly_usage(cache, model, now_ms).map_err(|error| {
+        Error::new(format!(
+            "Claude /usage is rate limited and its cached weekly reading is unusable: {error}"
+        ))
+    })?;
+    let age_minutes = now_ms.saturating_sub(reading.fetched_at_ms) / 60_000;
+    eprintln!(
+        "usage meter is rate limited; using Claude's cached reading from {age_minutes} minutes ago"
+    );
+    Ok(reading.snapshot)
 }
 
 fn configure_script_command(
@@ -700,6 +869,72 @@ mod tests {
             }
         );
         assert_eq!(outage.missed(), MeterMiss::EndVisit);
+    }
+
+    /// Stripped from the Otto capture on cloud-agents
+    /// (usage-1058982-1788311972567916842.log, 2026-09-02T01:19:32Z): the
+    /// pre-refresh screen carries a weekly row, the refresh draws only the
+    /// rate-limited notice.
+    const RATE_LIMITED_SCREEN: &[u8] = b"Current week (all models)\r\n\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88 39% used\r\nResets Sep 2 at 3am\r\nCurrent week (Fable)\r\n\xe2\x96\x88\xe2\x96\x88 73% used\r\nResets Sep 2 at 3am\r\n\x1b[2JRefreshing\xe2\x80\xa6\r\n\x1b[2JPer-model breakdown unavailable (rate limited \xe2\x80\x94 try again in a moment) \xc2\xb7 r to retry \xc2\xb7 Esc to cancel\r\n";
+
+    const OTTO_CACHE: &[u8] = br#"{"cachedUsageUtilization":{"fetchedAtMs":1788330000000,"utilization":{"limits":[{"kind":"session","group":"session","percent":4,"resets_at":"2026-09-02T11:09:59.742472+00:00","scope":null,"is_active":false},{"kind":"weekly_all","group":"weekly","percent":39,"resets_at":"2026-09-02T06:59:59.742500+00:00","scope":null,"is_active":false},{"kind":"weekly_scoped","group":"weekly","percent":73,"resets_at":"2026-09-02T06:59:59.742772+00:00","scope":{"model":{"id":null,"display_name":"Fable"}},"is_active":true}]}}}"#;
+
+    #[test]
+    fn a_rate_limited_refresh_falls_back_to_claudes_cached_weekly_reading() {
+        // The live parser cannot answer: no weekly row after Refreshing.
+        assert!(parse_fresh_usage_screen(RATE_LIMITED_SCREEN, "sonnet").is_err());
+        assert!(usage_screen_is_rate_limited(RATE_LIMITED_SCREEN));
+        // A slow screen is not a rate-limited one.
+        assert!(!usage_screen_is_rate_limited(
+            b"Current week (all models) 39% used\r\nRefreshing..."
+        ));
+
+        // 495 s after the cache was written, before the window resets.
+        let now_ms = 1788330000000 + 495_000;
+        let snapshot = rate_limited_fallback(OTTO_CACHE, "sonnet", now_ms).unwrap();
+        assert_eq!(
+            snapshot,
+            WeeklyUsageSnapshot {
+                used_percentage: 73.0,
+                resets_at: "live:9:2".to_string(),
+                meter_key: "weekly_scoped:Fable".to_string(),
+            }
+        );
+        // Opus has no scoped meter in this cache: the account meter answers.
+        let account = rate_limited_fallback(OTTO_CACHE, "opus", now_ms).unwrap();
+        assert_eq!(account.used_percentage, 39.0);
+        assert_eq!(account.meter_key, "weekly_all:account");
+        assert_eq!(account.resets_at, "live:9:2");
+        // Far older than the live path's 330 s cutoff is still accepted.
+        assert!(rate_limited_fallback(OTTO_CACHE, "sonnet", now_ms + 30 * 60 * 1000).is_ok());
+    }
+
+    #[test]
+    fn a_cache_whose_window_already_reset_is_refused_even_when_rate_limited() {
+        // 2026-09-02T07:00:00Z is one tick past the cached resets_at.
+        let after_reset_ms = parse_iso_unix_secs("2026-09-02T07:00:00Z").unwrap() * 1000;
+        let error = rate_limited_fallback(OTTO_CACHE, "sonnet", after_reset_ms).unwrap_err();
+        assert!(error.to_string().contains("rate limited"), "{error}");
+        assert!(error.to_string().contains("reset on 2026-09-02"), "{error}");
+        // The same cache two seconds earlier still answers.
+        assert!(rate_limited_fallback(OTTO_CACHE, "sonnet", after_reset_ms - 2000).is_ok());
+    }
+
+    #[test]
+    fn reads_claudes_iso_reset_instants() {
+        assert_eq!(
+            parse_iso_unix_secs("2026-09-02T06:59:59.742500+00:00"),
+            Some(1_788_332_399)
+        );
+        assert_eq!(
+            parse_iso_unix_secs("2026-09-02T06:59:59Z"),
+            Some(1_788_332_399)
+        );
+        assert_eq!(
+            parse_iso_unix_secs("2026-09-02T01:59:59-05:00"),
+            Some(1_788_332_399)
+        );
+        assert_eq!(parse_iso_unix_secs("later"), None);
     }
 
     #[test]

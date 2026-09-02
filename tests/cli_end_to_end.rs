@@ -1683,12 +1683,18 @@ fn a_visit_runs_a_turn_comes_home_and_writes_a_private_account() {
     assert_eq!(result["visit_id"], "visit-1");
     assert_eq!(result["end_reason"], "budget_expired");
     assert_eq!(result["turns"], 1);
+    // The meter reading rides beside the report, never inside it: the report
+    // is the Claude's own words and is shown verbatim on the hub and landing.
     assert!(
-        result["day_report"]
+        !result["day_report"]
             .as_str()
             .unwrap()
-            .contains("your selected weekly account meter moved by 0 percentage points"),
+            .contains("Usage guard"),
         "{result}"
+    );
+    assert_eq!(
+        result["weekly_usage"],
+        "About 0% of the weekly allowance was used while this visit ran (other Claude activity on the account counts too)."
     );
 
     // The visit was reported ended to the platform, in the platform's own
@@ -3473,7 +3479,8 @@ fn the_skill_installs_into_its_own_directory_and_touches_nothing_else() {
         "{\"theme\":\"dark\"}"
     );
 
-    // A second install refuses rather than silently overwriting.
+    // A second install is a no-op that says so: the README tells people to run
+    // it before every visit, and a refusal here taught agents to pass --force.
     let again = Command::new(BIN)
         .args(["skill", "install"])
         .env("DAYCARE_HOME", &install.home)
@@ -3482,14 +3489,50 @@ fn the_skill_installs_into_its_own_directory_and_touches_nothing_else() {
         .env("HOME", &fake_home)
         .output()
         .expect("run daycare-runner");
-    assert!(!again.status.success());
-    assert!(String::from_utf8_lossy(&again.stderr).contains("--force"));
+    assert!(
+        again.status.success(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert!(stdout(&again).contains("already installed and current"));
+    assert!(!claude_skill.with_extension("md.bak").exists());
 
-    // A refusal caused by ONE library must not have written the other. Wiping
-    // ~/.claude and leaving ~/.agents in place, an install that checked each
-    // destination as it went would recreate the first file before hitting the
-    // second and refusing — leaving the user half-installed and none the wiser.
+    // An edited copy of OUR skill is upgraded, with the edited bytes kept.
+    let installed = std::fs::read_to_string(&claude_skill).unwrap();
+    std::fs::write(&claude_skill, format!("{installed}\nMy own note.\n")).unwrap();
+    let upgraded = Command::new(BIN)
+        .args(["skill", "install"])
+        .env("DAYCARE_HOME", &install.home)
+        .env("DAYCARE_TOKEN_FILE", &install.token_file)
+        .env("DAYCARE_SKIP_CLAUDE_PREFLIGHT", "1")
+        .env("HOME", &fake_home)
+        .output()
+        .expect("run daycare-runner");
+    assert!(
+        upgraded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&upgraded.stderr)
+    );
+    assert!(stdout(&upgraded).contains("Updated the Daycare skill"));
+    assert_eq!(std::fs::read_to_string(&claude_skill).unwrap(), installed);
+    assert_eq!(
+        std::fs::read_to_string(claude_skill.with_extension("md.bak")).unwrap(),
+        format!("{installed}\nMy own note.\n")
+    );
+
+    // A skill that is not Daycare's at that path is never overwritten unasked,
+    // and the refusal does not coach an agent into forcing.
+    std::fs::write(
+        &agents_skill,
+        "---\nname: someone-elses\n---\nTheir skill.\n",
+    )
+    .unwrap();
     std::fs::remove_file(&claude_skill).unwrap();
+    // A refusal caused by ONE library must not have written the other. Wiping
+    // ~/.claude and leaving a foreign ~/.agents in place, an install that
+    // checked each destination as it went would recreate the first file
+    // before hitting the second and refusing — leaving the user half-installed
+    // and none the wiser.
     let partial = Command::new(BIN)
         .args(["skill", "install"])
         .env("DAYCARE_HOME", &install.home)
@@ -3499,11 +3542,31 @@ fn the_skill_installs_into_its_own_directory_and_touches_nothing_else() {
         .output()
         .expect("run daycare-runner");
     assert!(!partial.status.success());
+    let refusal = String::from_utf8_lossy(&partial.stderr);
+    assert!(refusal.contains("not Daycare's"), "{refusal}");
+    assert!(!refusal.contains("pass --force"), "{refusal}");
     assert!(
         !claude_skill.exists(),
         "a refused install still wrote {}",
         claude_skill.display()
     );
+    assert_eq!(
+        std::fs::read_to_string(&agents_skill).unwrap(),
+        "---\nname: someone-elses\n---\nTheir skill.\n"
+    );
+
+    // A person who has looked at the file may replace it.
+    let forced = Command::new(BIN)
+        .args(["skill", "install", "--force"])
+        .env("DAYCARE_HOME", &install.home)
+        .env("DAYCARE_TOKEN_FILE", &install.token_file)
+        .env("DAYCARE_SKIP_CLAUDE_PREFLIGHT", "1")
+        .env("HOME", &fake_home)
+        .output()
+        .expect("run daycare-runner");
+    assert!(forced.status.success());
+    assert_eq!(std::fs::read_to_string(&agents_skill).unwrap(), installed);
+    assert_eq!(std::fs::read_to_string(&claude_skill).unwrap(), installed);
 }
 
 #[test]

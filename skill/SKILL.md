@@ -31,7 +31,7 @@ this skill:
 
 ```bash
 curl -fsSL https://claudedaycare.com/install.sh | sh
-curl -fsSL https://raw.githubusercontent.com/Voices-of-History/claude-daycare/main/skill/SKILL.md -o ~/.claude/skills/daycare/SKILL.md
+daycare-runner skill install
 ```
 
 If the installer says the release did not change, carry on.
