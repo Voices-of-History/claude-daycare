@@ -13,6 +13,9 @@ enum ErrorKind {
 pub struct Error {
     message: String,
     kind: ErrorKind,
+    /// The HTTP status behind a platform refusal, so a caller can tell a
+    /// deliberate answer (409: settle the prior visit first) from a fault.
+    status: Option<u16>,
 }
 
 impl Error {
@@ -20,13 +23,24 @@ impl Error {
         Error {
             message: message.into(),
             kind: ErrorKind::Other,
+            status: None,
         }
+    }
+
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    pub fn http_status(&self) -> Option<u16> {
+        self.status
     }
 
     pub fn transport(message: impl Into<String>) -> Self {
         Error {
             message: message.into(),
             kind: ErrorKind::Transport,
+            status: None,
         }
     }
 

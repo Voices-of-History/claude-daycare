@@ -519,6 +519,57 @@ impl Ledger {
     }
 }
 
+/// The one or two sentences every visit turn ends with, so Claude knows what
+/// is left before choosing what to start. Three test visits on 2026-09-01 each
+/// opened a Debate League match the visit could not finish, and none of the
+/// three knew how many turns remained.
+///
+/// Turns are stated only when the person bounded the visit by turns: the
+/// safety cap is a runaway guard, and quoting "197 turns left" to a visit the
+/// weekly meter will stop first would invite exactly the over-commitment this
+/// exists to prevent. The allowance is stated as the meter reads it, in
+/// percentage points of the person's weekly Claude cap. Minutes appear only
+/// under an explicit time budget, for the same reason as turns.
+pub fn budget_check(budget: &Budget, ledger: &Ledger, elapsed: Duration) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(limit) = budget.turns.filter(|limit| *limit != SAFETY_TURNS) {
+        let left = limit.saturating_sub(ledger.turns_used);
+        parts.push(match left {
+            0 | 1 => "this is the last turn of this visit".to_string(),
+            2 => "2 turns left in this visit, counting this one; finish or close out what is open, start nothing new".to_string(),
+            n => format!("{n} turns left in this visit, counting this one"),
+        });
+    }
+    if let Some(share) = budget.weekly_share {
+        let granted = share * 100.0;
+        parts.push(match ledger.weekly_share_used() {
+            Some(used) => {
+                let left = (granted - used * 100.0).max(0.0);
+                format!(
+                    "this visit may spend {granted:.1}% of your person's weekly Claude cap and {left:.1}% of that remains"
+                )
+            }
+            None => format!(
+                "this visit may spend {granted:.1}% of your person's weekly Claude cap; the meter has not reported spending yet"
+            ),
+        });
+    }
+    if let Some(limit) = budget
+        .wall_clock_secs
+        .filter(|limit| *limit != SAFETY_WALL_CLOCK.as_secs())
+    {
+        let left = limit.saturating_sub(elapsed.as_secs());
+        parts.push(format!("about {} minutes of time left", left.div_ceil(60)));
+    }
+    if parts.is_empty() {
+        return "Budget check: this visit has no turn, allowance, or time bound; the visit ends when your person recalls you.".to_string();
+    }
+    let mut text = String::from("Budget check: ");
+    text.push_str(&parts.join("; "));
+    text.push('.');
+    text
+}
+
 fn same_weekly_reset_window(left: &str, right: &str) -> bool {
     if left == right {
         return true;
@@ -1916,5 +1967,92 @@ mod tests {
         assert!(!recall_requested(&layout, "v-2"));
         clear_recall(&layout, "v-1");
         assert!(!recall_requested(&layout, "v-1"));
+    }
+    fn bounded(turns: Option<u32>, weekly_share: Option<f64>, secs: Option<u64>) -> Budget {
+        Budget {
+            turns,
+            weekly_share,
+            wall_clock_secs: secs,
+            ..Budget::default()
+        }
+        .or_default()
+    }
+
+    #[test]
+    fn budget_check_states_turns_left_for_a_turn_bounded_visit() {
+        let mut ledger = Ledger::default();
+        ledger.turns_used = 5;
+        ledger.start_weekly_meter(40.0, "Sep 3, 9am".into(), "seven_day".into());
+        ledger
+            .record_weekly_meter(40.6, "Sep 3, 9am".into(), "seven_day".into())
+            .unwrap();
+        let text = budget_check(&bounded(Some(8), None, None), &ledger, Duration::ZERO);
+        assert_eq!(
+            text,
+            "Budget check: 3 turns left in this visit, counting this one; this visit may spend 2.0% of your person's weekly Claude cap and 1.4% of that remains."
+        );
+    }
+
+    #[test]
+    fn budget_check_omits_the_safety_turn_cap_for_an_allowance_only_visit() {
+        let mut ledger = Ledger::default();
+        ledger.turns_used = 3;
+        ledger.start_weekly_meter(10.0, "Sep 3, 9am".into(), "seven_day".into());
+        let text = budget_check(&bounded(None, Some(0.05), None), &ledger, Duration::ZERO);
+        assert_eq!(
+            text,
+            "Budget check: this visit may spend 5.0% of your person's weekly Claude cap and 5.0% of that remains."
+        );
+        assert!(!text.contains("turns left"), "{text}");
+
+        let unread = budget_check(
+            &bounded(None, Some(0.02), None),
+            &Ledger::default(),
+            Duration::ZERO,
+        );
+        assert_eq!(
+            unread,
+            "Budget check: this visit may spend 2.0% of your person's weekly Claude cap; the meter has not reported spending yet."
+        );
+    }
+
+    #[test]
+    fn budget_check_names_the_last_turn_and_the_one_before_it() {
+        let mut ledger = Ledger::default();
+        ledger.turns_used = 2;
+        let last = budget_check(&bounded(Some(3), None, None), &ledger, Duration::ZERO);
+        assert!(
+            last.starts_with("Budget check: this is the last turn of this visit;"),
+            "{last}"
+        );
+        ledger.turns_used = 1;
+        let penultimate = budget_check(&bounded(Some(3), None, None), &ledger, Duration::ZERO);
+        assert!(
+            penultimate.starts_with("Budget check: 2 turns left in this visit, counting this one; finish or close out what is open, start nothing new;"),
+            "{penultimate}"
+        );
+        // Over-spent by a failed final turn still reads as the last turn, never a negative.
+        ledger.turns_used = 4;
+        assert!(
+            budget_check(&bounded(Some(3), None, None), &ledger, Duration::ZERO)
+                .contains("this is the last turn")
+        );
+    }
+
+    #[test]
+    fn budget_check_states_minutes_only_under_an_explicit_time_budget() {
+        let ledger = Ledger::default();
+        let timed = budget_check(
+            &bounded(None, Some(0.02), Some(30 * 60)),
+            &ledger,
+            Duration::from_secs(18 * 60 + 1),
+        );
+        assert!(timed.ends_with("about 12 minutes of time left."), "{timed}");
+        let untimed = budget_check(
+            &bounded(None, Some(0.02), None),
+            &ledger,
+            Duration::from_secs(600),
+        );
+        assert!(!untimed.contains("minutes"), "{untimed}");
     }
 }

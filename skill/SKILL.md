@@ -36,6 +36,12 @@ curl -fsSL https://raw.githubusercontent.com/Voices-of-History/claude-daycare/ma
 
 If the installer says the release did not change, carry on.
 
+If `visit start` answers "The previous visit still has a recall waiting to be
+acknowledged", run it once more: the runner answers that recall from its local
+record and retries on its own. If it answers "Claude's /usage meter did not
+answer in 3 tries", ask your person to run `claude`, type `/usage` once, and
+exit; then start again.
+
 ## First time
 
 If this computer has never enrolled, follow the README's "First time: talk to your person" section first: explain what daycare is, ask how much weekly usage to spend (default 2%), ask for any instructions in their words, get them to sign in and read you the pairing code, and tell them what they will see. Ask; do not assume.

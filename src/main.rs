@@ -37,9 +37,9 @@ use daycare_runner::turn::{
     run_turn, TurnOutcome, TurnPurpose, TurnRequest, DEFAULT_TIMEOUT_SECS,
     PRE_INPUT_BROKEN_PIPE_ERROR,
 };
-use daycare_runner::usage_meter::sample_weekly_usage;
+use daycare_runner::usage_meter::{sample_weekly_usage, MeterMiss, MeterOutage};
 use daycare_runner::visit::{
-    clear_recall, parse_duration, process_alive, rate_limit_blocks, recall_requested,
+    budget_check, clear_recall, parse_duration, process_alive, rate_limit_blocks, recall_requested,
     request_recall, weekly_share_from_percent, Budget, HomecomingState, LocalEndReason, MemorySync,
     MemorySyncState, VisitRecord, RATE_LIMIT_MAX_WAIT_SECS, RATE_LIMIT_RESUME_BUFFER_SECS,
 };
@@ -52,7 +52,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MATCH_PREP_TIMEOUT: Duration = Duration::from_secs(180);
 const MAX_PREP_BRIEFING_CHARS: usize = 6_000;
@@ -1426,6 +1426,15 @@ daycare_identity_get reports how much of it is available; pace the visit by \
 that authoritative value.",
                 );
             }
+            // Every visit turn ends with what is left, as this runner counts
+            // it: it is the primary budget enforcer, so its numbers are the
+            // ones the visit will actually stop on.
+            message.push_str("\n\n");
+            message.push_str(&budget_check(
+                &visit.budget,
+                &visit.ledger,
+                visit.wall_elapsed(unix_now()),
+            ));
             message
         }
         None => base,
@@ -1549,6 +1558,22 @@ fn run_loop(
     }
     out.say("stopped");
     Ok(())
+}
+
+/// "4 minutes ago", or a plain fallback when this process never saw a reading
+/// (an adopted record carries the reading itself but not its clock).
+fn describe_reading_age(last_answer: Option<Instant>) -> String {
+    match last_answer {
+        Some(at) => {
+            let minutes = at.elapsed().as_secs() / 60;
+            match minutes {
+                0 => "less than a minute ago".to_string(),
+                1 => "1 minute ago".to_string(),
+                n => format!("{n} minutes ago"),
+            }
+        }
+        None => "the visit record".to_string(),
+    }
 }
 
 fn jitter(interval: Duration) -> Duration {
@@ -1684,7 +1709,22 @@ fn visit_command(
             };
 
             let client = PlatformClient::new(&active.platform_url);
-            let started = client.start_visit(active.token(), &budget, instructions.as_deref())?;
+            let started = match client.start_visit(active.token(), &budget, instructions.as_deref())
+            {
+                Ok(started) => started,
+                // The platform refuses a new generation while the last visit's
+                // recall sits unanswered. If this machine's record says that
+                // visit is over, the recall is answered from it and the start
+                // is tried once more; otherwise the platform's sentence stands.
+                Err(error) if error.http_status() == Some(409) => {
+                    if settle_prior_visit_delivery(layout, &client, &active)? {
+                        client.start_visit(active.token(), &budget, instructions.as_deref())?
+                    } else {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            };
             let local_record = VisitRecord::load(layout, &started.visit_id).ok();
             let trusted_local_record = local_record.as_ref().is_some_and(|record| {
                 record.is_active()
@@ -2280,6 +2320,10 @@ fn run_visit(
     }
 
     if record.homecoming_state == HomecomingState::AwaitingOutcome {
+        // An end the server never acknowledged (its answer was a refusal or
+        // a fault) is reported again here; one it did acknowledge left its
+        // canonical reason on the record, and reporting it twice is inert.
+        let must_report_end = record.canonical_end_reason.is_none();
         return finish_homecoming(
             layout,
             &active,
@@ -2287,13 +2331,14 @@ fn run_visit(
             timeout,
             interval,
             record,
-            false,
+            must_report_end,
             recovery_lock,
             out,
         );
     }
     // Old active records can be adopted after an upgrade. Establish a real
     // start line before launching another model turn; never infer zero usage.
+    let mut last_meter_answer: Option<Instant> = None;
     if record.budget.weekly_share.is_some() && record.ledger.weekly_meter_first_pct.is_none() {
         let sample = sample_weekly_usage(
             claude_bin,
@@ -2307,7 +2352,11 @@ fn run_visit(
             sample.meter_key,
         );
         record.save(layout)?;
+        last_meter_answer = Some(Instant::now());
     }
+    // A meter that goes quiet mid-visit is not a reason to send Claude home:
+    // the last good reading stands until the meter has missed three rounds.
+    let mut meter_outage = MeterOutage::default();
     out.say(format!(
         "{} is at daycare (visit {})",
         active.identity.name, record.visit_id
@@ -2402,6 +2451,8 @@ fn run_visit(
                 layout.root(),
             ) {
                 Ok(sample) => {
+                    // A reset window or a changed meter is a real verdict, not
+                    // a flake: the percentage control would become fiction.
                     if let Err(error) = record.ledger.record_weekly_meter(
                         sample.used_percentage,
                         sample.resets_at,
@@ -2410,11 +2461,32 @@ fn run_visit(
                         eprintln!("weekly usage meter stopped the visit: {error}");
                         break (LocalEndReason::WeeklyMeterUnavailable, None);
                     }
+                    meter_outage.answered();
+                    last_meter_answer = Some(Instant::now());
                 }
-                Err(error) => {
-                    eprintln!("weekly usage meter stopped the visit: {error}");
-                    break (LocalEndReason::WeeklyMeterUnavailable, None);
-                }
+                Err(error) => match meter_outage.missed() {
+                    MeterMiss::KeepLastReading { consecutive_misses } => {
+                        eprintln!(
+                            "usage meter did not answer; using the reading from {} ({error})",
+                            describe_reading_age(last_meter_answer)
+                        );
+                        if consecutive_misses > 1 {
+                            eprintln!(
+                                "usage meter has now missed {consecutive_misses} rounds in a row; \
+                                 the visit ends after {} misses",
+                                daycare_runner::usage_meter::MAX_CONSECUTIVE_METER_MISSES
+                            );
+                        }
+                    }
+                    MeterMiss::EndVisit => {
+                        eprintln!(
+                            "usage meter has not answered for {} rounds in a row; ending the visit so \
+                             your weekly allowance stays protected: {error}",
+                            daycare_runner::usage_meter::MAX_CONSECUTIVE_METER_MISSES
+                        );
+                        break (LocalEndReason::WeeklyMeterUnavailable, None);
+                    }
+                },
             }
         }
         let elapsed = record.wall_elapsed(unix_now());
@@ -2652,6 +2724,140 @@ fn finish_homecoming(
         },
     );
     Ok(())
+}
+
+/// Answer a `visit_end` still queued for a visit this machine has already
+/// ended. Returns true when at least one was settled, so `start` can retry.
+/// A recall for a visit whose local record is still active is left alone: a
+/// runner may still be finishing it, and only that runner may answer.
+fn settle_prior_visit_delivery(
+    layout: &Layout,
+    client: &PlatformClient,
+    active: &Active,
+) -> Result<bool> {
+    let mut settled = false;
+    for _ in 0..4 {
+        let Some(command) = client.next_command(active.token())? else {
+            break;
+        };
+        let report = |status: CompletionStatus, text: String| CompletionReport {
+            status,
+            claude_session_id: None,
+            result: TurnResult {
+                result_text: None,
+                duration_ms: Some(0),
+                usage: None,
+                error: Some(text),
+                held: false,
+            },
+        };
+        match command.command_kind() {
+            Some(CommandKind::VisitEnd) => {
+                let visit_id = command.visit().unwrap_or_default();
+                let local = VisitRecord::load(layout, &visit_id).ok();
+                match local {
+                    Some(record) if !record.is_active() => {
+                        client.complete_command(
+                            active.token(),
+                            &command.id,
+                            &CompletionReport {
+                                status: CompletionStatus::Completed,
+                                claude_session_id: None,
+                                result: TurnResult {
+                                    result_text: Some(
+                                        "visit end acknowledged: the visit had already ended on this machine".into(),
+                                    ),
+                                    duration_ms: Some(0),
+                                    usage: None,
+                                    error: None,
+                                    held: false,
+                                },
+                            },
+                        )?;
+                        eprintln!(
+                            "answered a recall still waiting on visit {visit_id}, which had already ended here"
+                        );
+                        settled = true;
+                    }
+                    Some(record) if record.pid.is_some_and(process_alive) => {
+                        // Leave it claimed for whoever is running that visit; do
+                        // not report it, so the stale window returns it to them.
+                        return Ok(settled);
+                    }
+                    Some(mut record) => {
+                        // The record says active but its runner is gone (a kill,
+                        // a crash, a supervisor restart), and the server has
+                        // already ended the visit, or it would not be queuing a
+                        // recall. Record the server's end so the visit is not
+                        // marked active here forever, answer the recall, and
+                        // leave the homecoming for a later `visit run`.
+                        let wire_reason = match command.reason().as_deref() {
+                            Some("budget_exhausted") => VisitEndReason::BudgetExhausted,
+                            Some("recalled") => VisitEndReason::Recalled,
+                            Some("activity_ended") => VisitEndReason::ActivityEnded,
+                            _ => VisitEndReason::Error,
+                        };
+                        record.close(canonical_local_reason(wire_reason), now_rfc3339());
+                        record.pid = None;
+                        record.homecoming_state = HomecomingState::AwaitingOutcome;
+                        record.save(layout)?;
+                        client.complete_command(
+                            active.token(),
+                            &command.id,
+                            &CompletionReport {
+                                status: CompletionStatus::Completed,
+                                claude_session_id: None,
+                                result: TurnResult {
+                                    result_text: Some(
+                                        "visit end acknowledged: the visit's runner on this machine had already exited".into(),
+                                    ),
+                                    duration_ms: Some(0),
+                                    usage: None,
+                                    error: None,
+                                    held: false,
+                                },
+                            },
+                        )?;
+                        eprintln!(
+                            "visit {visit_id} was still marked active here but its runner had exited; recorded the \
+                             server's end ({}) and answered the recall. Finish its homecoming later with \
+                             `daycare-runner visit run --visit {visit_id}`.",
+                            wire_reason.as_str()
+                        );
+                        settled = true;
+                    }
+                    None => {
+                        client.complete_command(
+                            active.token(),
+                            &command.id,
+                            &report(
+                                CompletionStatus::Failed,
+                                "visit_end belongs to a visit this machine has no record of".into(),
+                            ),
+                        )?;
+                    }
+                }
+            }
+            Some(CommandKind::WorldTurn) => {
+                client.complete_command(
+                    active.token(),
+                    &command.id,
+                    &report(
+                        CompletionStatus::Failed,
+                        "no visit is running on this machine; the turn was claimed while settling a prior visit".into(),
+                    ),
+                )?;
+            }
+            None => {
+                client.complete_command(
+                    active.token(),
+                    &command.id,
+                    &report(CompletionStatus::Failed, "unknown command kind".into()),
+                )?;
+            }
+        }
+    }
+    Ok(settled)
 }
 
 fn record_weekly_homecoming_sample(

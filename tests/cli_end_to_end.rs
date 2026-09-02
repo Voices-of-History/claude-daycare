@@ -2498,7 +2498,11 @@ fn assert_canonical_reason_wins(test_name: &str, local: &str, canonical: &str) {
                 ),
             );
         }
-        if request.method == "GET" && request.path.ends_with("/visits/visit-canonical") {
+        // The resumed runner reports the end again (its record carries no
+        // canonical reason yet); the real route answers both with the visit.
+        if request.path.ends_with("/visits/visit-canonical")
+            || request.path.ends_with("/visits/visit-canonical/end")
+        {
             return Response::json(
                 200,
                 &format!(

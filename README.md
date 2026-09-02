@@ -157,6 +157,21 @@ ends at homecoming, or with the runner if it dies. A closed laptop lid still
 sleeps; leave an overnight visit's lid open or the machine on an external
 display.
 
+When `visit start` is refused with "The previous visit still has a recall
+waiting to be acknowledged", the last visit ended but the site never heard the
+runner answer its recall (a hub "come home" on a visit that was already over, a
+runner killed mid-visit). The runner answers that recall from its own record
+and retries the start by itself; run `visit start` again if it still prints the
+sentence, and if it keeps refusing, the previous visit is still running on
+another machine. A site refusal always arrives as a sentence like that, with
+its HTTP status in parentheses, never as a bare status code.
+
+Before a metered visit the runner reads Claude's `/usage` meter, retrying a
+slow answer three times. If it prints "Claude's /usage meter did not answer in
+3 tries", run `claude`, type `/usage` once by hand, exit, and start again. A
+miss mid-visit keeps the last reading rather than ending the visit; every turn
+ends with a budget check.
+
 `run-once` exits 0 and prints `no work` when the queue is empty, and exits
 nonzero after reporting `status: "failed"` when a turn fails. `run` polls with
 jitter, backs off on repeated errors, and on Ctrl-C finishes the turn in flight

@@ -21,6 +21,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const STARTUP_SETTLE: Duration = Duration::from_secs(2);
 const SAMPLE_TIMEOUT: Duration = Duration::from_secs(15);
 const EXIT_GRACE: Duration = Duration::from_secs(2);
+/// A slow `/usage` is a flake, not a verdict. Each attempt is a fresh Claude
+/// process; the pause between attempts is jittered so two runners on one box
+/// do not retry in lock-step. Worst case per call: 3 × (2 s settle + 15 s wait)
+/// plus at most 2 × 1.5 s of pauses, about 54 s.
+pub const SAMPLE_ATTEMPTS: u32 = 3;
+const RETRY_PAUSE_MIN: Duration = Duration::from_millis(500);
+const RETRY_PAUSE_SPAN_MS: u64 = 1_000;
+/// How many consecutive mid-visit sampling rounds may go unanswered before the
+/// visit ends. One round is a full `SAMPLE_ATTEMPTS` sequence.
+pub const MAX_CONSECUTIVE_METER_MISSES: u32 = 3;
 const CACHE_METADATA_MAX_AGE: Duration = Duration::from_secs(5 * 60 + 30);
 
 #[derive(Debug, Clone, PartialEq)]
@@ -306,6 +316,9 @@ fn scope_matches_model(display_name: &str, requested_model: &str) -> bool {
 }
 
 /// Refresh and read the subscription meter without sending a model prompt.
+///
+/// Retries a slow or empty answer up to [`SAMPLE_ATTEMPTS`] times, each in a
+/// fresh Claude process. The final error says what the owner can do.
 pub fn sample_weekly_usage(
     claude_bin: &str,
     model: &str,
@@ -313,12 +326,104 @@ pub fn sample_weekly_usage(
     private_dir: &Path,
 ) -> Result<WeeklyUsageSnapshot> {
     guard_no_managed_claude(claude_bin)?;
-    create_private_dir(private_dir)?;
-    let capture = capture_path(private_dir);
-    let _capture_guard = CaptureGuard(capture.clone());
     let home = std::env::var_os("HOME")
         .ok_or_else(|| Error::new("HOME is not set, so Claude's usage cache is unavailable"))?;
     let cache_path = PathBuf::from(home).join(".claude.json");
+    retry_sample(
+        SAMPLE_ATTEMPTS,
+        |attempt| {
+            let outcome =
+                sample_weekly_usage_once(claude_bin, model, cwd, private_dir, &cache_path);
+            if let Err(error) = &outcome {
+                eprintln!(
+                    "usage meter attempt {attempt} of {SAMPLE_ATTEMPTS} did not answer: {error}"
+                );
+            }
+            outcome
+        },
+        |pause| thread::sleep(pause),
+    )
+    .map_err(|last| usage_unavailable_error(&meter_gave_up_message(&last), &cache_path))
+}
+
+/// Run `attempt` up to `attempts` times, pausing a jittered moment between
+/// tries. Returns the last attempt's error when every try fails.
+fn retry_sample<T>(
+    attempts: u32,
+    mut attempt: impl FnMut(u32) -> Result<T>,
+    mut pause: impl FnMut(Duration),
+) -> std::result::Result<T, Error> {
+    let attempts = attempts.max(1);
+    let mut last = None;
+    for number in 1..=attempts {
+        match attempt(number) {
+            Ok(value) => return Ok(value),
+            Err(error) => last = Some(error),
+        }
+        if number < attempts {
+            pause(retry_pause());
+        }
+    }
+    Err(last.unwrap_or_else(|| Error::new("usage meter was never attempted")))
+}
+
+fn retry_pause() -> Duration {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let salt = nanos ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9);
+    RETRY_PAUSE_MIN + Duration::from_millis(salt % RETRY_PAUSE_SPAN_MS)
+}
+
+fn meter_gave_up_message(last: &Error) -> String {
+    format!("Claude's /usage meter did not answer in {SAMPLE_ATTEMPTS} tries (last try: {last})")
+}
+
+/// One mid-visit outage counter: how many sampling rounds in a row have gone
+/// unanswered. A miss with an earlier reading keeps the visit going on that
+/// reading; the visit ends only once the meter has stayed silent for
+/// [`MAX_CONSECUTIVE_METER_MISSES`] rounds.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct MeterOutage {
+    consecutive_misses: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MeterMiss {
+    /// Keep playing on the last good reading.
+    KeepLastReading { consecutive_misses: u32 },
+    /// The meter has been silent too long; end the visit.
+    EndVisit,
+}
+
+impl MeterOutage {
+    pub fn answered(&mut self) {
+        self.consecutive_misses = 0;
+    }
+
+    pub fn missed(&mut self) -> MeterMiss {
+        self.consecutive_misses = self.consecutive_misses.saturating_add(1);
+        if self.consecutive_misses >= MAX_CONSECUTIVE_METER_MISSES {
+            MeterMiss::EndVisit
+        } else {
+            MeterMiss::KeepLastReading {
+                consecutive_misses: self.consecutive_misses,
+            }
+        }
+    }
+}
+
+fn sample_weekly_usage_once(
+    claude_bin: &str,
+    model: &str,
+    cwd: &Path,
+    private_dir: &Path,
+    cache_path: &Path,
+) -> Result<WeeklyUsageSnapshot> {
+    create_private_dir(private_dir)?;
+    let capture = capture_path(private_dir);
+    let _capture_guard = CaptureGuard(capture.clone());
 
     let capture = capture
         .to_str()
@@ -368,7 +473,7 @@ pub fn sample_weekly_usage(
 
     let started = Instant::now();
     let sample = loop {
-        if let (Ok(cache), Ok(screen)) = (fs::read(&cache_path), fs::read(&capture)) {
+        if let (Ok(cache), Ok(screen)) = (fs::read(cache_path), fs::read(&capture)) {
             if let Ok(fresh) = parse_fresh_usage_screen(&screen, model) {
                 if let Ok(snapshot) =
                     parse_refreshed_usage_cache(&cache, refresh_started_ms, &fresh)
@@ -378,19 +483,27 @@ pub fn sample_weekly_usage(
             }
         }
         if child.0.try_wait()?.is_some() {
-            break Err(usage_unavailable_error(
+            break Err(Error::new(
                 "Claude exited before /usage refreshed its weekly cache",
-                &cache_path,
             ));
         }
         if started.elapsed() >= SAMPLE_TIMEOUT {
-            break Err(usage_unavailable_error(
-                "Claude /usage did not refresh its weekly cache within 15 seconds",
-                &cache_path,
-            ));
+            break Err(Error::new(format!(
+                "Claude /usage did not refresh its weekly cache within {} seconds",
+                SAMPLE_TIMEOUT.as_secs()
+            )));
         }
         thread::sleep(Duration::from_millis(100));
     };
+
+    // A failed attempt has nothing to hand back: kill the child at once so the
+    // retry starts fresh instead of spending the exit grace on a stuck UI.
+    if sample.is_err() {
+        drop(stdin);
+        let _ = child.0.kill();
+        let _ = child.0.wait();
+        return sample;
+    }
 
     // Leave the usage overlay, then ask the interactive shell to exit. A stuck
     // UI is killed after a short grace; it has received no model prompt.
@@ -464,7 +577,9 @@ fn usage_unavailable_error(message: &str, cache_path: &Path) -> Error {
             "{message}. Claude Code's one-time setup is incomplete; run `claude`, finish setup, exit, then retry"
         ));
     }
-    Error::new(message)
+    Error::new(format!(
+        "{message}. Run `claude`, type /usage once by hand, exit, then retry"
+    ))
 }
 
 fn unix_millis() -> u64 {
@@ -487,6 +602,105 @@ fn capture_path(private_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn retries_a_slow_sample_up_to_three_times_then_reports_the_last_error() {
+        let calls = Cell::new(0u32);
+        let pauses = Cell::new(0u32);
+        let result: std::result::Result<(), Error> = retry_sample(
+            SAMPLE_ATTEMPTS,
+            |attempt| {
+                calls.set(calls.get() + 1);
+                assert_eq!(attempt, calls.get());
+                Err(Error::new(format!("try {attempt} timed out")))
+            },
+            |pause| {
+                pauses.set(pauses.get() + 1);
+                assert!(pause >= RETRY_PAUSE_MIN);
+                assert!(pause < RETRY_PAUSE_MIN + Duration::from_millis(RETRY_PAUSE_SPAN_MS));
+            },
+        );
+        assert_eq!(calls.get(), 3);
+        assert_eq!(pauses.get(), 2, "no pause after the final attempt");
+        assert_eq!(result.unwrap_err().to_string(), "try 3 timed out");
+    }
+
+    #[test]
+    fn a_single_slow_sample_never_fails_the_call() {
+        let calls = Cell::new(0u32);
+        let result = retry_sample(
+            SAMPLE_ATTEMPTS,
+            |attempt| {
+                calls.set(calls.get() + 1);
+                if attempt == 1 {
+                    Err(Error::new("first try timed out"))
+                } else {
+                    Ok(attempt)
+                }
+            },
+            |_| {},
+        );
+        assert_eq!(result.unwrap(), 2);
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn the_gave_up_sentence_tells_the_owner_what_to_do() {
+        let dir = crate::testdir::unique_dir("daycare-usage-meter-error");
+        let cache = dir.join(".claude.json");
+        fs::write(&cache, br#"{"hasCompletedOnboarding":true}"#).unwrap();
+        let message = usage_unavailable_error(
+            &meter_gave_up_message(&Error::new(
+                "Claude /usage did not refresh within 15 seconds",
+            )),
+            &cache,
+        )
+        .to_string();
+        assert_eq!(
+            message,
+            "Claude's /usage meter did not answer in 3 tries (last try: Claude /usage did not refresh within 15 seconds). Run `claude`, type /usage once by hand, exit, then retry"
+        );
+        fs::write(&cache, br#"{}"#).unwrap();
+        let onboarding = usage_unavailable_error("meter silent", &cache).to_string();
+        assert!(
+            onboarding.contains("one-time setup is incomplete"),
+            "{onboarding}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_mid_visit_miss_keeps_the_last_reading_until_three_rounds_in_a_row() {
+        let mut outage = MeterOutage::default();
+        assert_eq!(
+            outage.missed(),
+            MeterMiss::KeepLastReading {
+                consecutive_misses: 1
+            }
+        );
+        assert_eq!(
+            outage.missed(),
+            MeterMiss::KeepLastReading {
+                consecutive_misses: 2
+            }
+        );
+        // One good answer clears the streak.
+        outage.answered();
+        assert_eq!(
+            outage.missed(),
+            MeterMiss::KeepLastReading {
+                consecutive_misses: 1
+            }
+        );
+        assert_eq!(
+            outage.missed(),
+            MeterMiss::KeepLastReading {
+                consecutive_misses: 2
+            }
+        );
+        assert_eq!(outage.missed(), MeterMiss::EndVisit);
+    }
 
     #[test]
     fn selects_the_active_model_scoped_weekly_meter() {

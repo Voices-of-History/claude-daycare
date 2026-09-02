@@ -954,8 +954,20 @@ fn request_error(what: &str, error: ureq::Error) -> Error {
         }
         ureq::Error::Status(code, response) => {
             let body = response.into_string().unwrap_or_default();
-            let excerpt: String = body.chars().take(200).collect();
-            Error::new(format!("{what} failed: HTTP {code} {excerpt}"))
+            // A refusal the platform wrote in words is printed as those words;
+            // only a body without a sentence falls back to the status line.
+            let sentence = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
+                .filter(|text| !text.trim().is_empty());
+            let message = match sentence {
+                Some(text) => format!("{what} failed: {text} (HTTP {code})"),
+                None => {
+                    let excerpt: String = body.chars().take(200).collect();
+                    format!("{what} failed: HTTP {code} {excerpt}")
+                }
+            };
+            Error::new(message).with_status(code)
         }
         ureq::Error::Transport(transport) => {
             Error::transport(format!("{what} failed: {transport}"))
@@ -1305,5 +1317,29 @@ data: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"tot
         assert_eq!(value["status"], "failed");
         assert!(value["result"]["error"].as_str().unwrap().contains("300s"));
         assert!(value.get("claude_session_id").is_none());
+    }
+
+    #[test]
+    fn a_refusal_written_in_words_is_printed_as_those_words_with_its_status() {
+        let response = ureq::Response::new(
+            409,
+            "Conflict",
+            r#"{"error":"The previous visit still has a recall waiting to be acknowledged.","reason":"prior_delivery_pending"}"#,
+        )
+        .unwrap();
+        let error = request_error("visit start", ureq::Error::Status(409, response));
+        assert_eq!(error.http_status(), Some(409));
+        assert_eq!(
+            error.message(),
+            "visit start failed: The previous visit still has a recall waiting to be acknowledged. (HTTP 409)"
+        );
+    }
+
+    #[test]
+    fn a_wordless_failure_still_names_the_status() {
+        let response = ureq::Response::new(500, "Internal Server Error", "").unwrap();
+        let error = request_error("visit start", ureq::Error::Status(500, response));
+        assert_eq!(error.http_status(), Some(500));
+        assert_eq!(error.message(), "visit start failed: HTTP 500 ");
     }
 }
