@@ -5,11 +5,11 @@
 //! truth. Shapes were taken from a real Claude Code 2.1.220 run — see
 //! `tests/fixtures/turn-stream-2.1.220.jsonl`.
 
-use crate::launch::{MCP_SERVER, MCP_TOOL_PREFIX, TOOL_SEARCH_TOOL, WEB_SEARCH_TOOL};
+use crate::launch::{MCP_SERVER, MCP_TOOL_PREFIX, TOOL_SEARCH_TOOL};
 use crate::{Error, Result};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 
 /// What the child reported about itself in the `system`/`init` event. The
@@ -97,12 +97,6 @@ pub struct StreamReceipt {
     /// True when the child wrote a tool call out as prose instead of invoking
     /// one — the signature of a model inventing results it never received.
     pub invented_tool_calls: bool,
-    /// True only when the Debate League turn tool returned its canonical
-    /// `played: true` receipt for the matching tool call.
-    pub league_turn_applied: bool,
-    /// True when that applied turn belongs to the external two-Claude mode.
-    /// External matches own the visit lifecycle until their canonical verdict.
-    pub league_turn_external: bool,
 }
 
 pub fn parse_stream_file(path: &Path) -> Result<StreamReceipt> {
@@ -125,9 +119,6 @@ pub fn parse_stream(stream: &str) -> Result<StreamReceipt> {
     // (tool_use id, name) in call order; ids pair calls with their denials.
     let mut tool_uses: Vec<(Option<String>, String)> = Vec::new();
     let mut denied_ids: HashSet<String> = HashSet::new();
-    let mut tool_names_by_id = HashMap::new();
-    let mut league_turn_applied = false;
-    let mut league_turn_external = false;
     let mut invented_tool_calls = false;
 
     for (index, line) in stream.lines().enumerate() {
@@ -161,11 +152,7 @@ pub fn parse_stream(stream: &str) -> Result<StreamReceipt> {
                     for block in content {
                         if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                             if let Some(name) = string_at(block, "name") {
-                                let id = string_at(block, "id");
-                                if let Some(id) = &id {
-                                    tool_names_by_id.insert(id.clone(), name.clone());
-                                }
-                                tool_uses.push((id, name.clone()));
+                                tool_uses.push((string_at(block, "id"), name.clone()));
                                 tool_calls.push(name);
                             }
                         } else if let Some(text) = string_at(block, "text") {
@@ -190,14 +177,6 @@ pub fn parse_stream(stream: &str) -> Result<StreamReceipt> {
                             if let Some(id) = string_at(block, "tool_use_id") {
                                 denied_ids.insert(id);
                             }
-                        }
-                        let is_league_turn = string_at(block, "tool_use_id")
-                            .and_then(|id| tool_names_by_id.get(&id))
-                            .is_some_and(|name| name.ends_with("daycare_league_play_turn"));
-                        if is_league_turn {
-                            let result = tool_result_league_state(block);
-                            league_turn_applied |= result.played;
-                            league_turn_external |= result.played && result.external;
                         }
                     }
                 }
@@ -275,8 +254,6 @@ pub fn parse_stream(stream: &str) -> Result<StreamReceipt> {
         tool_calls,
         permitted_tool_calls,
         denied_tool_calls,
-        league_turn_applied,
-        league_turn_external,
         invented_tool_calls,
     })
 }
@@ -315,35 +292,6 @@ fn looks_like_invented_tool_call(text: &str) -> bool {
     INVENTED_TOOL_CALL_MARKERS
         .iter()
         .any(|marker| text.contains(marker))
-}
-
-#[derive(Default)]
-struct LeagueToolResult {
-    played: bool,
-    external: bool,
-}
-
-fn tool_result_league_state(block: &Value) -> LeagueToolResult {
-    let parse = |text: &str| {
-        let Ok(value) = serde_json::from_str::<Value>(text) else {
-            return LeagueToolResult::default();
-        };
-        LeagueToolResult {
-            played: value.get("played").and_then(Value::as_bool) == Some(true),
-            external: value.get("mode").and_then(Value::as_str) == Some("claude_vs_claude"),
-        }
-    };
-    match block.get("content") {
-        Some(Value::String(text)) => parse(text),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .map(parse)
-            .find(|result| result.played)
-            .unwrap_or_default(),
-        _ => LeagueToolResult::default(),
-    }
 }
 
 fn parse_init(event: &Value) -> InitReport {
@@ -403,13 +351,12 @@ fn string_list(value: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The one built-in a turn may hold beyond ToolSearch, by purpose. Prep gets
-/// WebSearch; the homecoming reader gets Read (scoped by the launch rule to
-/// the rendered transcript); everything else gets nothing.
+/// The one built-in a turn may hold beyond ToolSearch, by purpose. The
+/// homecoming reader gets Read (scoped by the launch rule to the rendered
+/// transcript); everything else gets nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxAllowance {
     None,
-    WebSearch,
     Read,
 }
 
@@ -422,11 +369,10 @@ pub fn verify_sandbox(
     allowance: SandboxAllowance,
 ) -> Result<()> {
     // `--tools` always names ToolSearch so a late-connecting server remains
-    // reachable. Prep may also name WebSearch and the homecoming reader Read;
-    // every other built-in is foreign.
+    // reachable. The homecoming reader may also name Read; every other
+    // built-in is foreign.
     let allowed_extra = match allowance {
         SandboxAllowance::None => None,
-        SandboxAllowance::WebSearch => Some(WEB_SEARCH_TOOL),
         SandboxAllowance::Read => Some(crate::launch::READ_TOOL),
     };
     let foreign: Vec<&String> = init
@@ -634,33 +580,6 @@ mod tests {
     }
 
     #[test]
-    fn league_turn_application_comes_from_the_matching_tool_result() {
-        let applied = r#"{"type":"assistant","session_id":"895535d7-0382-4e98-87e2-f2a3073e69a7","message":{"content":[{"type":"tool_use","id":"tool-1","name":"mcp__daycare__daycare_league_play_turn"}]}}
-{"type":"user","session_id":"895535d7-0382-4e98-87e2-f2a3073e69a7","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"text","text":"{\"played\":true}"}]}]}}
-{"type":"result","subtype":"success","session_id":"895535d7-0382-4e98-87e2-f2a3073e69a7"}
-"#;
-        assert!(parse_stream(applied).unwrap().league_turn_applied);
-
-        let refused = applied.replace("{\\\"played\\\":true}", "{\\\"played\\\":false}");
-        assert!(!parse_stream(&refused).unwrap().league_turn_applied);
-    }
-
-    #[test]
-    fn league_turn_receipt_distinguishes_external_pvp_from_solo() {
-        let external = r#"{"type":"assistant","session_id":"895535d7-0382-4e98-87e2-f2a3073e69a7","message":{"content":[{"type":"tool_use","id":"tool-1","name":"mcp__daycare__daycare_league_play_turn"}]}}
-{"type":"user","session_id":"895535d7-0382-4e98-87e2-f2a3073e69a7","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"{\"played\":true,\"mode\":\"claude_vs_claude\"}"}]}}
-{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"895535d7-0382-4e98-87e2-f2a3073e69a7"}
-"#;
-        let receipt = parse_stream(external).unwrap();
-        assert!(receipt.league_turn_applied);
-        assert!(receipt.league_turn_external);
-        assert!(!receipt.success);
-
-        let solo = external.replace(",\\\"mode\\\":\\\"claude_vs_claude\\\"", "");
-        assert!(!parse_stream(&solo).unwrap().league_turn_external);
-    }
-
-    #[test]
     fn an_error_result_is_not_reported_as_success() {
         let stream =
             "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\
@@ -766,25 +685,12 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_verification_allows_web_search_only_during_prep() {
-        let mut init = clean_init();
-        init.tools.push(WEB_SEARCH_TOOL.into());
-
-        verify_sandbox(&init, Path::new("/tmp"), SandboxAllowance::WebSearch).unwrap();
-        let error = verify_sandbox(&init, Path::new("/tmp"), SandboxAllowance::None).unwrap_err();
-        assert!(error.message().contains(WEB_SEARCH_TOOL), "{error}");
-    }
-
-    #[test]
     fn sandbox_verification_allows_read_only_for_the_homecoming_reader() {
         let mut init = clean_init();
         init.tools.push("Read".into());
 
         verify_sandbox(&init, Path::new("/tmp"), SandboxAllowance::Read).unwrap();
         let error = verify_sandbox(&init, Path::new("/tmp"), SandboxAllowance::None).unwrap_err();
-        assert!(error.message().contains("Read"), "{error}");
-        let error =
-            verify_sandbox(&init, Path::new("/tmp"), SandboxAllowance::WebSearch).unwrap_err();
         assert!(error.message().contains("Read"), "{error}");
         // The reader's allowance is Read alone; Write or Bash beside it is a
         // violation even at homecoming.

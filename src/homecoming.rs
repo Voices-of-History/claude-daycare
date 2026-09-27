@@ -304,7 +304,7 @@ mod tests {
             "identity-1",
             "Pip",
             Budget::default(),
-            Some("try Debate League".into()),
+            Some("play a round of Tycoon".into()),
             "2026-09-01T18:00:00Z",
         );
         record.turn_archives = ids.iter().map(|id| id.to_string()).collect();
@@ -342,7 +342,7 @@ mod tests {
         let text = render(&layout, &record).unwrap();
 
         assert!(text.contains("# Daycare visit visit-1 — Pip"), "{text}");
-        assert!(text.contains("Your owner's instructions for the visit: try Debate League"));
+        assert!(text.contains("Your owner's instructions for the visit: play a round of Tycoon"));
         let a = text.find("## Turn 1 of 2 (command turn-a)").unwrap();
         let b = text.find("## Turn 2 of 2 (command turn-b)").unwrap();
         assert!(a < b);

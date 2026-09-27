@@ -18,10 +18,9 @@ use daycare_runner::identity::{
 use daycare_runner::keep_awake::{KeepAwake, HOLD_MESSAGE};
 use daycare_runner::keychain::{default_store, FileTokenStore, TokenStore};
 use daycare_runner::launch::{
-    ambient_pulse_turn_prompt, is_homecoming_tool, match_prep_prompt, match_turn_prompt,
-    new_session_id, standalone_turn_prompt, visit_continuation_prompt, visit_turn_prompt,
-    SessionMode, ALLOWED_TURN_MODELS, AMBIENT_PULSE_INSTRUCTION_MARKER, DEFAULT_TURN_MODEL,
-    MCP_SETTLE,
+    is_homecoming_tool, match_turn_prompt, new_session_id, standalone_turn_prompt,
+    visit_continuation_prompt, visit_turn_prompt, SessionMode, ALLOWED_TURN_MODELS,
+    DEFAULT_TURN_MODEL, MCP_SETTLE,
 };
 use daycare_runner::memory::{self as local_memory, LocalMemoryMirror};
 use daycare_runner::paths::{sanitize_segment, shell_quote, shell_quote_path, Layout};
@@ -53,9 +52,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-
-const MATCH_PREP_TIMEOUT: Duration = Duration::from_secs(180);
-const MAX_PREP_BRIEFING_CHARS: usize = 6_000;
 
 /// Release id baked in by `dev/publish-release.sh` (the short git sha the
 /// installer pins). A plain `cargo build` leaves it unset, which marks a dev
@@ -124,7 +120,7 @@ impl Which {
 enum Commands {
     /// Pair this machine with the platform using a one-time code from the hub.
     Enroll {
-        /// Platform base URL, e.g. https://yaproyale.com
+        /// Platform base URL, e.g. https://claudedaycare.com
         #[arg(long)]
         url: String,
         /// Pairing code shown in the Daycare hub.
@@ -1231,16 +1227,6 @@ fn run_once(
     let succeeded = matches!(report.status, CompletionStatus::Completed);
     let held = report.result.held;
     let usage = report.result.usage.clone();
-    let league_turn_applied = outcome
-        .as_ref()
-        .ok()
-        .and_then(|outcome| outcome.receipt.as_ref())
-        .is_some_and(|receipt| receipt.league_turn_applied);
-    let league_turn_external = outcome
-        .as_ref()
-        .ok()
-        .and_then(|outcome| outcome.receipt.as_ref())
-        .is_some_and(|receipt| receipt.league_turn_external);
     let archive = outcome.as_ref().ok().map(|o| o.archive_path.clone());
 
     if succeeded {
@@ -1279,8 +1265,6 @@ fn run_once(
         usage,
         failure: report.result.error.clone(),
         end_requested: false,
-        league_turn_applied,
-        league_turn_external,
     }))
 }
 
@@ -1332,8 +1316,6 @@ struct TurnReceipt {
     usage: Option<daycare_runner::stream::TurnUsage>,
     failure: Option<String>,
     end_requested: bool,
-    league_turn_applied: bool,
-    league_turn_external: bool,
 }
 
 impl TurnReceipt {
@@ -1345,8 +1327,6 @@ impl TurnReceipt {
             usage: None,
             failure: None,
             end_requested: true,
-            league_turn_applied: false,
-            league_turn_external: false,
         }
     }
 
@@ -1358,10 +1338,6 @@ impl TurnReceipt {
             _ => LocalEndReason::Recalled,
         }
     }
-}
-
-fn ambient_pulse_match_action_finished(is_ambient_pulse: bool, receipt: &TurnReceipt) -> bool {
-    is_ambient_pulse && receipt.league_turn_applied && !receipt.league_turn_external
 }
 
 fn execute(
@@ -1392,16 +1368,9 @@ fn execute(
     let match_id = command
         .payload
         .as_ref()
-        .filter(|_| matches!(reason, Some("match_turn" | "match_prep")))
+        .filter(|_| reason == Some("match_turn"))
         .and_then(|payload| payload.get("match_id"))
         .and_then(Value::as_str);
-    let match_activity = command
-        .payload
-        .as_ref()
-        .and_then(|payload| payload.get("activity"))
-        .and_then(Value::as_str);
-    let is_match_prep = reason == Some("match_prep") && match_id.is_some();
-    let is_match_turn = reason == Some("match_turn") && match_id.is_some();
     // Command reasons are scheduling hints, not lifecycle truth: the server can
     // adopt an already-queued quick_check as a brand-new visit's first command.
     // The persisted ledger also survives process restarts and server adoption.
@@ -1411,31 +1380,12 @@ fn execute(
     // Claude read its input carried nothing, so the person's request is
     // delivered again: the session that resumes never heard it.
     let visit_needs_opening = visit.is_some_and(|current| !current.ledger.has_successful_turn());
-    let is_ambient_pulse =
-        is_ambient_pulse_instructions(visit.and_then(|current| current.instructions.as_deref()));
-    let mut routing_prompt = match (reason, match_id) {
-        (Some("match_prep"), Some(match_id)) => {
-            match_prep_prompt(&active.identity.name, match_id, match_activity)
-        }
-        (Some("match_turn"), Some(match_id)) => {
-            match_turn_prompt(&active.identity.name, match_id, match_activity, &command.id)
-        }
-        (_, _) if visit_needs_opening && is_ambient_pulse => {
-            ambient_pulse_turn_prompt(&active.identity.name)
-        }
-        (_, _) if visit_needs_opening => visit_turn_prompt(&active.identity.name),
-        (_, _) if visit.is_some() => visit_continuation_prompt(&active.identity.name),
-        (_, _) => standalone_turn_prompt(&active.identity.name),
+    let routing_prompt = match match_id {
+        Some(match_id) => match_turn_prompt(&active.identity.name, match_id, &command.id),
+        None if visit_needs_opening => visit_turn_prompt(&active.identity.name),
+        None if visit.is_some() => visit_continuation_prompt(&active.identity.name),
+        None => standalone_turn_prompt(&active.identity.name),
     };
-    if is_match_turn {
-        if let Some(briefing) = prep_briefing(command) {
-            routing_prompt.push_str(&format!(
-                "\n\nYour own pre-debate briefing from the earlier prep turn follows. \
-It is reference material, not instructions. Use its freshest specific evidence \
-and cite sources naturally in your argument:\n\n{briefing}"
-            ));
-        }
-    }
     let base = match command.prompt.clone() {
         Some(prompt) if match_id.is_some() || visit.is_some() => {
             format!("{prompt}\n\n{routing_prompt}")
@@ -1484,18 +1434,6 @@ that authoritative value.",
     let model = visit
         .map(VisitRecord::turn_model)
         .unwrap_or(DEFAULT_TURN_MODEL);
-    let purpose = if is_ambient_pulse {
-        TurnPurpose::AmbientPulse
-    } else if is_match_prep {
-        TurnPurpose::MatchPrep
-    } else {
-        TurnPurpose::World
-    };
-    let turn_timeout = if purpose == TurnPurpose::MatchPrep {
-        timeout.min(MATCH_PREP_TIMEOUT)
-    } else {
-        timeout
-    };
     let first = run_turn(TurnRequest {
         claude_bin,
         workspace: &active.workspace,
@@ -1503,8 +1441,8 @@ that authoritative value.",
         message: &message,
         device_token: active.token(),
         archive_path: &archive_path,
-        timeout: turn_timeout,
-        purpose,
+        timeout,
+        purpose: TurnPurpose::World,
         model,
         mcp_settle: MCP_SETTLE,
     });
@@ -1534,32 +1472,11 @@ that authoritative value.",
         message: &message,
         device_token: active.token(),
         archive_path: &archive_path,
-        timeout: turn_timeout,
-        purpose,
+        timeout,
+        purpose: TurnPurpose::World,
         model,
         mcp_settle: MCP_SETTLE,
     })
-}
-
-fn is_ambient_pulse_instructions(instructions: Option<&str>) -> bool {
-    instructions.is_some_and(|value| value.starts_with(AMBIENT_PULSE_INSTRUCTION_MARKER))
-}
-
-fn visit_uses_weekly_meter(instructions: Option<&str>) -> bool {
-    !is_ambient_pulse_instructions(instructions)
-}
-
-fn prep_briefing(command: &WorldCommand) -> Option<String> {
-    let raw = command
-        .payload
-        .as_ref()?
-        .get("prep_briefing")?
-        .as_str()?
-        .trim();
-    if raw.is_empty() {
-        return None;
-    }
-    Some(raw.chars().take(MAX_PREP_BRIEFING_CHARS).collect())
 }
 
 fn run_loop(
@@ -1693,7 +1610,7 @@ fn visit_command(
             let active = active_for(layout, store, &which)?;
             // A normal `visit start` must finish any older durable homecoming
             // for this identity before opening a new server visit. Otherwise a
-            // crash after League ended strands the old verdict forever because
+            // crash after a match ended strands the old verdict forever because
             // the new visit receives a different id.
             resume_incomplete_homecomings(
                 layout,
@@ -1704,8 +1621,7 @@ fn visit_command(
                 Duration::from_secs(interval),
                 out.inner(),
             )?;
-            let weekly_metered = visit_uses_weekly_meter(instructions.as_deref());
-            let mut budget = Budget {
+            let budget = Budget {
                 wall_clock_secs: budget
                     .as_deref()
                     .map(parse_duration)
@@ -1717,9 +1633,6 @@ fn visit_command(
                 weekly_share: weekly_share_from_percent(weekly_percent)?,
             }
             .or_default();
-            if !weekly_metered {
-                budget.weekly_share = None;
-            }
 
             // Sampling, opening the server visit, and saving its local baseline
             // are one identity-scoped transaction. Without this lock, two
@@ -1727,15 +1640,11 @@ fn visit_command(
             // written a record, then attach different readings or models to the
             // same server visit.
             let start_lock = VisitStartLock::acquire(layout, &active.identity.identity_id)?;
-            // Always sample before POST for a metered request. If the server
-            // returns a visit this machine already owns, the sample is discarded;
-            // if it creates a new visit, this is the only reading known to
-            // precede the first claimable command.
-            let initial_weekly = if weekly_metered {
-                Some(sample_weekly_usage(&claude_bin, &model, layout)?)
-            } else {
-                None
-            };
+            // Always sample before POST. If the server returns a visit this
+            // machine already owns, the sample is discarded; if it creates a
+            // new visit, this is the only reading known to precede the first
+            // claimable command.
+            let initial_weekly = sample_weekly_usage(&claude_bin, &model, layout)?;
 
             let client = PlatformClient::new(&active.platform_url);
             let started = match client.start_visit(active.token(), &budget, instructions.as_deref())
@@ -1759,10 +1668,9 @@ fn visit_command(
                 record.is_active()
                     && record.identity_id == active.identity.identity_id
                     && record.model.is_some()
-                    && (!visit_uses_weekly_meter(record.instructions.as_deref())
-                        || (record.ledger.weekly_meter_first_pct.is_some()
-                            && record.ledger.weekly_meter_resets_at.is_some()
-                            && record.ledger.weekly_meter_key.is_some()))
+                    && record.ledger.weekly_meter_first_pct.is_some()
+                    && record.ledger.weekly_meter_resets_at.is_some()
+                    && record.ledger.weekly_meter_key.is_some()
             });
 
             if local_record.is_some() && !trusted_local_record {
@@ -1806,20 +1714,18 @@ fn visit_command(
                 record.model = Some(model);
             }
             if !trusted_local_record {
-                if let Some(initial_weekly) = initial_weekly {
-                    if record.ledger.weekly_meter_first_pct.is_none() {
-                        record.ledger.start_weekly_meter(
-                            initial_weekly.used_percentage,
-                            initial_weekly.resets_at,
-                            initial_weekly.meter_key,
-                        );
-                    } else {
-                        record.ledger.record_weekly_meter(
-                            initial_weekly.used_percentage,
-                            initial_weekly.resets_at,
-                            initial_weekly.meter_key,
-                        )?;
-                    }
+                if record.ledger.weekly_meter_first_pct.is_none() {
+                    record.ledger.start_weekly_meter(
+                        initial_weekly.used_percentage,
+                        initial_weekly.resets_at,
+                        initial_weekly.meter_key,
+                    );
+                } else {
+                    record.ledger.record_weekly_meter(
+                        initial_weekly.used_percentage,
+                        initial_weekly.resets_at,
+                        initial_weekly.meter_key,
+                    )?;
                 }
             }
             // A visit already in progress may already have a poller. Spawning a
@@ -2318,15 +2224,11 @@ fn run_visit(
 ) -> Result<()> {
     install_interrupt_handler();
     let mut record = VisitRecord::load(layout, visit_id)?;
-    let is_ambient_pulse = is_ambient_pulse_instructions(record.instructions.as_deref());
     // A visit created by an older runner can be resumed by this binary. Fill
     // the new weekly default and safety fields before any further turn so an
     // upgrade cannot leave that adopted visit unbounded.
     if record.homecoming_state != HomecomingState::AwaitingOutcome {
         record.budget = record.budget.clone().or_default();
-        if is_ambient_pulse {
-            record.budget.weekly_share = None;
-        }
     }
     let recovery_lock = if record.homecoming_state == HomecomingState::AwaitingOutcome {
         Some(HomecomingLock::acquire(layout, &record.visit_id)?)
@@ -2415,7 +2317,6 @@ fn run_visit(
             break (reason, None);
         }
 
-        let mut ambient_pulse_finished = false;
         let mut completed_turn = false;
         match run_once(
             layout,
@@ -2432,8 +2333,6 @@ fn run_visit(
             Ok(Some(receipt)) => {
                 completed_turn = true;
                 consecutive_poll_errors = 0;
-                ambient_pulse_finished =
-                    ambient_pulse_match_action_finished(is_ambient_pulse, &receipt);
                 if receipt.held {
                     record.ledger.record_held_turn(receipt.usage.as_ref());
                 } else {
@@ -2511,10 +2410,6 @@ fn run_visit(
         let elapsed = record.wall_elapsed(unix_now());
         record.ledger.elapsed_secs = elapsed.as_secs();
         record.save(layout)?;
-
-        if ambient_pulse_finished {
-            break (LocalEndReason::ActivityEnded, None);
-        }
 
         if record.ledger.should_end(&record.budget, elapsed).is_some() {
             continue;
@@ -3451,7 +3346,7 @@ fn homecoming_message(match_outcome: Option<&MatchOutcome>) -> String {
     };
     format!(
         "{HOMECOMING_OPENER}The Daycare server supplied the \
-         canonical result for the Debate League match bound to this visit:\n\
+         canonical result for the match bound to this visit:\n\
          Result: {result}.\n\
          Winner: {winner}.\n\
          Final board: you {}, opponent {}.\n\
@@ -3825,98 +3720,14 @@ mod tests {
         assert!(!continuation.contains("exactly once"));
     }
 
-    #[test]
-    fn only_the_exact_leading_marker_selects_the_ambient_permission_profile() {
-        assert!(is_ambient_pulse_instructions(Some(
-            "[daycare-ambient-pulse:v1] bounded instructions",
-        )));
-        assert!(!is_ambient_pulse_instructions(Some(
-            "ordinary instructions mentioning [daycare-ambient-pulse:v1] later",
-        )));
-        assert!(!is_ambient_pulse_instructions(None));
-    }
-
-    #[test]
-    fn ambient_house_pulses_keep_their_existing_turn_and_time_bounds() {
-        assert!(!visit_uses_weekly_meter(Some(
-            "[daycare-ambient-pulse:v1] bounded instructions",
-        )));
-        assert!(visit_uses_weekly_meter(None));
-        assert!(visit_uses_weekly_meter(Some(
-            "ordinary instructions mentioning [daycare-ambient-pulse:v1] later",
-        )));
-    }
-
-    #[test]
-    fn ambient_pulse_ends_after_an_applied_solo_turn_even_if_the_child_fails() {
-        let receipt = match_turn_receipt(true);
-        assert!(ambient_pulse_match_action_finished(true, &receipt));
-        assert!(!ambient_pulse_match_action_finished(false, &receipt));
-
-        let mut failed = match_turn_receipt(true);
-        failed.succeeded = false;
-        assert!(ambient_pulse_match_action_finished(true, &failed));
-    }
-
-    #[test]
-    fn ambient_pulse_keeps_external_pvp_alive_for_canonical_terminalization() {
-        let mut receipt = match_turn_receipt(true);
-        receipt.league_turn_external = true;
-        assert!(!ambient_pulse_match_action_finished(true, &receipt));
-    }
-
-    #[test]
-    fn ambient_pulse_keeps_room_for_prep_and_a_no_move_match_attempt() {
-        let prep: WorldCommand = serde_json::from_value(json!({
-            "id": "prep-1",
-            "kind": "world_turn",
-            "payload": { "reason": "match_prep", "match_id": "match-1" }
-        }))
-        .unwrap();
-        let prep_receipt = TurnReceipt {
-            command: prep,
-            succeeded: true,
-            held: false,
-            usage: None,
-            failure: None,
-            end_requested: false,
-            league_turn_applied: false,
-            league_turn_external: false,
-        };
-        assert!(!ambient_pulse_match_action_finished(true, &prep_receipt));
-        assert!(!ambient_pulse_match_action_finished(
-            true,
-            &match_turn_receipt(false)
-        ));
-    }
-
-    fn match_turn_receipt(applied: bool) -> TurnReceipt {
-        let command: WorldCommand = serde_json::from_value(json!({
-            "id": "turn-1",
-            "kind": "world_turn",
-            "payload": { "reason": "match_turn", "match_id": "match-1" }
-        }))
-        .unwrap();
-        TurnReceipt {
-            command,
-            succeeded: true,
-            held: false,
-            usage: None,
-            failure: None,
-            end_requested: false,
-            league_turn_applied: applied,
-            league_turn_external: false,
-        }
-    }
-
     fn lost_match_outcome() -> MatchOutcome {
         serde_json::from_value(json!({
-            "kind": "debate_league",
+            "kind": "market_night",
             "result": "lost",
             "winner": "opponent",
-            "board": { "yours": 7, "opponent": 10 },
+            "board": { "yours": 95, "opponent": 120 },
             "verdictCompletedAt": "2026-08-08T18:45:00.000Z",
-            "summary": "You lost the Debate League match, 7–10 on the final board."
+            "summary": "You lost, $95–$120 in final value."
         }))
         .unwrap()
     }
@@ -4126,7 +3937,7 @@ mod tests {
         assert!(message.contains("Result: lost."), "{message}");
         assert!(message.contains("Winner: opponent."), "{message}");
         assert!(
-            message.contains("Final board: you 7, opponent 10."),
+            message.contains("Final board: you 95, opponent 120."),
             "{message}"
         );
         assert!(message.contains("2026-08-08T18:45:00.000Z"), "{message}");
@@ -4228,12 +4039,12 @@ mod tests {
         assert_eq!(reconcile_match_outcomes(None, None).unwrap(), None);
 
         let won: MatchOutcome = serde_json::from_value(json!({
-            "kind": "debate_league",
+            "kind": "market_night",
             "result": "won",
             "winner": "you",
-            "board": { "yours": 10, "opponent": 7 },
+            "board": { "yours": 120, "opponent": 95 },
             "verdictCompletedAt": "2026-08-08T18:45:00.000Z",
-            "summary": "You won the Debate League match, 10–7 on the final board."
+            "summary": "You won, $120–$95 in final value."
         }))
         .unwrap();
         assert!(reconcile_match_outcomes(Some(lost), Some(won)).is_err());

@@ -49,8 +49,6 @@ pub struct TurnRequest<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnPurpose {
     World,
-    MatchPrep,
-    AmbientPulse,
     /// After the visit, same session: memory tools only.
     PrivateHomecoming,
     /// After the private account, same session: no tools at all. The owner's
@@ -116,8 +114,6 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         system_prompt_file: &physical_workspace.join(CONTROLLER_PROMPT),
         tools: match request.purpose {
             TurnPurpose::World => LaunchTools::DaycareWorld,
-            TurnPurpose::MatchPrep => LaunchTools::DaycarePrep,
-            TurnPurpose::AmbientPulse => LaunchTools::DaycareAmbientPulse,
             TurnPurpose::PrivateHomecoming => LaunchTools::DaycareHomecoming,
             TurnPurpose::DayReport => LaunchTools::None,
         },
@@ -311,11 +307,8 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         }
         if let Some(init) = &receipt.init {
             let allowance = match request.purpose {
-                TurnPurpose::MatchPrep => SandboxAllowance::WebSearch,
                 TurnPurpose::PrivateHomecoming => SandboxAllowance::Read,
-                TurnPurpose::World | TurnPurpose::AmbientPulse | TurnPurpose::DayReport => {
-                    SandboxAllowance::None
-                }
+                TurnPurpose::World | TurnPurpose::DayReport => SandboxAllowance::None,
             };
             if let Err(error) = verify_sandbox(init, &request.workspace.dir, allowance) {
                 // A sandbox violation outranks any other outcome: the turn may
@@ -337,7 +330,7 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         // a turn that already failed has a more specific cause to report.
         if failure.is_none() {
             match request.purpose {
-                TurnPurpose::World | TurnPurpose::MatchPrep | TurnPurpose::AmbientPulse => {
+                TurnPurpose::World => {
                     if let Some(init) = &receipt.init {
                         if let Err(error) = verify_world_was_reachable(init) {
                             failure = Some(error.to_string());

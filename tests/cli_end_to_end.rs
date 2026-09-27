@@ -1351,7 +1351,7 @@ fn an_active_visit_refuses_to_replace_a_stale_session_with_a_blank_mind() {
 fn a_match_turn_routes_the_character_to_the_existing_match_tools() {
     let install = install("cli-match-turn");
     let (platform, _) = queue_once(
-        r#"{"id":"cmd-match","kind":"world_turn","payload":{"reason":"match_turn","match_id":"11111111-2222-4333-8444-555555555555","seat":1,"role":"reader","prep_briefing":"Reuters reported a dated fact with a source URL."}}"#,
+        r#"{"id":"cmd-match","kind":"world_turn","payload":{"reason":"match_turn","match_id":"11111111-2222-4333-8444-555555555555","seat":1,"role":"reader"}}"#,
     );
     install.run(&["enroll", "--url", &platform.base_url, "--code", "PAIR-1234"]);
 
@@ -1374,19 +1374,19 @@ fn a_match_turn_routes_the_character_to_the_existing_match_tools() {
     );
     assert!(sent.contains("untrusted activity data"), "{sent}");
     assert!(sent.contains("daycare_match_act"), "{sent}");
-    assert!(sent.contains("Your own pre-debate briefing"), "{sent}");
-    assert!(sent.contains("Reuters reported a dated fact"), "{sent}");
     assert!(
         sent.contains("Do not call daycare_action_propose"),
         "{sent}"
     );
 }
 
+/// A server that still enqueues the retired `match_prep` reason gets an
+/// ordinary world turn: no match routing and no web access.
 #[test]
-fn a_match_prep_turn_is_bounded_to_daycare_and_web_search() {
-    let install = install("cli-match-prep");
+fn a_retired_match_prep_reason_gets_the_ordinary_world_profile() {
+    let install = install("cli-retired-match-prep");
     let (platform, _) = queue_once(
-        r#"{"id":"cmd-prep","kind":"world_turn","payload":{"reason":"match_prep","match_id":"11111111-2222-4333-8444-555555555555","seat":0,"role":"affirmative","activity":"claude-debate"}}"#,
+        r#"{"id":"cmd-prep","kind":"world_turn","payload":{"reason":"match_prep","match_id":"11111111-2222-4333-8444-555555555555","seat":0}}"#,
     );
     install.run(&["enroll", "--url", &platform.base_url, "--code", "PAIR-1234"]);
 
@@ -1402,19 +1402,15 @@ fn a_match_prep_turn_is_bounded_to_daycare_and_web_search() {
     );
 
     let sent = support::recorded_stdin(&install.claude_bin.parent().unwrap().to_path_buf());
-    assert!(sent.contains("bounded pre-debate research turn"), "{sent}");
-    assert!(sent.contains("at most three WebSearch calls"), "{sent}");
     assert!(
-        sent.contains("Do not call daycare_league_play_turn"),
+        !sent.contains("11111111-2222-4333-8444-555555555555"),
         "{sent}"
     );
-
     let argv = support::recorded_argv(&install.claude_bin.parent().unwrap().to_path_buf());
     assert!(argv
         .windows(2)
-        .any(|pair| { pair[0] == "--tools" && pair[1] == "ToolSearch,WebSearch" }));
-    assert!(!argv.iter().any(|arg| arg.contains("Bash")));
-    assert!(!argv.iter().any(|arg| arg.contains("Write")));
+        .any(|pair| pair[0] == "--tools" && pair[1] == "ToolSearch"));
+    assert!(!argv.iter().any(|arg| arg.contains("WebSearch")));
 }
 
 #[test]
@@ -1652,7 +1648,7 @@ fn a_visit_runs_a_turn_comes_home_and_writes_a_private_account() {
         "--interval",
         "1",
         "--instructions",
-        "Try Debate League",
+        "Play a round of Tycoon",
         "--claude-bin",
         install.claude_bin.to_str().unwrap(),
         "--json",
@@ -1672,7 +1668,7 @@ fn a_visit_runs_a_turn_comes_home_and_writes_a_private_account() {
     let opened: serde_json::Value = serde_json::from_str(&opened.body).unwrap();
     assert_eq!(opened["budget_turns"], 1);
     assert_eq!(opened["budget_usage_pct"], 2.0);
-    assert_eq!(opened["instructions"], "Try Debate League");
+    assert_eq!(opened["instructions"], "Play a round of Tycoon");
     // Token and cost caps are local: only this process sees usage, and a
     // server field nobody can check is worse than no field.
     assert!(opened.get("tokens").is_none(), "{opened}");
@@ -1723,7 +1719,7 @@ fn a_visit_runs_a_turn_comes_home_and_writes_a_private_account() {
     // pasted in: it is stale the moment a turn completes, so the character is
     // pointed at the tool that reports it.
     let sent = support::recorded_stdin_all(&install.claude_bin.parent().unwrap().to_path_buf());
-    assert!(sent.contains("Try Debate League"), "{sent}");
+    assert!(sent.contains("Play a round of Tycoon"), "{sent}");
     assert!(sent.contains("daycare_identity_get"), "{sent}");
     assert!(
         sent.contains("pace the visit by that authoritative value"),
@@ -2461,10 +2457,10 @@ fn a_malformed_visit_end_outcome_is_never_acknowledged_or_run() {
     let (platform, _) = queue_once(
         r#"{"id":"cmd-bad","kind":"visit_end","visit_id":"visit-1","payload":{
             "visit_id":"visit-1","end_reason":"activity_ended","match_outcome":{
-            "kind":"debate_league","result":"won","winner":"you",
-            "board":{"yours":10,"opponent":7},
+            "kind":"market_night","result":"won","winner":"you",
+            "board":{"yours":120,"opponent":95},
             "verdictCompletedAt":"2026-08-09T20:00:00.000Z",
-            "summary":"You won the Debate League match, 10–7 on the final board.",
+            "summary":"You won, $120–$95 in final value.",
             "opponent_actor_id":"stable-id"}}}"#,
     );
     install.run(&["enroll", "--url", &platform.base_url, "--code", "PAIR-1234"]);
@@ -2623,10 +2619,10 @@ fn pending_outcome_waits_past_the_old_retry_window_before_verdict_homecoming() {
                 return Response::json(
                     200,
                     r#"{"visit_id":"visit-race","match_outcome_state":"ready","match_outcome":{
-                        "kind":"debate_league","result":"won","winner":"you",
-                        "board":{"yours":10,"opponent":7},
+                        "kind":"market_night","result":"won","winner":"you",
+                        "board":{"yours":120,"opponent":95},
                         "verdictCompletedAt":"2026-08-09T20:00:00.000Z",
-                        "summary":"You won the Debate League match, 10–7 on the final board."}}"#,
+                        "summary":"You won, $120–$95 in final value."}}"#,
                 );
             }
             // Barrier: the first authorized reread also races and sees null;
@@ -2687,7 +2683,7 @@ fn pending_outcome_waits_past_the_old_retry_window_before_verdict_homecoming() {
     );
     assert!(prompts.contains("Result: won."), "{prompts}");
     assert!(
-        prompts.contains("Final board: you 10, opponent 7."),
+        prompts.contains("Final board: you 120, opponent 95."),
         "{prompts}"
     );
     assert!(
@@ -2780,10 +2776,10 @@ fn ordinary_start_resumes_a_pending_homecoming_after_process_restart() {
                 return Response::json(
                     200,
                     r#"{"visit_id":"visit-restart","match_outcome_state":"ready","match_outcome":{
-                        "kind":"debate_league","result":"won","winner":"you",
-                        "board":{"yours":10,"opponent":7},
+                        "kind":"market_night","result":"won","winner":"you",
+                        "board":{"yours":120,"opponent":95},
                         "verdictCompletedAt":"2026-08-09T20:00:00.000Z",
-                        "summary":"You won the Debate League match, 10–7 on the final board."}}"#,
+                        "summary":"You won, $120–$95 in final value."}}"#,
                 );
             }
             return Response::json(
