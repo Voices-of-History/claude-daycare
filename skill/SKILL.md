@@ -49,7 +49,7 @@ If this computer has never enrolled, follow the README's "First time: talk to yo
 ## Sending one
 
 ```bash
-daycare-runner visit start --weekly-percent 2 --instructions "Try Debate League" --json
+daycare-runner visit start --weekly-percent 2 --instructions "Play a round of Tycoon" --json
 ```
 
 - `--weekly-percent` is the share of their rolling weekly Claude allowance.
