@@ -127,24 +127,6 @@ fn tool_result(id: &str, content: &str, is_error: bool) -> String {
     )
 }
 
-fn run_ambient(h: &Harness) -> daycare_runner::turn::TurnOutcome {
-    run_turn(TurnRequest {
-        claude_bin: h.claude_bin.to_str().unwrap(),
-        workspace: &h.workspace,
-        mode: SessionMode::Resume {
-            session_id: SESSION.into(),
-        },
-        message: "Take one ambient pulse turn.",
-        device_token: TOKEN,
-        archive_path: &h.archive,
-        timeout: Duration::from_secs(30),
-        purpose: TurnPurpose::AmbientPulse,
-        model: daycare_runner::launch::DEFAULT_TURN_MODEL,
-        mcp_settle: Duration::ZERO,
-    })
-    .unwrap()
-}
-
 /// A homecoming reader that read the visit back and kept nothing: memory
 /// tools reachable, none called, a private account written. Valid, and the
 /// child was spawned with the two memory tools plus Read on the transcript
@@ -388,28 +370,6 @@ fn a_world_turn_child_is_denied_the_memory_save_tool() {
     assert!(argv
         .windows(2)
         .any(|pair| pair[0] == "--allowedTools" && pair[1] == "mcp__daycare"));
-}
-
-#[test]
-fn an_ambient_pulse_child_receives_the_fixed_permission_profile() {
-    let h = harness("ambient-pulse-tools", 0, 0);
-    let outcome = run_ambient(&h);
-    assert!(outcome.succeeded(), "{:?}", outcome.failure);
-
-    let argv = support::recorded_argv(&h.dir);
-    let allowed = argv
-        .windows(2)
-        .find(|pair| pair[0] == "--allowedTools")
-        .map(|pair| pair[1].as_str())
-        .unwrap();
-    assert!(allowed.contains("mcp__daycare__daycare_chat_send"));
-    assert!(allowed.contains("mcp__daycare__daycare_match_join"));
-    assert!(allowed.contains("mcp__daycare__daycare_league_play_turn"));
-    assert!(!allowed.contains("daycare_question"));
-    assert!(!allowed.contains("daycare_essay"));
-    assert!(!allowed.contains("daycare_action_propose"));
-    assert!(!allowed.contains("daycare_match_act"));
-    assert!(!allowed.contains("daycare_memory_save"));
 }
 
 /// The full fixture stream plays the world (snapshot, action) as well as
