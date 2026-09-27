@@ -4,9 +4,8 @@
 //! against a dedicated workspace this binary owns. The server referees; this
 //! process only carries proposals out and receipts back.
 //!
-//! `launch.rs` and `stream.rs` are seeded from the executable-spec prototype at
-//! `docs/research/claude-daycare/local-runner/prototype/src/lib.rs`, which proved
-//! the argv/stream seams against Claude Code 2.1.220.
+//! `launch.rs` and `stream.rs` are seeded from an earlier executable-spec
+//! prototype, which proved the argv/stream seams against Claude Code 2.1.220.
 
 pub mod config;
 pub mod error;
@@ -20,6 +19,7 @@ pub mod paths;
 pub mod platform;
 pub mod session;
 pub mod stream;
+pub mod terminal;
 pub mod turn;
 pub mod usage_meter;
 pub mod visit;

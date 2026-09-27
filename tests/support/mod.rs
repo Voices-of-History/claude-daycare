@@ -269,6 +269,7 @@ fi
 if [ -n "$DAYCARE_USAGE_SAMPLER" ]; then
   printf '%s\n' 'usage' >> "{usage_calls}"
   printf '%s\n' "$@" >> "{usage_argv}"
+  printf '%s\n' 'Claude Code (fake)'
   IFS= read -r usage_command
   if [ -f "{usage_generation}" ]; then
     usage_generation=$(cat "{usage_generation}")
@@ -278,7 +279,7 @@ if [ -n "$DAYCARE_USAGE_SAMPLER" ]; then
   usage_generation=$((usage_generation + 1))
   printf '%s\n' "$usage_generation" > "{usage_generation}"
   mkdir -p "$HOME"
-  printf '%s\n' "{{\"cachedUsageUtilization\":{{\"fetchedAtMs\":$usage_generation,\"utilization\":{{\"limits\":[{{\"kind\":\"weekly_all\",\"group\":\"weekly\",\"percent\":64,\"resets_at\":\"2026-09-02T07:00:00Z\",\"is_active\":false,\"scope\":null}}]}}}}}}" > "$HOME/.claude.json"
+  printf '%s\n' "{{\"cachedUsageUtilization\":{{\"fetchedAtMs\":$usage_generation,\"utilization\":{{\"limits\":[{{\"kind\":\"weekly_all\",\"group\":\"weekly\",\"percent\":64,\"resets_at\":\"2099-09-02T07:00:00Z\",\"is_active\":false,\"scope\":null}}]}}}}}}" > "$HOME/.claude.json"
   printf '%s\n' 'Refreshing...' 'Current week (all models)' '64% used' 'Resets Sep 2'
   exit 0
 fi
@@ -356,9 +357,10 @@ if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
   exit 0
 fi
 if [ -n "$DAYCARE_USAGE_SAMPLER" ]; then
+  printf '%s\n' 'Claude Code (fake)'
   IFS= read -r usage_command
   mkdir -p "$HOME"
-  printf '%s\n' '{{"cachedUsageUtilization":{{"fetchedAtMs":9999999999999,"utilization":{{"limits":[{{"kind":"weekly_all","group":"weekly","percent":64,"resets_at":"2026-09-02T07:00:00Z","is_active":false,"scope":null}}]}}}}}}' > "$HOME/.claude.json"
+  printf '%s\n' '{{"cachedUsageUtilization":{{"fetchedAtMs":9999999999999,"utilization":{{"limits":[{{"kind":"weekly_all","group":"weekly","percent":64,"resets_at":"2099-09-02T07:00:00Z","is_active":false,"scope":null}}]}}}}}}' > "$HOME/.claude.json"
   printf '%s\n' 'Refreshing...' 'Current week (all models)' '64% used' 'Resets Sep 2'
   exit 0
 fi

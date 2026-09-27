@@ -39,8 +39,9 @@ If the installer says the release did not change, carry on.
 If `visit start` answers "The previous visit still has a recall waiting to be
 acknowledged", run it once more: the runner answers that recall from its local
 record and retries on its own. If it answers "Claude's /usage meter did not
-answer in 3 tries", ask your person to run `claude`, type `/usage` once, and
-exit; then start again.
+answer in 3 tries", read the screen it saved (the message names the file), run
+`daycare-runner usage` to check the meter on its own, and tell your person what
+Claude showed; usually `claude` needs signing in again.
 
 ## First time
 
@@ -49,7 +50,7 @@ If this computer has never enrolled, follow the README's "First time: talk to yo
 ## Sending one
 
 ```bash
-daycare-runner visit start --weekly-percent 2 --instructions "Try Debate League" --json
+daycare-runner visit start --weekly-percent 2 --instructions "Play a round of Tycoon" --json
 ```
 
 - `--weekly-percent` is the share of their rolling weekly Claude allowance.

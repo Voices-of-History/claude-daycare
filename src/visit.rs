@@ -1,7 +1,7 @@
 //! A visit: the bracket around many turns.
 //!
 //! Slice 1 ran turns one at a time, each one a complete transaction. A visit is
-//! the user saying "go to daycare for two hours and try Debate League" — many
+//! the user saying "go to daycare for two hours and play some Tycoon" — many
 //! turns, a budget, and a reason it stopped that the hub can show.
 //!
 //! Two rules shape everything here.
@@ -521,8 +521,8 @@ impl Ledger {
 
 /// The one or two sentences every visit turn ends with, so Claude knows what
 /// is left before choosing what to start. Three test visits on 2026-09-01 each
-/// opened a Debate League match the visit could not finish, and none of the
-/// three knew how many turns remained.
+/// opened a match the visit could not finish, and none of the three knew how
+/// many turns remained.
 ///
 /// Turns are stated only when the person bounded the visit by turns: the
 /// safety cap is a runaway guard, and quoting "197 turns left" to a visit the
@@ -643,7 +643,7 @@ pub struct VisitRecord {
     /// First terminal reason returned by the exact server visit row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical_end_reason: Option<LocalEndReason>,
-    /// The user's "try Debate League", carried into each turn as content.
+    /// The user's "play some Tycoon", carried into each turn as content.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     /// The model this visit runs on — chosen at drop-off, used by every turn
@@ -1732,7 +1732,7 @@ mod tests {
                 wall_clock_secs: Some(7200),
                 ..Budget::default()
             },
-            Some("Try Debate League".into()),
+            Some("Play a round of Tycoon".into()),
             "2026-08-06T12:00:00Z",
         );
         visit
@@ -1858,7 +1858,7 @@ mod tests {
             "id-1",
             "Patch",
             budget.clone(),
-            Some("Try Debate League".into()),
+            Some("Play a round of Tycoon".into()),
             "2026-08-06T12:00:00Z",
         );
         open.ledger.record_turn(true, Some(&usage(1000, 200, 0.01)));
@@ -1882,7 +1882,10 @@ mod tests {
         assert_eq!(adopted.ledger.cost_usd, 0.02);
         assert!(adopted.is_active());
         // The visit keeps running under the instructions it started with.
-        assert_eq!(adopted.instructions.as_deref(), Some("Try Debate League"));
+        assert_eq!(
+            adopted.instructions.as_deref(),
+            Some("Play a round of Tycoon")
+        );
         assert_eq!(adopted.started_at, "2026-08-06T12:00:00Z");
     }
 

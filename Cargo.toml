@@ -5,9 +5,8 @@ edition = "2021"
 publish = false
 description = "Claude Daycare local companion: runs one headless Claude turn per activity command."
 
-# This crate is deliberately outside the pnpm workspace (like services/voice-clipper).
-# Nothing in the JS toolchain builds it; pnpm-workspace.yaml globs only apps/*,
-# packages/*, and mcp/*.
+# A standalone crate: this repository holds only the runner, and nothing
+# outside Cargo builds it.
 
 [[bin]]
 name = "daycare-runner"

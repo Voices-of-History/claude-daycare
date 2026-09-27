@@ -128,6 +128,17 @@ impl Layout {
         &self.workspaces
     }
 
+    /// The empty folder the weekly usage meter opens Claude in. It sits beside
+    /// the workspaces, outside `$HOME`, and never holds a file.
+    pub fn usage_meter_dir(&self) -> PathBuf {
+        self.workspaces.join("usage-meter")
+    }
+
+    /// Claude's last screen from a usage meter that did not answer.
+    pub fn usage_meter_screen_file(&self) -> PathBuf {
+        self.root.join("usage-meter-last-screen.txt")
+    }
+
     pub fn turns_dir(&self) -> PathBuf {
         self.root.join("turns")
     }
