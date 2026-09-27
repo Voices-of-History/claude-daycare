@@ -19,6 +19,10 @@ is accepted (no SSE required), and `Authorization: Bearer <device_token>` arrive
 on every MCP request including `initialize`.
 
     python3 dev/mock-platform.py <port> <state.json>
+
+With DAYCARE_MOCK_VISIT=1 it also serves the visit routes (open, status, end,
+report, transcript) and queues one world turn tied to that visit, for
+`dev/visit-check.sh`.
 """
 
 import http.server
@@ -35,6 +39,8 @@ PORT = int(sys.argv[1])
 STATE_PATH = sys.argv[2]
 TOKEN = "dck_dev_" + uuid.uuid4().hex[:24]
 TURN_PROMPT = os.environ.get("DAYCARE_MOCK_TURN_PROMPT")
+VISIT_MODE = os.environ.get("DAYCARE_MOCK_VISIT") == "1"
+VISIT_ID = "visit-live"
 
 # constants.ts
 MCP_PATH = "/api/daycare/mcp/mcp"
@@ -63,9 +69,17 @@ STATE = {
     "memories": [],
     "events": [],
     "auth_headers": [],
+    "visits": [],
+    "visit_ends": [],
+    "visit_reports": [],
     # The adjudicator scopes its memory cap to the current turn command.
     "window": None,
 }
+
+if VISIT_MODE:
+    STATE["commands"] = [
+        {"id": "cmd-visit-1", "kind": "world_turn", "visit_id": VISIT_ID, "payload": {}}
+    ]
 
 if TURN_PROMPT:
     for command in STATE["commands"]:
@@ -393,7 +407,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 dump_state()
             # Wrapped, as the real route returns it.
             return self._json(200, {"command": command})
+        if VISIT_MODE and self.path == f"/api/daycare/visits/{VISIT_ID}":
+            if not self._authorized():
+                return self._json(401, {"error": "Unauthorized"})
+            return self._json(200, self._visit())
         return self._json(404, {"error": "Not found"})
+
+    def _visit(self):
+        return {
+            "visit_id": VISIT_ID,
+            "match_outcome_state": "none",
+            "match_outcome": None,
+        }
 
     def do_POST(self):
         raw = self._body()
@@ -434,6 +459,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not self._authorized():
                 return self._json(401, {"error": "Unauthorized"})
             return self._mcp(json.loads(raw or "{}"))
+
+        if VISIT_MODE and self.path.startswith("/api/daycare/visits"):
+            if not self._authorized():
+                return self._json(401, {"error": "Unauthorized"})
+            body = json.loads(raw or "{}")
+            with LOCK:
+                if self.path == "/api/daycare/visits":
+                    STATE["visits"].append(body)
+                elif self.path == f"/api/daycare/visits/{VISIT_ID}/end":
+                    STATE["visit_ends"].append(body)
+                elif self.path.startswith(f"/api/daycare/visits/{VISIT_ID}/"):
+                    STATE["visit_reports"].append(self.path.rsplit("/", 1)[-1])
+                else:
+                    return self._json(404, {"error": "Not found"})
+                dump_state()
+            if self.path == "/api/daycare/visits":
+                return self._json(200, {"visit_id": VISIT_ID})
+            if self.path.endswith("/end"):
+                return self._json(200, self._visit())
+            return self._json(200, {"ok": True})
 
         return self._json(404, {"error": "Not found"})
 

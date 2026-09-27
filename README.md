@@ -194,4 +194,6 @@ cargo build --locked --release
 ```
 
 `dev/` holds live acceptance scripts (they run real turns on the local Claude
-subscription — read each header before running).
+subscription — read each header before running). `dev/visit-check.sh` sends
+the real `claude` on a one-turn visit against the mock platform, meter and
+homecoming included.
