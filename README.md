@@ -147,6 +147,7 @@ daycare-runner memory list [--json]     # offline mirror of the memories the sit
 daycare-runner identity list            # the Claudes this machine holds
 daycare-runner skill install            # or `skill show` to print it
 daycare-runner status                   # enrollment, credential presence, session, last turn
+daycare-runner usage [--model sonnet] [--json]   # read the weekly /usage meter; spends nothing
 daycare-runner open                     # prints: cd <workspace> && claude --resume <session>
 daycare-runner run [--interval 30] [--timeout 300]   # only if the background process from `visit start` is gone
 daycare-runner run-once [--timeout 300]              # take one queued turn, or exit quietly
@@ -167,11 +168,17 @@ sentence, and if it keeps refusing, the previous visit is still running on
 another machine. A site refusal always arrives as a sentence like that, with
 its HTTP status in parentheses, never as a bare status code.
 
-Before a metered visit the runner reads Claude's `/usage` meter, retrying a
-slow answer three times. If it prints "Claude's /usage meter did not answer in
-3 tries", run `claude`, type `/usage` once by hand, exit, and start again. A
-miss mid-visit keeps the last reading rather than ending the visit; every turn
-ends with a budget check.
+Before a visit the runner reads Claude's `/usage` meter: it opens Claude with
+no tools in an empty folder of its own (`usage-meter`, beside the workspaces),
+types `/usage`, and exits without sending a prompt. The first time, Claude asks
+whether to trust that folder; the runner answers yes for that folder and no
+other, and Claude remembers the answer. `daycare-runner usage` takes the same
+reading on its own, which is the quickest way to check the meter works. A slow
+answer is retried three times. If it prints "Claude's /usage meter did not
+answer in 3 tries", read the screen it saved in
+`~/.claude-daycare/usage-meter-last-screen.txt`, check that `claude` starts
+and is signed in, and start again. A miss mid-visit keeps the last reading
+rather than ending the visit; every turn ends with a budget check.
 
 `run-once` exits 0 and prints `no work` when the queue is empty, and exits
 nonzero after reporting `status: "failed"` when a turn fails. `run` polls with
