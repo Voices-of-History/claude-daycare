@@ -58,33 +58,27 @@ pub struct MatchOutcome {
 
 impl MatchOutcome {
     fn is_valid(&self) -> bool {
-        if self.kind != "debate_league" {
-            return false;
-        }
+        // The server owns the exact summary wording per game; the runner only
+        // checks that the facts cohere and that the text is one short line
+        // safe to place in a private prompt.
+        let kind_ok = !self.kind.is_empty()
+            && self.kind.len() <= 32
+            && self
+                .kind
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_');
         let coherent = matches!(
             (self.result, self.winner),
             (MatchOutcomeResult::Won, MatchOutcomeWinner::You)
                 | (MatchOutcomeResult::Lost, MatchOutcomeWinner::Opponent)
                 | (MatchOutcomeResult::Drew, MatchOutcomeWinner::Draw)
         );
-        if !coherent {
-            return false;
-        }
-        let expected_summary = match self.result {
-            MatchOutcomeResult::Won => format!(
-                "You won the Debate League match, {}–{} on the final board.",
-                self.board.yours, self.board.opponent
-            ),
-            MatchOutcomeResult::Lost => format!(
-                "You lost the Debate League match, {}–{} on the final board.",
-                self.board.yours, self.board.opponent
-            ),
-            MatchOutcomeResult::Drew => format!(
-                "The Debate League match ended in a {}–{} draw.",
-                self.board.yours, self.board.opponent
-            ),
-        };
-        self.summary == expected_summary
+        let summary_ok = !self.summary.trim().is_empty()
+            && self.summary.chars().count() <= 128
+            && !self.summary.chars().any(char::is_control);
+        kind_ok
+            && coherent
+            && summary_ok
             && !self.verdict_completed_at.is_empty()
             && self.verdict_completed_at.len() <= 64
             && self
@@ -1112,10 +1106,10 @@ mod tests {
         let command: WorldCommand = serde_json::from_str(
             r#"{"id":"cmd-1","kind":"visit_end","payload":{
                 "visit_id":"visit-1","end_reason":"activity_ended",
-                "match_outcome":{"kind":"debate_league","result":"lost",
-                "winner":"opponent","board":{"yours":7,"opponent":10},
+                "match_outcome":{"kind":"market_night","result":"lost",
+                "winner":"opponent","board":{"yours":95,"opponent":120},
                 "verdictCompletedAt":"2026-08-08T18:45:00.000Z",
-                "summary":"You lost the Debate League match, 7–10 on the final board."}}}"#,
+                "summary":"You lost, $95–$120 in final value."}}}"#,
         )
         .unwrap();
 
@@ -1123,19 +1117,53 @@ mod tests {
             .match_outcome()
             .expect("valid payload")
             .expect("relative outcome");
-        assert_eq!(outcome.board.yours, 7);
-        assert_eq!(outcome.board.opponent, 10);
+        assert_eq!(outcome.kind, "market_night");
+        assert_eq!(outcome.board.yours, 95);
+        assert_eq!(outcome.board.opponent, 120);
 
         let leaked: WorldCommand = serde_json::from_str(
             r#"{"id":"cmd-2","kind":"visit_end","payload":{
-                "match_outcome":{"kind":"debate_league","result":"lost",
-                "winner":"opponent","board":{"yours":7,"opponent":10},
+                "match_outcome":{"kind":"market_night","result":"lost",
+                "winner":"opponent","board":{"yours":95,"opponent":120},
                 "verdictCompletedAt":"2026-08-08T18:45:00.000Z",
-                "summary":"You lost the Debate League match, 7–10 on the final board.",
+                "summary":"You lost, $95–$120 in final value.",
                 "opponent_actor_id":"stable-id"}}}"#,
         )
         .unwrap();
         assert!(leaked.match_outcome().is_err());
+
+        let outcome_with = |kind: &str, winner: &str, summary: &str| -> WorldCommand {
+            serde_json::from_value(serde_json::json!({
+                "id": "cmd-3", "kind": "visit_end", "payload": { "match_outcome": {
+                    "kind": kind, "result": "lost", "winner": winner,
+                    "board": { "yours": 95, "opponent": 120 },
+                    "verdictCompletedAt": "2026-08-08T18:45:00.000Z",
+                    "summary": summary,
+                }}
+            }))
+            .unwrap()
+        };
+        let fine = "You lost, $95–$120 in final value.";
+        assert!(outcome_with("market_night", "opponent", fine)
+            .match_outcome()
+            .is_ok());
+        assert!(outcome_with("Market Night", "opponent", fine)
+            .match_outcome()
+            .is_err());
+        assert!(outcome_with("market_night", "you", fine)
+            .match_outcome()
+            .is_err());
+        assert!(outcome_with("market_night", "opponent", "")
+            .match_outcome()
+            .is_err());
+        assert!(
+            outcome_with("market_night", "opponent", "line one\nline two")
+                .match_outcome()
+                .is_err()
+        );
+        assert!(outcome_with("market_night", "opponent", &"x".repeat(129))
+            .match_outcome()
+            .is_err());
     }
 
     #[test]
