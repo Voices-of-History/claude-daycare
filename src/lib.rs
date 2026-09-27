@@ -20,6 +20,7 @@ pub mod paths;
 pub mod platform;
 pub mod session;
 pub mod stream;
+pub mod terminal;
 pub mod turn;
 pub mod usage_meter;
 pub mod visit;
