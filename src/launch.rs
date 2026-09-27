@@ -1,9 +1,7 @@
 //! Argv and child-environment policy for one headless Claude turn.
 //!
-//! Seeded from the executable-spec prototype at
-//! `docs/research/claude-daycare/local-runner/prototype/src/lib.rs`, which
-//! verified every flag here against the `claude --help` of the installed
-//! Claude Code 2.1.220.
+//! Seeded from an earlier executable-spec prototype, which verified every
+//! flag here against the `claude --help` of the installed Claude Code 2.1.220.
 
 use crate::{Error, Result};
 use serde::Serialize;
