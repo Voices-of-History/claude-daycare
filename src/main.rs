@@ -188,6 +188,15 @@ enum Commands {
         #[command(subcommand)]
         action: MemoryAction,
     },
+    /// Read your weekly Claude usage the way a visit does. Spends nothing:
+    /// Claude opens with no tools, `/usage` is typed, and Claude exits.
+    Usage {
+        /// The visit model whose weekly meter to read: sonnet (default) or opus.
+        #[arg(long, default_value = DEFAULT_TURN_MODEL)]
+        model: String,
+        #[arg(long, default_value = "claude")]
+        claude_bin: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -416,7 +425,37 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
         }
         Commands::Skill { action } => skill_command(action, out),
         Commands::Memory { action } => memory_command(&layout, action, out),
+        Commands::Usage { model, claude_bin } => {
+            require_turn_model(&model)?;
+            let sample = sample_weekly_usage(&claude_bin, &model, &layout)?;
+            out.emit(
+                json!({
+                    "ok": true,
+                    "model": model,
+                    "used_percentage": sample.used_percentage,
+                    "resets_at": sample.resets_at,
+                    "meter_key": sample.meter_key,
+                }),
+                || {
+                    println!(
+                        "{}% of the weekly allowance used ({}, resets {})",
+                        sample.used_percentage, sample.meter_key, sample.resets_at
+                    )
+                },
+            );
+            Ok(())
+        }
     }
+}
+
+fn require_turn_model(model: &str) -> Result<()> {
+    if ALLOWED_TURN_MODELS.contains(&model) {
+        return Ok(());
+    }
+    Err(Error::new(format!(
+        "--model must be one of {}; got {model:?}",
+        ALLOWED_TURN_MODELS.join(", ")
+    )))
 }
 
 /// Output discipline in one place. Human text stays the default so the CLI is
@@ -1650,12 +1689,7 @@ fn visit_command(
             timeout,
             claude_bin,
         } => {
-            if !ALLOWED_TURN_MODELS.contains(&model.as_str()) {
-                return Err(Error::new(format!(
-                    "--model must be one of {}; got {model:?}",
-                    ALLOWED_TURN_MODELS.join(", ")
-                )));
-            }
+            require_turn_model(&model)?;
             let active = active_for(layout, store, &which)?;
             // A normal `visit start` must finish any older durable homecoming
             // for this identity before opening a new server visit. Otherwise a
@@ -1698,12 +1732,7 @@ fn visit_command(
             // if it creates a new visit, this is the only reading known to
             // precede the first claimable command.
             let initial_weekly = if weekly_metered {
-                Some(sample_weekly_usage(
-                    &claude_bin,
-                    &model,
-                    &active.workspace.dir,
-                    layout.root(),
-                )?)
+                Some(sample_weekly_usage(&claude_bin, &model, layout)?)
             } else {
                 None
             };
@@ -2340,12 +2369,7 @@ fn run_visit(
     // start line before launching another model turn; never infer zero usage.
     let mut last_meter_answer: Option<Instant> = None;
     if record.budget.weekly_share.is_some() && record.ledger.weekly_meter_first_pct.is_none() {
-        let sample = sample_weekly_usage(
-            claude_bin,
-            record.turn_model(),
-            &active.workspace.dir,
-            layout.root(),
-        )?;
+        let sample = sample_weekly_usage(claude_bin, record.turn_model(), layout)?;
         record.ledger.start_weekly_meter(
             sample.used_percentage,
             sample.resets_at,
@@ -2444,12 +2468,7 @@ fn run_visit(
             record.save(layout)?;
         }
         if completed_turn && record.budget.weekly_share.is_some() {
-            match sample_weekly_usage(
-                claude_bin,
-                record.turn_model(),
-                &active.workspace.dir,
-                layout.root(),
-            ) {
+            match sample_weekly_usage(claude_bin, record.turn_model(), layout) {
                 Ok(sample) => {
                     // A reset window or a changed meter is a real verdict, not
                     // a flake: the percentage control would become fiction.
@@ -2629,7 +2648,7 @@ fn finish_homecoming(
         &_lock,
     )?;
     if account.is_some() && record.budget.weekly_share.is_some() {
-        record_weekly_homecoming_sample(layout, active, claude_bin, &mut record);
+        record_weekly_homecoming_sample(layout, claude_bin, &mut record);
     }
 
     // The owner-facing day report: a second message in the resumed reader
@@ -2643,7 +2662,7 @@ fn finish_homecoming(
         match write_day_report(layout, active, claude_bin, timeout, &record, &_lock) {
             Ok(Some(report)) => {
                 if record.budget.weekly_share.is_some() {
-                    record_weekly_homecoming_sample(layout, active, claude_bin, &mut record);
+                    record_weekly_homecoming_sample(layout, claude_bin, &mut record);
                 }
                 // The report is offered, never owed: an empty reply means the
                 // owner reads the visit's recorded facts and nothing more.
@@ -2884,18 +2903,8 @@ fn settle_prior_visit_delivery(
     Ok(settled)
 }
 
-fn record_weekly_homecoming_sample(
-    layout: &Layout,
-    active: &Active,
-    claude_bin: &str,
-    record: &mut VisitRecord,
-) {
-    match sample_weekly_usage(
-        claude_bin,
-        record.turn_model(),
-        &active.workspace.dir,
-        layout.root(),
-    ) {
+fn record_weekly_homecoming_sample(layout: &Layout, claude_bin: &str, record: &mut VisitRecord) {
+    match sample_weekly_usage(claude_bin, record.turn_model(), layout) {
         Ok(sample) => {
             if let Err(error) = record.ledger.record_weekly_meter(
                 sample.used_percentage,

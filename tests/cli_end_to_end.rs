@@ -2294,7 +2294,7 @@ fn a_lost_start_response_fails_closed_with_a_recall_path() {
         std::fs::read_to_string(install.claude_bin.parent().unwrap().join("usage-argv")).unwrap();
     assert!(
         usage_argv.lines().any(|arg| arg == "--safe-mode"),
-        "the subscription sampler must bypass workspace trust without loading project customizations: {usage_argv}"
+        "the subscription sampler must not load project customizations: {usage_argv}"
     );
 }
 
