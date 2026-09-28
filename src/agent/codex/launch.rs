@@ -380,6 +380,7 @@ mod tests {
                 workspace: &ws,
                 purpose,
                 model: DEFAULT_CODEX_MODEL,
+                device_token: Some("test-device-token"),
             },
             &ws.join("daycare-models.json"),
         )
@@ -494,6 +495,7 @@ mod tests {
                 workspace: &ws,
                 purpose: TurnPurpose::World,
                 model: DEFAULT_CODEX_MODEL,
+                device_token: Some("test-device-token"),
             },
             &ws.join("daycare-models.json"),
         )

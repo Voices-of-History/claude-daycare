@@ -46,7 +46,8 @@ pub struct TurnRequest<'a> {
     pub mcp_settle: Duration,
     /// The tokens the visit has left. For an agent that reports usage while
     /// the turn runs (`Agent::live_token_counter`), the turn is killed once it
-    /// spends more than this; overshoot is at most one model step. `None`
+    /// spends more than this. Usage arrives after a model step, and shutdown
+    /// happens on the next process poll, so this is not a provider-side cap. `None`
     /// outside a token-capped visit, and ignored by agents that report usage
     /// only at the end.
     pub token_ceiling: Option<u64>,
@@ -76,7 +77,7 @@ pub struct TurnOutcome {
     /// The turn succeeded without calling any daycare tool: the agent watched,
     /// waited, or declined, and said so. A held turn is a turn, not a failure.
     pub held: bool,
-    /// The turn was killed for passing `token_ceiling`.
+    /// The turn passed `token_ceiling` (killed if it was still running).
     pub over_token_ceiling: bool,
 }
 
@@ -284,6 +285,12 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         )));
     }
     let stderr_text = stderr_result.recv_timeout(drain).unwrap_or_default();
+    // A short final step can finish and exit between polls. Recheck after
+    // draining stdout so an over-budget exit cannot be reported as success.
+    over_token_ceiling |= token_counter.is_some()
+        && request
+            .token_ceiling
+            .is_some_and(|ceiling| tokens_spent.load(Ordering::SeqCst) > ceiling);
     // Whatever the turn did, the agent may have state to settle (Codex hands a
     // refreshed login back to the owner's own home).
     let after_turn = agent.after_turn();
@@ -298,7 +305,7 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
     }
     if over_token_ceiling {
         failure = Some(format!(
-            "turn spent {} tokens, more than the {} left in the visit's token cap, and was killed",
+            "turn spent {} tokens, more than the {} left in the visit's token cap",
             tokens_spent.load(Ordering::SeqCst),
             request.token_ceiling.unwrap_or(0)
         ));

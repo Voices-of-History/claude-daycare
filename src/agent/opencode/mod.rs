@@ -801,6 +801,7 @@ pub fn verify_export_agents(text: &str, session_id: &str) -> Result<()> {
     let messages = export
         .get("messages")
         .and_then(Value::as_array)
+        .filter(|messages| !messages.is_empty())
         .ok_or_else(|| Error::new("opencode export listed no messages"))?;
     for message in messages {
         let agent = message.pointer("/info/agent").and_then(Value::as_str);
@@ -1142,6 +1143,12 @@ mod tests {
             .to_string();
         let error = verify_export_agents(&build, &id).unwrap_err();
         assert!(error.to_string().contains("\"build\""), "{error}");
+    }
+
+    #[test]
+    fn an_empty_export_does_not_prove_which_agent_answered() {
+        let export = json!({"info": {"id": "ses_example"}, "messages": []});
+        assert!(verify_export_agents(&export.to_string(), "ses_example").is_err());
     }
 
     #[test]

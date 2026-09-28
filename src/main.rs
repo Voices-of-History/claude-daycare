@@ -3504,6 +3504,7 @@ fn weekly_usage_line(record: &VisitRecord) -> Option<String> {
         match record.agent {
             AgentKind::Claude => "Claude",
             AgentKind::Codex => "Codex",
+            AgentKind::Opencode => "OpenCode",
         }
     ))
 }
@@ -4107,6 +4108,7 @@ fn archive_parser(kind: AgentKind) -> fn(&str) -> Result<StreamReceipt> {
     match kind {
         AgentKind::Claude => daycare_runner::stream::parse_stream,
         AgentKind::Codex => daycare_runner::agent::codex::stream::parse,
+        AgentKind::Opencode => daycare_runner::agent::opencode::stream::parse_stream,
     }
 }
 
@@ -4692,6 +4694,28 @@ mod tests {
             .unwrap()
             .is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn status_reads_opencode_archives_with_its_adapter() {
+        let root =
+            std::env::temp_dir().join(format!("daycare-status-opencode-{}", std::process::id()));
+        let layout = Layout::at(&root);
+        std::fs::create_dir_all(layout.turns_dir()).unwrap();
+        let path = layout.turn_file("world");
+        let fixture = include_str!("../tests/fixtures/opencode-1.18.33/world.jsonl");
+        std::fs::write(&path, fixture).unwrap();
+        let receipt = adapter.parse_receipt(fixture).unwrap();
+        let last = latest_turn(
+            &layout,
+            Some(&receipt.session_id),
+            archive_parser(AgentKind::Opencode),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(last.0, path);
+        assert!(last.1.contains("success"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
