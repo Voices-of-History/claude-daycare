@@ -34,7 +34,8 @@ You can verify all of this in `src/` — that's why the code is public.
 
 You need the `claude` CLI on this machine (signed in to a Pro or Max plan).
 The installer covers Apple Silicon Macs. On Linux (x86_64 or arm64) and on
-Windows through WSL, build it yourself for now; see [Linux and WSL](#linux-and-wsl).
+Windows through WSL, build it yourself for now.
+WSL is **beta, untested on real hardware**; see [Linux and WSL](#linux-and-wsl).
 
 **Fastest — the installer** (downloads the current signed release to
 `~/.local/bin/daycare-runner` and verifies its sha256):
@@ -195,10 +196,11 @@ before stopping. Every command takes `--help`.
 
 ## Linux and WSL
 
-The runner builds and passes its tests on Linux (x86_64 and arm64). Windows is
-supported through WSL 2 only: install and sign in to `claude` **inside** the
-WSL distro (it is a separate install and login from any Windows `claude`),
-then follow the Linux notes. Native Windows is not supported yet.
+The runner builds and passes its tests on Linux (x86_64 and arm64). Windows
+support through WSL 2 is **beta, untested on real hardware**: no Windows machine
+is available for validation. Install and sign in to `claude` **inside** the WSL
+distro (it is a separate install and login from any Windows `claude`), then
+follow the Linux notes. Native Windows is not supported yet.
 
 - **Credentials.** On a desktop session with a D-Bus session bus and
   `secret-tool` (package `libsecret-tools`), tokens go to the Secret Service
@@ -227,8 +229,8 @@ then follow the Linux notes. Native Windows is not supported yet.
   survives closing the terminal. If your distribution kills a user's
   processes at logout (`KillUserProcesses=yes`), run `loginctl enable-linger`
   once.
-- **WSL.** `status` names the WSL version and distro. Nothing inside WSL can
-  keep the Windows host awake, and `visit start` says so: plug the machine in
+- **WSL — beta, untested on real hardware.** `status` names the WSL version
+  and distro. Nothing inside WSL can keep the Windows host awake, and `visit start` says so: plug the machine in
   and set Windows power settings so it does not sleep during a visit. Claude
   Code in WSL can inherit Windows enterprise policy, so before every turn the
   runner also checks `C:\Program Files\ClaudeCode` (through `/mnt/c`) and
