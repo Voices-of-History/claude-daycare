@@ -153,7 +153,7 @@ impl Layout {
     pub fn ensure_root(&self) -> Result<()> {
         create_private_dir(&self.root)?;
         create_private_dir(&self.turns_dir())?;
-        create_private_dir(&self.workspaces)?;
+        ensure_workspace_root(&self.workspaces)?;
         create_private_dir(&self.visits_dir())?;
         create_private_dir(&self.memories_dir())?;
         Ok(())
@@ -161,15 +161,94 @@ impl Layout {
 }
 
 /// Where workspaces go when nothing overrides them: a private directory in the
-/// OS temp area, which on macOS is already per-user and mode 0700, so no
-/// ancestor of a workspace is writable by another account. Losing it costs
-/// nothing — `Workspace::scaffold` rewrites every file it contains.
+/// OS temp area. Losing it costs nothing — `Workspace::scaffold` rewrites every
+/// file it contains.
+///
+/// On macOS `$TMPDIR` is already per-user and mode 0700, and the name keeps
+/// `$USER` so existing workspaces (and the notes a character keeps there) stay
+/// where they are. Elsewhere the temp area is normally a shared, sticky `/tmp`,
+/// so the name uses the numeric uid (`$USER` can be unset under cron or
+/// systemd), and `ensure_workspace_root` checks who owns the directory before
+/// anything goes into it: another account can create the name first.
 ///
 /// The one thing it must not be is a descendant of `$HOME`.
 fn default_workspace_root() -> Result<PathBuf> {
     let base = std::env::temp_dir();
+    Ok(base.join(format!("claude-daycare-{}", workspace_root_suffix())))
+}
+
+#[cfg(target_os = "macos")]
+fn workspace_root_suffix() -> String {
     let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
-    Ok(base.join(format!("claude-daycare-{}", sanitize_segment(&user))))
+    sanitize_segment(&user)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn workspace_root_suffix() -> String {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }.to_string()
+}
+
+#[cfg(not(unix))]
+fn workspace_root_suffix() -> String {
+    let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_string());
+    sanitize_segment(&user)
+}
+
+/// Create the workspace root if it is missing, then refuse it unless it is a
+/// real directory (not a symlink), owned by this user, with no group or other
+/// permissions. `lstat` comes first and nothing is chmod-ed: a directory that
+/// someone else created, or a symlink pointing into this user's files, must be
+/// refused, not "repaired" through.
+#[cfg(unix)]
+pub fn ensure_workspace_root(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Recursive so an explicit DAYCARE_WORKSPACE_ROOT may be nested; an
+            // existing directory is accepted here and judged below.
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path)?;
+        }
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    let refuse = |why: &str| {
+        Error::new(format!(
+            "refusing the workspace root {}: {why}. Daycare workspaces must sit in a directory \
+             only you can reach; remove it (or set DAYCARE_WORKSPACE_ROOT elsewhere) and retry",
+            path.display()
+        ))
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(refuse("it is a symlink"));
+    }
+    if !metadata.is_dir() {
+        return Err(refuse("it is not a directory"));
+    }
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    if metadata.uid() != euid {
+        return Err(refuse(&format!(
+            "it is owned by uid {}, not you (uid {euid})",
+            metadata.uid()
+        )));
+    }
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(refuse(&format!(
+            "its mode is {mode:03o}; it must be 700 (chmod 700 it if you made it)"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn ensure_workspace_root(path: &Path) -> Result<()> {
+    create_private_dir(path)
 }
 
 /// An actor id or command id becomes a directory/file name; keep it to
@@ -286,6 +365,62 @@ mod tests {
             );
         }
         assert!(root.is_absolute(), "{} must be absolute", root.display());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_workspace_root_is_created_private_and_refused_when_not_ours_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = crate::testdir::unique_dir("daycare-wsroot");
+        let root = base.join("claude-daycare-test");
+        ensure_workspace_root(&root).unwrap();
+        let mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        // Idempotent on a healthy root.
+        ensure_workspace_root(&root).unwrap();
+
+        // A loose mode is refused, not silently repaired.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = ensure_workspace_root(&root).unwrap_err();
+        assert!(error.to_string().contains("755"), "{error}");
+
+        // A symlink squatting the name is refused before anything follows it.
+        let target = base.join("elsewhere");
+        create_private_dir(&target).unwrap();
+        let link = base.join("claude-daycare-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let error = ensure_workspace_root(&link).unwrap_err();
+        assert!(error.to_string().contains("symlink"), "{error}");
+
+        // So is a file.
+        let file = base.join("claude-daycare-file");
+        fs::write(&file, "").unwrap();
+        assert!(ensure_workspace_root(&file).is_err());
+        fs::remove_dir_all(&base).ok();
+    }
+
+    /// Someone else's directory (root's /, the only one a test can rely on
+    /// existing and not being ours) is refused by owner.
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_root_owned_by_another_account_is_refused() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let error = ensure_workspace_root(Path::new("/")).unwrap_err();
+        assert!(error.to_string().contains("owned by uid 0"), "{error}");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn the_default_workspace_root_is_named_by_uid_not_user() {
+        let root = default_workspace_root().unwrap();
+        let uid = unsafe { libc::geteuid() };
+        assert!(
+            root.ends_with(format!("claude-daycare-{uid}")),
+            "{}",
+            root.display()
+        );
     }
 
     #[test]

@@ -735,7 +735,7 @@ impl MeterOutage {
 
 /// The meter folder, created empty and owner-only, as Claude will name it.
 fn prepare_meter_dir(layout: &Layout) -> Result<PathBuf> {
-    create_private_dir(layout.workspace_root())?;
+    crate::paths::ensure_workspace_root(layout.workspace_root())?;
     let dir = layout.usage_meter_dir();
     create_private_dir(&dir)?;
     if fs::read_dir(&dir)?.next().is_some() {

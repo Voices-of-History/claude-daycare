@@ -73,7 +73,13 @@ pub fn guard_no_managed_claude(claude_bin: &str) -> Result<()> {
         policy_dir: managed_policy_dir(),
         remote_settings: config_dir.join("remote-settings.json"),
         managed_preferences: managed_preference_paths()?,
-    })
+    })?;
+    // Inside WSL, Claude Code can inherit the Windows host's policy too.
+    if crate::wsl::detect().is_some() {
+        let sources = crate::wsl::WindowsPolicySources::discover()?;
+        crate::wsl::guard_windows_claude_policy(&sources, guard_policy_dir)?;
+    }
+    Ok(())
 }
 
 fn guard_personal_subscription(claude_bin: &str) -> Result<()> {
@@ -117,13 +123,7 @@ fn guard_personal_subscription(claude_bin: &str) -> Result<()> {
 }
 
 fn guard_managed_sources(sources: &ManagedClaudeSources) -> Result<()> {
-    let managed_memory = sources.policy_dir.join(CLAUDE_MD);
-    refuse_existing_managed_source(&managed_memory)?;
-
-    // A system managed-settings file is an active policy source even when it
-    // currently contains `{}`: an MDM agent can populate it as the child starts.
-    // Its mere existence is therefore enough to refuse the turn.
-    refuse_existing_managed_source(&sources.policy_dir.join("managed-settings.json"))?;
+    guard_policy_dir(&sources.policy_dir)?;
 
     // Claude creates the personal remote-settings cache as `{}` when no server
     // policy is active. The live personal-subscription check above proves this
@@ -142,7 +142,24 @@ fn guard_managed_sources(sources: &ManagedClaudeSources) -> Result<()> {
         Ok(_) => return Err(managed_claude_error(settings)),
     }
 
-    let drop_ins = sources.policy_dir.join("managed-settings.d");
+    for preferences in &sources.managed_preferences {
+        refuse_existing_managed_source(preferences)?;
+    }
+    Ok(())
+}
+
+/// The files Claude Code reads from a managed-policy directory: managed
+/// CLAUDE.md, managed-settings.json, and `managed-settings.d/*.json`. Under
+/// WSL the same check runs on the Windows directory as mounted in the distro.
+fn guard_policy_dir(policy_dir: &Path) -> Result<()> {
+    refuse_existing_managed_source(&policy_dir.join(CLAUDE_MD))?;
+
+    // A system managed-settings file is an active policy source even when it
+    // currently contains `{}`: an MDM agent can populate it as the child starts.
+    // Its mere existence is therefore enough to refuse the turn.
+    refuse_existing_managed_source(&policy_dir.join("managed-settings.json"))?;
+
+    let drop_ins = policy_dir.join("managed-settings.d");
     match fs::read_dir(&drop_ins) {
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => {
@@ -168,9 +185,6 @@ fn guard_managed_sources(sources: &ManagedClaudeSources) -> Result<()> {
         }
     }
 
-    for preferences in &sources.managed_preferences {
-        refuse_existing_managed_source(preferences)?;
-    }
     Ok(())
 }
 
@@ -1063,24 +1077,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn only_personal_claude_subscriptions_pass_the_remote_policy_gate() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = scratch();
         fs::create_dir_all(&root).unwrap();
         let fake = root.join("claude");
-        fs::write(
+        crate::testdir::write_executable(
             &fake,
             "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"max\"}'\n",
-        )
-        .unwrap();
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+        );
         guard_personal_subscription(fake.to_str().unwrap()).unwrap();
 
-        fs::write(
+        crate::testdir::write_executable(
             &fake,
             "#!/bin/sh\nprintf '%s\\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"enterprise\"}'\n",
-        )
-        .unwrap();
+        );
         let error = guard_personal_subscription(fake.to_str().unwrap()).unwrap_err();
         assert!(error.message().contains("personal Claude Pro or Max"));
 

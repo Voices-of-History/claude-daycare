@@ -1903,9 +1903,9 @@ fn a_failed_first_turn_does_not_swallow_the_persons_request() {
     let root = install.claude_bin.parent().unwrap().to_path_buf();
     let mark = root.join("first-turn-died");
     let wrapper = root.join("fail-first-claude.sh");
-    std::fs::write(
+    support::testdir::write_executable(
         &wrapper,
-        format!(
+        &format!(
             "#!/bin/sh\n\
              if [ \"$1\" = \"auth\" ] || [ -n \"$DAYCARE_USAGE_SAMPLER\" ]; then exec \"{fake}\" \"$@\"; fi\n\
              if [ ! -f \"{mark}\" ]; then : > \"{mark}\"; exit 3; fi\n\
@@ -1913,13 +1913,7 @@ fn a_failed_first_turn_does_not_swallow_the_persons_request() {
             fake = install.claude_bin.display(),
             mark = mark.display(),
         ),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
+    );
     install.claude_bin = wrapper;
 
     let served = Arc::new(AtomicUsize::new(0));

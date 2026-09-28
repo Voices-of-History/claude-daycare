@@ -26,6 +26,7 @@ pub mod usage_meter;
 pub mod visit;
 pub mod wire;
 pub mod workspace;
+pub mod wsl;
 
 /// Shared fixture paths. Test-only, and `#[path]`-included by the integration
 /// tests so both boundaries get uniqueness from one implementation.
