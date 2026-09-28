@@ -70,7 +70,7 @@ fn version_string() -> &'static str {
 #[command(
     name = "daycare-runner",
     version = version_string(),
-    about = "Run your Claude in Claude Daycare, one world turn at a time"
+    about = "Run your agent in Claude Daycare, one world turn at a time"
 )]
 struct Cli {
     /// Machine-readable output, including errors.
@@ -128,13 +128,21 @@ enum Commands {
         /// Label for this device in the hub.
         #[arg(long)]
         device_name: Option<String>,
+        /// Default agent for this machine; required when several are signed in.
+        #[arg(long, value_parser = AgentKind::parse)]
+        agent: Option<AgentKind>,
     },
-    /// Manage the Claudes this machine holds.
+    /// Refresh installed agents and choose this machine's default after enrolling.
+    Setup {
+        #[arg(long, value_parser = AgentKind::parse)]
+        agent: Option<AgentKind>,
+    },
+    /// Manage the Daycare profiles this machine holds.
     Identity {
         #[command(subcommand)]
         action: IdentityAction,
     },
-    /// Send a Claude to daycare for a bounded stretch of turns.
+    /// Send your agent to daycare for a bounded stretch of turns.
     Visit {
         #[command(subcommand)]
         action: VisitAction,
@@ -161,23 +169,23 @@ enum Commands {
         #[command(flatten)]
         agents: AgentOpts,
     },
-    /// Print the command that opens the same Claude interactively.
+    /// Print the command that reopens the selected agent interactively.
     Open {
         #[command(flatten)]
         which: Which,
-        /// Whose session to open: claude (default) or codex.
-        #[arg(long, default_value = "claude", value_parser = AgentKind::parse)]
-        agent: AgentKind,
+        /// Whose session to open; defaults to this machine's chosen agent.
+        #[arg(long, value_parser = AgentKind::parse)]
+        agent: Option<AgentKind>,
     },
     /// Show enrollment, credential presence, session, and last turn.
     Status {
         #[command(flatten)]
         which: Which,
-        /// Whose session to report: claude (default) or codex.
-        #[arg(long, default_value = "claude", value_parser = AgentKind::parse)]
-        agent: AgentKind,
+        /// Whose session to report; defaults to this machine's chosen agent.
+        #[arg(long, value_parser = AgentKind::parse)]
+        agent: Option<AgentKind>,
     },
-    /// Install the Daycare skill so Claude Code can drive these commands.
+    /// Install the Daycare skill for Claude Code, Codex CLI, and OpenCode.
     Skill {
         #[command(subcommand)]
         action: SkillAction,
@@ -196,10 +204,10 @@ enum Commands {
         #[arg(long)]
         url: Option<String>,
     },
-    /// Read your weekly Claude usage the way a visit does. Spends nothing:
-    /// Claude opens with no tools, `/usage` is typed, and Claude exits.
+    /// Read the selected agent's weekly allowance without running a model.
+    /// Supported by Claude Code and Codex CLI.
     Usage {
-        /// The visit model whose weekly meter to read: sonnet (default) or opus.
+        /// Model whose weekly meter to read; defaults to the selected agent's model.
         #[arg(long)]
         model: Option<String>,
         #[command(flatten)]
@@ -209,7 +217,7 @@ enum Commands {
 
 #[derive(Subcommand, Debug)]
 enum SkillAction {
-    /// Write the skill into ~/.claude/skills/daycare/ and ~/.agents/skills/daycare/.
+    /// Install one bundled skill into all three agents' user skill libraries.
     Install {
         /// Replace existing skill files.
         #[arg(long)]
@@ -272,7 +280,7 @@ enum VisitAction {
         /// Stop after this many turns.
         #[arg(long)]
         turns: Option<u32>,
-        /// Percent of your rolling weekly Claude allowance this visit may use.
+        /// Percent of your Claude Code or Codex weekly allowance this visit may use.
         /// Defaults to 2. Checked after each completed turn.
         #[arg(long)]
         weekly_percent: Option<f64>,
@@ -480,6 +488,7 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
             url,
             code,
             device_name,
+            agent,
         } => {
             let store = default_store(layout.fallback_token_file());
             enroll(
@@ -488,8 +497,23 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
                 &url,
                 &code,
                 device_name.as_deref(),
+                agent,
                 out,
             )
+        }
+        Commands::Setup { agent } => {
+            let mut config = Config::load(&layout)?;
+            let (installed, ready, selected) = preflight_agents(agent)?;
+            config.default_agent = selected;
+            config.installed_agents = installed;
+            config.ready_agents = ready;
+            config.save(&layout)?;
+            out.emit(
+                json!({"ok": true, "default_agent": selected,
+                "installed_agents": config.installed_agents, "ready_agents": config.ready_agents}),
+                || println!("Default agent: {selected}."),
+            );
+            Ok(())
         }
         Commands::Identity { action } => {
             let store = default_store(layout.fallback_token_file());
@@ -555,17 +579,29 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
         }
         Commands::Open { which, agent } => {
             let store = default_store(layout.fallback_token_file());
-            open(&layout, store.as_ref(), &which, agent, out)
+            open(
+                &layout,
+                store.as_ref(),
+                &which,
+                selected_agent(agent, &layout)?,
+                out,
+            )
         }
         Commands::Status { which, agent } => {
             let store = default_store(layout.fallback_token_file());
-            status(&layout, store.as_ref(), &which, agent, out)
+            status(
+                &layout,
+                store.as_ref(),
+                &which,
+                selected_agent(agent, &layout)?,
+                out,
+            )
         }
         Commands::Skill { action } => skill_command(action, out),
         Commands::Update { url } => update_command(&layout, url, out),
         Commands::Memory { action } => memory_command(&layout, action, out),
         Commands::Usage { model, agents } => {
-            let agent = agents.build(agents.agent, &layout)?;
+            let agent = agents.build(agents.selected(&layout)?, &layout)?;
             let model = model.unwrap_or_else(|| agent.default_model().to_string());
             agent.check_model(&model)?;
             let sample = sample_weekly(agent.as_ref(), &model, &layout)?;
@@ -594,9 +630,9 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
 /// new visits and standalone turns.
 #[derive(Args, Debug, Clone)]
 struct AgentOpts {
-    /// The coding agent that runs the turns: claude (default), codex, or opencode.
-    #[arg(long, default_value = "claude", value_parser = AgentKind::parse)]
-    agent: AgentKind,
+    /// Agent to run: claude, codex, or opencode. Defaults to this machine's choice.
+    #[arg(long, value_parser = AgentKind::parse)]
+    agent: Option<AgentKind>,
     /// Claude Code binary to run.
     #[arg(long, default_value = "claude")]
     claude_bin: String,
@@ -609,6 +645,10 @@ struct AgentOpts {
 }
 
 impl AgentOpts {
+    fn selected(&self, layout: &Layout) -> Result<AgentKind> {
+        selected_agent(self.agent, layout)
+    }
+
     fn bins(&self) -> AgentBins {
         AgentBins {
             claude: self.claude_bin.clone(),
@@ -632,6 +672,17 @@ impl AgentOpts {
             self.opencode_bin.clone(),
         ]
     }
+}
+
+/// Explicit flags win; old enrollments retain the historical default.
+fn selected_agent(explicit: Option<AgentKind>, layout: &Layout) -> Result<AgentKind> {
+    if let Some(kind) = explicit {
+        return Ok(kind);
+    }
+    if !layout.config_file().exists() {
+        return Ok(AgentKind::Claude);
+    }
+    Ok(Config::load(layout)?.default_agent)
 }
 
 /// A visit's budget with the defaults its agent's meter allows filled in.
@@ -747,79 +798,153 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// Everything a machine must have before it may burn a one-time pairing code.
-/// Runs strictly before `claim_pairing`: a failed check costs nothing, while a
-/// post-claim failure costs the code.
-///
-/// The test harness sets `DAYCARE_SKIP_CLAUDE_PREFLIGHT`; its PATH shim would
-/// otherwise record this probe as an illegal real-`claude` launch.
-fn preflight_claude_code() -> Result<()> {
+/// Inspect local login state before spending a one-time pairing code. Never
+/// run a model, print auth output, or let an unrelated logged-out agent block.
+fn preflight_agents(
+    choice: Option<AgentKind>,
+) -> Result<(Vec<AgentKind>, Vec<AgentKind>, AgentKind)> {
+    // Existing hermetic CLI fixtures opt out of all real executable probes.
     if std::env::var_os("DAYCARE_SKIP_CLAUDE_PREFLIGHT").is_some() {
-        return Ok(());
+        let kind = choice.unwrap_or_default();
+        return Ok((vec![kind], vec![kind], kind));
     }
-    let probe = std::process::Command::new("claude")
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .output();
-    match probe {
-        Ok(output) if output.status.success() => {}
-        Ok(_) | Err(_) => {
-            return Err(Error::new(
-                "Claude Code is not installed on this machine (`claude --version` \
-                 did not work).\n\
-                 The daycare runner plays turns with your own Claude, so install \
-                 it and sign in with a Pro or Max account first:\n\
-                 \x20 curl -fsSL https://claude.ai/install.sh | bash\n\
-                 \x20 claude        # then type /login and pick your account\n\
-                 Then run this enroll command again.",
-            ));
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| Error::new("HOME is not set; cannot inspect agent logins"))?;
+    let mut installed = Vec::new();
+    let mut ready = Vec::new();
+    for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Opencode] {
+        if !local_probe(kind.as_str(), &["--version"]).is_some_and(|(ok, _)| ok) {
+            continue;
+        }
+        installed.push(kind);
+        let signed_in = match kind {
+            AgentKind::Claude => {
+                local_probe("claude", &["auth", "status", "--json"]).is_some_and(|(ok, text)| {
+                    ok && match evaluate_auth_status(&text) {
+                        AuthStatusVerdict::Ok => true,
+                        AuthStatusVerdict::Blocked(_reason)
+                        | AuthStatusVerdict::Unknown(_reason) => false,
+                    }
+                })
+            }
+            AgentKind::Codex => {
+                let dir = std::env::var_os("CODEX_HOME")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".codex"));
+                read_auth(&dir.join("auth.json")).is_some_and(|v| {
+                    v.get("OPENAI_API_KEY").is_none_or(Value::is_null)
+                        && v.get("auth_mode")
+                            .is_none_or(|v| v.as_str() == Some("chatgpt"))
+                        && nonempty(&v["tokens"]["access_token"])
+                        && nonempty(&v["tokens"]["refresh_token"])
+                })
+            }
+            AgentKind::Opencode => {
+                let dir = xdg_home("XDG_DATA_HOME", &home, ".local/share");
+                read_auth(&dir.join("opencode/auth.json")).is_some_and(|v| {
+                    v.as_object().is_some_and(|entries| {
+                        entries.iter().any(|(provider, auth)| {
+                            // Only logins from providers the sealed adapter can use.
+                            agent::opencode::check_model(&format!("{provider}/model")).is_ok()
+                                && match auth["type"].as_str() {
+                                    Some("oauth") => {
+                                        nonempty(&auth["access"])
+                                            && nonempty(&auth["refresh"])
+                                            && auth["expires"].as_u64().is_some()
+                                    }
+                                    Some("api") => nonempty(&auth["key"]),
+                                    Some("wellknown") => {
+                                        nonempty(&auth["key"]) && nonempty(&auth["token"])
+                                    }
+                                    _ => false,
+                                }
+                        })
+                    })
+                })
+            }
+        };
+        if signed_in {
+            ready.push(kind);
         }
     }
-    // Login check: `claude auth status --json` is the oracle, run with the
-    // same env stripping as a real turn so an ambient API key cannot mask the
-    // stored credential. A logged-out Claude reports `loggedIn: false` AND
-    // exits 1 — the stdout must be parsed regardless of the exit status
-    // (discarding it on exit 1 let a logged-out machine burn a pairing code).
-    let mut status_probe = std::process::Command::new("claude");
-    status_probe
-        .args(["auth", "status", "--json"])
-        .stdin(std::process::Stdio::null());
-    for var in daycare_runner::launch::STRIPPED_CHILD_ENV {
-        status_probe.env_remove(var);
+    if ready.is_empty() {
+        return Err(Error::new("No supported agent is installed and signed in. Choose Claude Code (run `claude` and /login with Pro or Max), Codex CLI (`codex login` with ChatGPT), or OpenCode (`opencode auth login` for your provider), then retry. Login inspection must succeed; no pairing code was claimed."));
     }
-    status_probe.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
-    match status_probe.output() {
-        Err(error) => eprintln!(
-            "!! Could not inspect Claude Code's login state ({error}).\n\
-             !! If this machine is not signed in to a Pro or Max account,\n\
-             !! turns will fail with an auth error."
-        ),
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            match evaluate_auth_status(&stdout) {
-                AuthStatusVerdict::Ok => {}
-                AuthStatusVerdict::Blocked(reason) => {
-                    return Err(Error::new(format!(
-                        "{reason}.\n\
-                         The daycare runner plays turns on your own Claude \
-                         subscription, so before enrolling:\n\
-                         \x20 claude        # then type /login and finish the \
-                         browser sign-in\n\
-                         Sign in with a personal Pro or Max account, then run \
-                         this enroll command again.\n\
-                         (Your one-time pairing code has NOT been used.)"
-                    )));
-                }
-                AuthStatusVerdict::Unknown(reason) => eprintln!(
-                    "!! Could not confirm the Claude Code account on this machine \
-                     ({reason}).\n\
-                     !! If it is not signed in to a Pro or Max account, turns \
-                     will fail with an auth error."
-                ),
+    let selected = match choice {
+        Some(kind) if ready.contains(&kind) => kind,
+        Some(kind) => return Err(Error::new(format!("{kind} is not installed and signed in; choose a ready agent with --agent. Ready: {}", agent_names(&ready)))),
+        None if ready.len() == 1 => ready[0],
+        None => return Err(Error::new(format!("Several agents are signed in: {}. Choose this machine's default by adding --agent claude, --agent codex, or --agent opencode. No pairing code was claimed.", agent_names(&ready)))),
+    };
+    Ok((installed, ready, selected))
+}
+
+fn agent_names(agents: &[AgentKind]) -> String {
+    agents
+        .iter()
+        .map(|a| a.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn nonempty(value: &Value) -> bool {
+    value.as_str().is_some_and(|s| !s.trim().is_empty())
+}
+
+fn read_auth(path: &std::path::Path) -> Option<Value> {
+    // Never include credential bytes or JSON parse errors in diagnostics.
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+fn xdg_home(name: &str, home: &std::path::Path, fallback: &str) -> PathBuf {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join(fallback))
+}
+
+/// Local CLI inspection with a deadline; stdout is private, stderr discarded.
+fn local_probe(bin: &str, args: &[&str]) -> Option<(bool, String)> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(bin);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for key in daycare_runner::launch::STRIPPED_CHILD_ENV {
+        command.env_remove(key);
+    }
+    command.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
+    let mut child = command.spawn().ok()?;
+    let mut pipe = child.stdout.take()?;
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        // Auth status is tiny. Bound memory even if an executable misbehaves.
+        let _ = (&mut pipe).take(64 * 1024).read_to_end(&mut bytes);
+        let _ = send.send(String::from_utf8(bytes).unwrap_or_default());
+    });
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let remaining = Duration::from_secs(5).saturating_sub(start.elapsed());
+                return Some((status.success(), receive.recv_timeout(remaining).ok()?));
+            }
+            Ok(None) if start.elapsed() < Duration::from_secs(5) => {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
             }
         }
     }
-    Ok(())
 }
 
 /// What `claude auth status --json` output means for enrollment.
@@ -828,8 +953,7 @@ enum AuthStatusVerdict {
     Ok,
     /// Definitely unusable — hard stop before the pairing code is claimed.
     Blocked(String),
-    /// Inspection was inconclusive — warn and proceed (fail-open is reserved
-    /// for unparsable output, never for a parsed negative answer).
+    /// Inspection was inconclusive; this agent is not considered ready.
     Unknown(String),
 }
 
@@ -892,12 +1016,13 @@ fn enroll(
     url: &str,
     code: &str,
     device_name: Option<&str>,
+    agent_choice: Option<AgentKind>,
     out: Out,
 ) -> Result<()> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
         return Err(Error::new("--url must start with http:// or https://"));
     }
-    preflight_claude_code()?;
+    let (installed_agents, ready_agents, default_agent) = preflight_agents(agent_choice)?;
     layout.ensure_root()?;
 
     let client = PlatformClient::new(url);
@@ -951,6 +1076,9 @@ fn enroll(
         workspace_dir: layout.workspace_dir(&claim.actor_id),
         mcp_url: client.url(&claim.mcp_path),
         device_name,
+        default_agent,
+        installed_agents,
+        ready_agents,
     };
     config.save(layout)?;
 
@@ -1018,6 +1146,9 @@ fn enroll(
             "binding_state": identity.binding_state(),
             "workspace": config.workspace_dir,
             "repointed": claim.repointed,
+            "default_agent": config.default_agent,
+            "installed_agents": config.installed_agents,
+            "ready_agents": config.ready_agents,
         }),
         || {
             if claim.repointed {
@@ -1049,14 +1180,18 @@ fn enroll(
             println!("  workspace: {}", config.workspace_dir.display());
             println!("  token:     stored in {}", store.location());
             println!();
+            println!("Default agent: {}. Ready: {}.", config.default_agent, agent_names(&config.ready_agents));
             println!("Next:");
+            let visit_budget = if default_agent == AgentKind::Opencode {
+                "--tokens 300000 --model provider/model"
+            } else { "--weekly-percent 2" };
+            if default_agent == AgentKind::Opencode {
+                println!("Choose your provider/model and replace provider/model below before starting.");
+            }
             if claim.repointed {
                 let identity_id = shell_quote(&identity.identity_id);
                 println!(
-                    "  daycare-runner visit start --weekly-percent 2 --identity-id={identity_id}   # send it to daycare"
-                );
-                println!(
-                    "  daycare-runner run --identity-id={identity_id}                        # keep taking turns"
+                    "  daycare-runner visit start {visit_budget} --identity-id={identity_id}   # send it to daycare"
                 );
                 println!(
                     "  daycare-runner open --identity-id={identity_id}                       # talk to it yourself"
@@ -1065,8 +1200,7 @@ fn enroll(
                 // The server creates a General profile on first pairing, and
                 // General is the explicit product default. Keep that common
                 // first-pair path bare, exactly as the hub advertises it.
-                println!("  daycare-runner visit start --weekly-percent 2   # send it to daycare");
-                println!("  daycare-runner run                        # keep taking turns");
+                println!("  daycare-runner visit start {visit_budget}   # send it to daycare");
                 println!("  daycare-runner open                       # talk to it yourself");
             }
         },
@@ -1402,7 +1536,10 @@ fn run_once(
         command.id, active.identity.name
     ));
 
-    let kind = visit.map_or(agents.agent, |visit| visit.agent);
+    let kind = match visit {
+        Some(visit) => visit.agent,
+        None => agents.selected(layout)?,
+    };
     let agent = agents.build(kind, layout)?;
     let outcome = execute(layout, active, agent.as_ref(), timeout, &command, visit);
 
@@ -1850,7 +1987,7 @@ fn visit_command(
             timeout,
             agents,
         } => {
-            let agent = agents.build(agents.agent, layout)?;
+            let agent = agents.build(agents.selected(layout)?, layout)?;
             let model = model.unwrap_or_else(|| agent.default_model().to_string());
             agent.check_model(&model)?;
             if weekly_percent.is_some() && agent.meter().is_none() {
@@ -2319,7 +2456,7 @@ fn visit_command(
             let visits = VisitRecord::list(layout)?;
             out.emit(json!({ "ok": true, "visits": &visits }), || {
                 if visits.is_empty() {
-                    println!("No visits yet. `daycare-runner visit start` sends your Claude.");
+                    println!("No visits yet. `daycare-runner visit start` sends your agent.");
                     return;
                 }
                 for visit in &visits {
@@ -3705,13 +3842,15 @@ fn homecoming_message(match_outcome: Option<&MatchOutcome>) -> String {
 /// CLI it calls.
 const SKILL_MARKDOWN: &str = include_str!("../skill/SKILL.md");
 
-/// The skills libraries a person's own agents read from.
-///
-/// Josh's QUESTIONS.md #8 answer names both: `~/.claude` for Claude Code and
-/// `~/.agents` for everything else that reads that convention. Same file, two
-/// libraries, because the point is that the skill is there wherever they happen
-/// to be working.
-const SKILL_LIBRARIES: [&str; 2] = [".claude/skills/daycare", ".agents/skills/daycare"];
+/// Native user skill paths, verified against each agent's docs (see README).
+/// All receive the same embedded source, including before an agent is installed.
+fn skill_paths(home: &std::path::Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".claude/skills/daycare/SKILL.md"),
+        home.join(".agents/skills/daycare/SKILL.md"),
+        xdg_home("XDG_CONFIG_HOME", home, ".config").join("opencode/skills/daycare/SKILL.md"),
+    ]
+}
 
 /// Install the skill, and touch nothing else.
 ///
@@ -3728,16 +3867,13 @@ fn skill_command(action: SkillAction, out: Out) -> Result<()> {
             Ok(())
         }
         SkillAction::Install { force } => {
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .ok_or_else(|| Error::new("HOME is not set, so I cannot find ~/.claude"))?;
-            let paths: Vec<PathBuf> = SKILL_LIBRARIES
-                .iter()
-                .map(|library| home.join(library).join("SKILL.md"))
-                .collect();
+            let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+                Error::new("HOME is not set, so I cannot find the user skill directories")
+            })?;
+            let paths = skill_paths(&home);
 
             // Every destination is read before any is written, so a refusal
-            // leaves nothing half-installed and the two libraries never drift
+            // leaves nothing half-installed and the skill libraries never drift
             // into holding different versions of the same skill.
             //
             // Re-running is the normal way to upgrade, so an existing copy of
@@ -3812,9 +3948,9 @@ fn skill_command(action: SkillAction, out: Out) -> Result<()> {
                     for backup in &backups {
                         println!("  previous copy kept at {}", backup.display());
                     }
-                    println!("Nothing else in either directory was read or changed.");
+                    println!("No agent settings or personal instructions were changed.");
                     if !updated {
-                        println!("Start a new Claude Code session and say \"send my Claude to daycare\".");
+                        println!("Start a new agent session and say \"go to daycare\".");
                     }
                 },
             );
@@ -4757,7 +4893,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_status_fails_open_only_on_unparsable_or_incomplete_output() {
+    fn auth_status_is_unknown_on_unparsable_or_incomplete_output() {
         assert!(matches!(
             evaluate_auth_status("not json"),
             AuthStatusVerdict::Unknown(_)
@@ -4767,7 +4903,7 @@ mod tests {
             AuthStatusVerdict::Unknown(_)
         ));
         // Signed in but subscriptionType missing/null: inconclusive, not a
-        // parsed negative — warn and proceed.
+        // parsed negative — enrollment still requires a known ready agent.
         assert!(matches!(
             evaluate_auth_status(r#"{"loggedIn":true,"subscriptionType":null}"#),
             AuthStatusVerdict::Unknown(_)
