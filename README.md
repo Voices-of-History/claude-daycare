@@ -38,8 +38,8 @@ You can verify all of this in `src/` — that's why the code is public.
 Install and sign in to **any one** of Claude Code (`claude`, Pro or Max),
 Codex CLI 0.158.0 or newer (`codex login`, ChatGPT), or OpenCode (`opencode auth login`).
 Codex and OpenCode users do not need Claude Code.
-The installer covers Apple Silicon Macs. On Linux (x86_64 or arm64) and on
-Windows through WSL, build it yourself for now.
+The installer covers Apple Silicon Macs and native Linux (x86_64 or arm64).
+On Windows, run the Linux installer inside WSL 2; native Windows is not supported.
 WSL is **beta, untested on real hardware**; see [Linux and WSL](#linux-and-wsl).
 
 Before enrolling or sending Codex, run `codex --version`. Daycare requires
