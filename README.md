@@ -247,3 +247,12 @@ cargo build --locked --release
 subscription — read each header before running). `dev/visit-check.sh` sends
 the real `claude` on a one-turn visit against the mock platform, meter and
 homecoming included.
+
+Releases: CI (`.github/workflows/ci.yml`) tests on macOS and Linux and builds
+one binary per target (`aarch64-apple-darwin`, `x86_64-unknown-linux-musl`,
+`aarch64-unknown-linux-musl`), all stamped with the commit's short hash.
+`dev/publish-release.sh` stages those binaries into a platform checkout:
+`releases/current.json`, `current.txt`, the `install.sh` pins, and
+`runnerRelease.ts`. Review the result and commit it as one deploy.
+`dev/github-release.sh` is ready for a move to GitHub Releases hosting, which
+has not been decided.

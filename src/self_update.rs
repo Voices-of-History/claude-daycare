@@ -35,6 +35,17 @@ pub const UPDATED_ENV: &str = "DAYCARE_RUNNER_SELF_UPDATED";
 /// The Rust target triple this binary was built for (from `build.rs`).
 pub const TARGET: &str = env!("DAYCARE_RUNNER_TARGET");
 
+/// The `current.json` entry a binary built for `target` updates from. Linux
+/// releases ship only the static musl build; a runner built from source on
+/// Linux is normally `-linux-gnu`, and the musl build for the same
+/// architecture runs anywhere that one does.
+pub fn release_target(target: &str) -> String {
+    match target.strip_suffix("-linux-gnu") {
+        Some(arch_vendor) => format!("{arch_vendor}-linux-musl"),
+        None => target.to_string(),
+    }
+}
+
 /// The only target the pre-`current.json` installer ever shipped.
 const LEGACY_INSTALLER_TARGET: &str = "aarch64-apple-darwin";
 
@@ -117,7 +128,7 @@ pub fn update(
         )));
     }
     let agent = agent();
-    let pointer = fetch_pointer(&agent, base_url, TARGET)?;
+    let pointer = fetch_pointer(&agent, base_url, &release_target(TARGET))?;
     if pointer.release == mine {
         return Ok(Outcome::Current {
             release: pointer.release,
@@ -397,6 +408,27 @@ fn install_skill(exe: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn linux_source_builds_update_from_the_static_musl_release() {
+        use super::release_target;
+        assert_eq!(
+            release_target("x86_64-unknown-linux-gnu"),
+            "x86_64-unknown-linux-musl"
+        );
+        assert_eq!(
+            release_target("aarch64-unknown-linux-gnu"),
+            "aarch64-unknown-linux-musl"
+        );
+        assert_eq!(
+            release_target("aarch64-unknown-linux-musl"),
+            "aarch64-unknown-linux-musl"
+        );
+        assert_eq!(
+            release_target("aarch64-apple-darwin"),
+            "aarch64-apple-darwin"
+        );
+    }
+
     use super::*;
 
     const SHA: &str = "47eacfc4b104bd246fd4b812161664e99c2bdc9a36841d52a3c1167c11216623";

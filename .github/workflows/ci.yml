@@ -1,0 +1,82 @@
+# Format, test, and build a release binary for every shipped target.
+#
+# Each job stamps its build with the same release id (the commit's short
+# hash), so one run yields one release: the per-target binaries that
+# dev/publish-release.sh turns into releases/current.json on the platform.
+# Nothing here publishes anything.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the compiler; rustup installs it on first use.
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain
+          rustup target add ${{ matrix.target }}
+
+      - name: musl C compiler (for ring)
+        if: contains(matrix.target, 'linux-musl')
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q musl-tools
+          echo "CC_$(echo '${{ matrix.target }}' | tr '-' '_')=musl-gcc" >> "$GITHUB_ENV"
+
+      - name: Format
+        run: cargo fmt --check
+
+      # Tests run on the host target (gnu on Linux); the musl build below is
+      # the same code linked statically.
+      - name: Test
+        run: cargo test --locked
+
+      - name: Release build
+        run: |
+          release="$(git rev-parse --short=9 HEAD)"
+          echo "RELEASE=$release" >> "$GITHUB_ENV"
+          DAYCARE_RUNNER_RELEASE="$release" \
+            cargo build --locked --release --target ${{ matrix.target }}
+          bin="target/${{ matrix.target }}/release/daycare-runner"
+          "$bin" --version | tee /dev/stderr | grep -q "(release $release)"
+          mkdir -p dist
+          cp "$bin" "dist/daycare-runner-${{ matrix.target }}"
+          if command -v sha256sum >/dev/null; then
+            (cd dist && sha256sum "daycare-runner-${{ matrix.target }}" > "daycare-runner-${{ matrix.target }}.sha256")
+          else
+            (cd dist && shasum -a 256 "daycare-runner-${{ matrix.target }}" > "daycare-runner-${{ matrix.target }}.sha256")
+          fi
+
+      - name: Static linking check
+        if: contains(matrix.target, 'linux-musl')
+        run: |
+          file "dist/daycare-runner-${{ matrix.target }}"
+          ! ldd "dist/daycare-runner-${{ matrix.target }}" 2>/dev/null | grep -q '=>'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daycare-runner-${{ env.RELEASE }}-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
