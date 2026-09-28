@@ -291,9 +291,12 @@ impl Agent for CodexAgent {
     }
 
     fn check_model(&self, model: &str) -> Result<()> {
-        launch::check_verified_model(model)?;
+        launch::check_model_id(model)?;
         let catalog = self.catalog()?;
         if catalog.iter().any(|known| known == model) {
+            with_synced_login(self.login.as_ref(), &self.homes.codex_home, || {
+                catalog::inspect(&self.meter.codex, model).map(|_| ())
+            })?;
             return Ok(());
         }
         Err(Error::new(format!(

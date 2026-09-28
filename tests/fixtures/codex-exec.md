@@ -54,7 +54,8 @@ Results on CLI 0.158.0:
 
 Why the catalog override is necessary: in Codex 0.158, native patch registration
 checks `model_info.apply_patch_tool_type.is_some()`, independently of feature
-flags. The runner exports the bundled catalog locally, keeps only gpt-5.5,
+flags. The runner exports the bundled catalog locally, keeps only the selected
+model (gpt-5.5 in this capture),
 clears that field, writes a private 0600 catalog, and passes `model_catalog_json`
 to preflight and every exec/resume. Missing or unrecognized metadata fails
 before launch. Source: [tool registration](https://github.com/openai/codex/blob/rust-v0.158.0/codex-rs/core/src/tools/spec_plan.rs)

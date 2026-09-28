@@ -6,10 +6,10 @@
 //!
 //! Two rules shape everything here.
 //!
-//! **End conditions are evaluated at turn boundaries, never mid-turn.** Killing
-//! a live turn throws away tokens already spent and abandons an action the
-//! world may have half-applied. The only mid-turn kill stays the per-turn
-//! timeout in `turn.rs`, which is a safety stop, not a budget one.
+//! **This ledger evaluates end conditions at turn boundaries.** Claude Code
+//! and Codex finish the turn that crosses a token cap. OpenCode additionally
+//! enforces its token cap during a live turn and may interrupt it. All agents
+//! also have a per-turn timeout in `turn.rs` as a safety stop.
 //!
 //! **The runner never claims a stop it did not observe.** Every reason below
 //! corresponds to something this process saw happen; anything unrecognised

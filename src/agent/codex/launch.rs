@@ -37,20 +37,25 @@ use crate::{Error, Result};
 use serde_json::Value;
 use std::path::Path;
 
-/// The model a Codex visit runs on when the person names none. In 0.154 every
-/// other listed model is `tool_mode: "code_mode_only"`: its tools, MCP ones
-/// included, reach the model only through the code-mode host, a script
-/// runtime the seal switches off. On those models the daycare tools vanish.
+/// Default when the person does not select a Codex model. An explicit model
+/// is checked against the account catalog and sealed bundled metadata.
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
 
-pub fn check_verified_model(model: &str) -> Result<()> {
-    if model == DEFAULT_CODEX_MODEL {
+/// Syntax only; the adapter also checks availability and tool compatibility.
+pub fn check_model_id(model: &str) -> Result<()> {
+    if !model.is_empty()
+        && model.len() <= 200
+        && model.as_bytes()[0].is_ascii_alphanumeric()
+        && model
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.:/".contains(&c))
+    {
         return Ok(());
     }
-    Err(Error::new(format!(
-        "Codex Daycare supports only the verified model {DEFAULT_CODEX_MODEL}; got {model:?}. Other catalog models may require the disabled code-mode tool host"
-    )))
+    Err(Error::new("--model must be a Codex model ID from your account catalog, without spaces or option prefixes"))
 }
+
+pub const CODEX_UPGRADE: &str = "To upgrade Codex, use the method you installed it with: npm install -g @openai/codex@latest; or brew upgrade --cask codex. For a standalone install, rerun the official installer: curl -fsSL https://chatgpt.com/codex/install.sh | sh. Then run codex --version and confirm 0.158.0 or newer on PATH before retrying.";
 
 pub fn check_version(output: &str) -> Result<()> {
     let version = output.trim().strip_prefix("codex-cli ");
@@ -61,7 +66,7 @@ pub fn check_version(output: &str) -> Result<()> {
             return Ok(());
         }
     }
-    Err(Error::new("Daycare requires Codex CLI 0.158.0 or newer to disable multi-agent tools before launch; upgrade Codex or select it with --codex-bin"))
+    Err(Error::new(format!("Daycare requires Codex CLI 0.158.0 or newer to disable multi-agent tools before launch. {CODEX_UPGRADE}")))
 }
 
 /// How long one daycare tool call may run, and how long the server gets to
@@ -220,7 +225,7 @@ little at a time.
 
 /// The argv and stdin for one Codex turn.
 pub fn build_exec_plan(program: &str, spec: &TurnSpec<'_>, catalog: &Path) -> Result<LaunchPlan> {
-    check_verified_model(spec.model)?;
+    check_model_id(spec.model)?;
     if spec.message.trim().is_empty() {
         return Err(Error::new("turn message must not be empty"));
     }
@@ -399,6 +404,41 @@ mod tests {
     }
 
     #[test]
+    fn explicit_model_reaches_both_exec_and_resume_without_changing_the_seal() {
+        let ws = workspace();
+        let catalog = ws.join("daycare-models.json");
+        for mode in [
+            new_thread(),
+            SessionMode::Resume {
+                session_id: ID.into(),
+            },
+        ] {
+            let plan = build_exec_plan(
+                "/mock/codex",
+                &TurnSpec {
+                    mode: &mode,
+                    message: "world turn",
+                    actor_name: "Pip",
+                    workspace: &ws,
+                    purpose: TurnPurpose::World,
+                    model: "gpt-5.4",
+                    device_token: Some("test-token"),
+                },
+                &catalog,
+            )
+            .unwrap();
+            for setting in [
+                "model=\"gpt-5.4\"",
+                "agents.enabled=false",
+                "sandbox_mode=\"read-only\"",
+                "approval_policy=\"never\"",
+            ] {
+                assert!(has_pair(&plan.args, "-c", setting), "{setting}");
+            }
+        }
+    }
+
+    #[test]
     fn a_world_turn_is_sealed_in_codex_terms() {
         let plan = plan(TurnPurpose::World, new_thread());
         let a = &plan.args;
@@ -564,10 +604,12 @@ mod tests {
     }
 
     #[test]
-    fn only_verified_models_and_supported_versions_pass() {
-        check_verified_model("gpt-5.5").unwrap();
-        for model in ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.5-latest", ""] {
-            assert!(check_verified_model(model).is_err());
+    fn model_ids_and_supported_versions_are_checked() {
+        for model in ["gpt-5.5", "gpt-5.4", "gpt-6-astra", "gpt-5.6-sol"] {
+            check_model_id(model).unwrap();
+        }
+        for model in ["", "--help", "model with spaces", "model\nname"] {
+            assert!(check_model_id(model).is_err());
         }
         for version in [
             "codex-cli 0.158.0\n",

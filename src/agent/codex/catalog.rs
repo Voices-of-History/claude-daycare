@@ -4,14 +4,14 @@
 //! that capability, and pass this catalog to both preflight and exec/resume.
 
 use super::appserver::CodexCommand;
-use super::launch::check_verified_model;
+use super::launch::check_model_id;
 use crate::paths::write_atomic;
 use crate::{Error, Result};
 use serde_json::{json, Value};
 use std::path::Path;
 
 pub fn without_patch(catalog: &Value, model: &str) -> Result<Value> {
-    check_verified_model(model)?;
+    check_model_id(model)?;
     let mut entry = catalog
         .get("models")
         .and_then(Value::as_array)
@@ -23,9 +23,16 @@ pub fn without_patch(catalog: &Value, model: &str) -> Result<Value> {
         .cloned()
         .ok_or_else(|| {
             Error::new(
-                "Codex's bundled catalog has no verified Daycare model; cannot seal native tools",
+                "Codex's bundled catalog does not contain the selected model; cannot seal native tools",
             )
         })?;
+    // The seal disables the code-mode host. Such a model cannot use Daycare
+    // tools here; reject it before opening a visit, rather than dropping tools.
+    if entry.get("tool_mode").is_some_and(|mode| !mode.is_null()) {
+        return Err(Error::new(format!(
+            "Codex model {model} requires a tool mode unavailable in Daycare; choose a model with native tools from your account catalog"
+        )));
+    }
     // Null disables registration in Codex's tool planner. An unknown schema
     // fails closed rather than assuming the absence of this field is safe.
     if !entry
@@ -38,7 +45,7 @@ pub fn without_patch(catalog: &Value, model: &str) -> Result<Value> {
     Ok(json!({"models": [entry]}))
 }
 
-pub fn prepare(codex: &CodexCommand, model: &str, path: &Path) -> Result<()> {
+pub fn inspect(codex: &CodexCommand, model: &str) -> Result<Value> {
     let output = codex
         .command()
         .args(["debug", "models", "--bundled"])
@@ -50,7 +57,11 @@ pub fn prepare(codex: &CodexCommand, model: &str, path: &Path) -> Result<()> {
     }
     let catalog: Value = serde_json::from_slice(&output.stdout)
         .map_err(|_| Error::new("Codex's bundled model catalog is not JSON"))?;
-    let sealed = without_patch(&catalog, model)?;
+    without_patch(&catalog, model)
+}
+
+pub fn prepare(codex: &CodexCommand, model: &str, path: &Path) -> Result<()> {
+    let sealed = inspect(codex, model)?;
     write_atomic(path, &serde_json::to_vec(&sealed)?, 0o600)
 }
 
@@ -59,7 +70,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_patch_capability_changes_and_only_the_verified_model_survives() {
+    fn only_the_patch_capability_changes_and_only_the_selected_model_survives() {
         let model = json!({"slug":"gpt-5.5", "apply_patch_tool_type":"freeform", "tool_mode":null,
             "base_instructions":"original", "context_window":12345, "extra_metadata":{"preserve":true}});
         let mut expected = model.clone();
@@ -71,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_catalog_shapes_and_unverified_models_fail_closed() {
+    fn unknown_catalog_shapes_and_absent_models_fail_closed() {
         for catalog in [
             json!({}),
             json!({"models":[]}),
@@ -81,6 +92,20 @@ mod tests {
             assert!(without_patch(&catalog, "gpt-5.5").is_err());
         }
         assert!(without_patch(&json!({"models":[]}), "gpt-6-astra").is_err());
+    }
+
+    #[test]
+    fn selected_nondefault_models_keep_the_same_patch_seal() {
+        let selected = json!({"slug":"gpt-5.4","apply_patch_tool_type":"freeform","tool_mode":null,"base_instructions":"preserved"});
+        let sealed =
+            without_patch(&json!({"models":[{"slug":"gpt-5.5"},selected]}), "gpt-5.4").unwrap();
+        assert_eq!(sealed["models"].as_array().unwrap().len(), 1);
+        assert_eq!(sealed["models"][0]["slug"], "gpt-5.4");
+        assert_eq!(sealed["models"][0]["apply_patch_tool_type"], Value::Null);
+        assert_eq!(sealed["models"][0]["base_instructions"], "preserved");
+        for mode in [json!("code_mode_only"), json!("unknown"), json!({})] {
+            assert!(without_patch(&json!({"models":[{"slug":"gpt-5.4","apply_patch_tool_type":"freeform","tool_mode":mode}]}), "gpt-5.4").is_err());
+        }
     }
 
     #[cfg(unix)]
