@@ -2,6 +2,7 @@
 
 mod support;
 
+use daycare_runner::agent::claude::ClaudeAgent;
 use daycare_runner::launch::SessionMode;
 use daycare_runner::turn::{run_turn, TurnPurpose, TurnRequest};
 use daycare_runner::workspace::Workspace;
@@ -30,7 +31,8 @@ fn the_child_never_inherits_api_credentials_or_the_parent_session() {
         support::fake_claude(&dir, &support::fixture_stream_from(&workspace.dir), 0, 0);
 
     let outcome = run_turn(TurnRequest {
-        claude_bin: claude_bin.to_str().unwrap(),
+        agent: &ClaudeAgent::new(claude_bin.to_str().unwrap()),
+        actor_name: "Pip",
         workspace: &workspace,
         mode: SessionMode::Resume {
             session_id: "18f44c2e-ff64-4e94-a89d-bdbeaa9ab9f7".into(),
@@ -71,7 +73,8 @@ fn the_child_never_inherits_api_credentials_or_the_parent_session() {
     // The homecoming saves the visit's memories through the same MCP server,
     // so it carries the device token too — and still nothing API-shaped.
     let private = run_turn(TurnRequest {
-        claude_bin: claude_bin.to_str().unwrap(),
+        agent: &ClaudeAgent::new(claude_bin.to_str().unwrap()),
+        actor_name: "Pip",
         workspace: &workspace,
         mode: SessionMode::Resume {
             session_id: "18f44c2e-ff64-4e94-a89d-bdbeaa9ab9f7".into(),

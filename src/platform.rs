@@ -5,6 +5,7 @@
 //! than a field on the client, so it lives in memory only for the duration of a
 //! request and can never be printed by a `Debug` of the client.
 
+use crate::agent::AgentKind;
 use crate::stream::TurnUsage;
 use crate::wire::{paths, VisitEndReason};
 use crate::{Error, Result};
@@ -451,9 +452,46 @@ pub struct TurnResult {
 #[derive(Debug, Clone, Serialize)]
 pub struct CompletionReport {
     pub status: CompletionStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub claude_session_id: Option<String>,
+    /// The session the turn ran in, if the runner trusts its id.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub session: Option<AgentSession>,
     pub result: TurnResult,
+}
+
+/// A turn's session on the wire. A Claude session keeps the
+/// `claude_session_id` field the platform has always read; any other agent's
+/// is sent as `agent_kind` + `agent_session_id`, so a Codex thread is never
+/// filed as a Claude session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSession {
+    pub agent: AgentKind,
+    pub session_id: String,
+}
+
+impl AgentSession {
+    pub fn new(agent: AgentKind, session_id: impl Into<String>) -> Self {
+        AgentSession {
+            agent,
+            session_id: session_id.into(),
+        }
+    }
+}
+
+impl Serialize for AgentSession {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        if self.agent.is_claude() {
+            map.serialize_entry("claude_session_id", &self.session_id)?;
+        } else {
+            map.serialize_entry("agent_kind", &self.agent)?;
+            map.serialize_entry("agent_session_id", &self.session_id)?;
+        }
+        map.end()
+    }
 }
 
 pub struct PlatformClient {
@@ -1285,7 +1323,10 @@ data: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"tot
     fn completion_report_serializes_the_agreed_shape() {
         let report = CompletionReport {
             status: CompletionStatus::Completed,
-            claude_session_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            session: Some(AgentSession::new(
+                AgentKind::Claude,
+                "550e8400-e29b-41d4-a716-446655440000",
+            )),
             result: TurnResult {
                 result_text: Some("looked around".into()),
                 duration_ms: Some(2493),
@@ -1311,7 +1352,7 @@ data: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"tot
     fn held_report_is_completed_and_says_so() {
         let report = CompletionReport {
             status: CompletionStatus::Completed,
-            claude_session_id: None,
+            session: None,
             result: TurnResult {
                 result_text: Some("Nothing needs me this turn.".into()),
                 duration_ms: Some(900),
@@ -1331,7 +1372,7 @@ data: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"tot
     fn failed_report_carries_a_reason_and_no_success_text() {
         let report = CompletionReport {
             status: CompletionStatus::Failed,
-            claude_session_id: None,
+            session: None,
             result: TurnResult {
                 result_text: None,
                 duration_ms: Some(300_000),
