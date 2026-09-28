@@ -111,6 +111,11 @@ pub fn update(
         return Ok(Outcome::DevBuild);
     };
     let base_url = base_url.trim_end_matches('/');
+    if !https_or_loopback(base_url) {
+        return Err(Error::new(format!(
+            "will not update over plain HTTP from {base_url}; the platform URL must be HTTPS"
+        )));
+    }
     let agent = agent();
     let pointer = fetch_pointer(&agent, base_url, TARGET)?;
     if pointer.release == mine {
@@ -190,7 +195,7 @@ fn fetch_pointer(agent: &ureq::Agent, base_url: &str, target: &str) -> Result<Re
             )))
         }
     };
-    validate_pointer(&pointer, base_url)?;
+    validate_pointer(&pointer)?;
     Ok(pointer)
 }
 
@@ -212,9 +217,8 @@ pub fn pointer_from_install_script(script: &str) -> Option<ReleasePointer> {
 
 /// The pointer decides what code runs next, so it is held to the installer's
 /// standard: a plausible release id, a real sha256, and a download over HTTPS
-/// (plain HTTP only from the pointer's own origin, which is how tests and a
-/// local platform serve it).
-fn validate_pointer(pointer: &ReleasePointer, base_url: &str) -> Result<()> {
+/// (plain HTTP only to loopback).
+fn validate_pointer(pointer: &ReleasePointer) -> Result<()> {
     let release_ok = !pointer.release.is_empty()
         && pointer.release.len() <= 64
         && pointer
@@ -237,14 +241,34 @@ fn validate_pointer(pointer: &ReleasePointer, base_url: &str) -> Result<()> {
             "release pointer's sha256 is not 64 lowercase hex digits",
         ));
     }
-    let same_origin = pointer.url.starts_with(&format!("{base_url}/"));
-    if !(pointer.url.starts_with("https://") || same_origin) {
+    if !https_or_loopback(&pointer.url) {
         return Err(Error::new(format!(
             "release pointer's download is not HTTPS: {}",
             pointer.url
         )));
     }
     Ok(())
+}
+
+/// HTTPS, or plain HTTP to this machine (tests and a local platform). Plain
+/// HTTP anywhere else would let anyone on the path choose the code we run.
+pub fn https_or_loopback(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..host_end];
+    if authority.contains('@') {
+        return false;
+    }
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
 fn download(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>> {
@@ -402,29 +426,64 @@ mod tests {
             url: "https://claudedaycare.com/releases/x".into(),
             sha256: SHA.into(),
         };
-        assert!(validate_pointer(&good, "https://claudedaycare.com").is_ok());
+        assert!(validate_pointer(&good).is_ok());
 
         let http_elsewhere = ReleasePointer {
             url: "http://evil.test/x".into(),
             ..good.clone()
         };
-        assert!(validate_pointer(&http_elsewhere, "http://127.0.0.1:9").is_err());
+        assert!(validate_pointer(&http_elsewhere).is_err());
         let http_same_origin = ReleasePointer {
             url: "http://127.0.0.1:9/releases/x".into(),
             ..good.clone()
         };
-        assert!(validate_pointer(&http_same_origin, "http://127.0.0.1:9").is_ok());
+        assert!(validate_pointer(&http_same_origin).is_ok());
 
         let short_sha = ReleasePointer {
             sha256: "abc".into(),
             ..good.clone()
         };
-        assert!(validate_pointer(&short_sha, "https://claudedaycare.com").is_err());
+        assert!(validate_pointer(&short_sha).is_err());
         let odd_release = ReleasePointer {
             release: "../../x y".into(),
             ..good
         };
-        assert!(validate_pointer(&odd_release, "https://claudedaycare.com").is_err());
+        assert!(validate_pointer(&odd_release).is_err());
+    }
+
+    #[test]
+    fn plain_http_is_accepted_only_to_loopback() {
+        for ok in [
+            "https://claudedaycare.com/x",
+            "http://127.0.0.1:9/x",
+            "http://localhost/x",
+            "http://[::1]:9/x",
+            "http://127.0.0.1",
+        ] {
+            assert!(https_or_loopback(ok), "{ok}");
+        }
+        for bad in [
+            "http://claudedaycare.com/x",
+            "http://127.0.0.1.evil.test/x",
+            "http://localhost.evil.test/x",
+            "http://127.0.0.1@evil.test/x",
+            "http://10.0.0.5/x",
+            "ftp://127.0.0.1/x",
+        ] {
+            assert!(!https_or_loopback(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_update_from_a_plain_http_platform_elsewhere_is_refused_before_any_request() {
+        let error = update(
+            "http://daycare.example.test",
+            Some("old0"),
+            Path::new("/nonexistent"),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(error.message().contains("plain HTTP"), "{error}");
     }
 
     #[test]
