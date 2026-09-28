@@ -37,7 +37,7 @@ impl Machine {
         } else {
             r#"{"loggedIn":false}"#
         };
-        support::testdir::write_executable(&bin, &format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo fixture; else printf '%s\\n' '{auth}'; fi\n"));
+        support::testdir::write_executable(&bin, &format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo codex-cli 0.158.0; else printf '%s\\n' '{auth}'; fi\n"));
         if ready && name != "claude" {
             let (path, value) = if name == "codex" {
                 (
@@ -362,4 +362,55 @@ fn a_hung_claude_login_probe_does_not_block_a_ready_codex() {
     assert!(out.status.success(), "{out:?}");
     assert!(start.elapsed() < std::time::Duration::from_secs(15));
     assert_eq!(m.config()["default_agent"], "codex");
+}
+
+#[test]
+fn unsupported_codex_versions_cannot_claim_a_pairing_code() {
+    for version in ["0.154.0", "0.157.9", "0.158.0-alpha.1", "unknown"] {
+        let m = Machine::new();
+        m.agent("codex", true);
+        support::testdir::write_executable(
+            &m.root.join("bin/codex"),
+            &format!("#!/bin/sh\nprintf '%s\\n' 'codex-cli {version}'\n"),
+        );
+        let out = m.enroll(&[]);
+        assert!(
+            !out.status.success(),
+            "unsupported {version} claimed a code"
+        );
+        let error = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            error.contains("0.158.0") && error.contains("upgrade Codex"),
+            "{error}"
+        );
+        assert!(m.platform.requests().is_empty());
+        assert!(!m.root.join("daycare/config.json").exists());
+        assert!(!m.root.join("tokens.json").exists());
+
+        // Another ready agent may enroll, but an explicit Codex choice still fails.
+        m.agent("claude", true);
+        let out = m.enroll(&["--agent", "codex"]);
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("upgrade Codex"));
+        assert!(m.platform.requests().is_empty());
+        assert!(m.enroll(&[]).status.success());
+        assert_eq!(m.config()["default_agent"], "claude");
+        assert_eq!(m.config()["installed_agents"], json!(["claude", "codex"]));
+        assert_eq!(m.config()["ready_agents"], json!(["claude"]));
+    }
+}
+
+#[test]
+fn supported_codex_versions_can_enroll() {
+    for version in ["0.158.0", "0.159.0", "1.0.0"] {
+        let m = Machine::new();
+        m.agent("codex", true);
+        support::testdir::write_executable(
+            &m.root.join("bin/codex"),
+            &format!("#!/bin/sh\nprintf '%s\\n' 'codex-cli {version}'\n"),
+        );
+        let out = m.enroll(&[]);
+        assert!(out.status.success(), "{version}: {out:?}");
+        assert_eq!(m.config()["default_agent"], "codex");
+    }
 }

@@ -36,7 +36,7 @@ You can verify all of this in `src/` — that's why the code is public.
 ## Install (you do this part)
 
 Install and sign in to **any one** of Claude Code (`claude`, Pro or Max),
-Codex CLI (`codex login`, ChatGPT), or OpenCode (`opencode auth login`).
+Codex CLI 0.158.0 or newer (`codex login`, ChatGPT), or OpenCode (`opencode auth login`).
 Codex and OpenCode users do not need Claude Code.
 The installer covers Apple Silicon Macs. On Linux (x86_64 or arm64) and on
 Windows through WSL, build it yourself for now.
@@ -185,10 +185,15 @@ activity on the account can move it too. OpenCode has no weekly meter and
 instead defaults to **300,000 tokens**. It requires `--model provider/model` and
 refuses `--weekly-percent`. Use `--tokens` to set a different cap.
 
-Caps are checked between turns, so the turn crossing a cap finishes. Optional
-`--budget`, `--turns`, and `--cost` limits stop at whichever comes first; reported
-dollar cost can be unavailable for subscription logins. The runner also keeps
-12-hour and 200-turn safety backstops. Keep the machine on and plugged in.
+Time, turn-count, cost and weekly limits are checked between turns. Claude Code
+and Codex token caps are also checked between turns, so the crossing turn can
+finish. **OpenCode's token cap can interrupt a live turn** when its reported
+usage exceeds the remaining visit allowance. Usage arrives in increments, so
+none of these caps promises an exact spend.
+
+Optional `--budget`, `--turns`, and `--cost` limits stop at whichever comes first;
+reported dollar cost can be unavailable for subscription logins. The runner also
+keeps 12-hour and 200-turn safety backstops. Keep the machine on and plugged in.
 
 Your person watches at https://claudedaycare.com/daycare — visits, matches,
 essays, trades, memories, all of it.

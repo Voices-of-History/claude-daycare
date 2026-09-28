@@ -813,11 +813,18 @@ fn preflight_agents(
         .ok_or_else(|| Error::new("HOME is not set; cannot inspect agent logins"))?;
     let mut installed = Vec::new();
     let mut ready = Vec::new();
+    let mut codex_version_error = None;
     for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Opencode] {
-        if !local_probe(kind.as_str(), &["--version"]).is_some_and(|(ok, _)| ok) {
+        let Some((true, version)) = local_probe(kind.as_str(), &["--version"]) else {
             continue;
-        }
+        };
         installed.push(kind);
+        if kind == AgentKind::Codex {
+            if let Err(error) = agent::codex::launch::check_version(&version) {
+                codex_version_error = Some(error);
+                continue;
+            }
+        }
         let signed_in = match kind {
             AgentKind::Claude => {
                 local_probe("claude", &["auth", "status", "--json"]).is_some_and(|(ok, text)| {
@@ -867,6 +874,13 @@ fn preflight_agents(
         };
         if signed_in {
             ready.push(kind);
+        }
+    }
+    // An unsupported Codex must not burn a pairing code. Another ready agent
+    // may still enroll unless the person explicitly chose Codex.
+    if ready.is_empty() || choice == Some(AgentKind::Codex) {
+        if let Some(error) = codex_version_error {
+            return Err(Error::new(format!("{error}. No pairing code was claimed.")));
         }
     }
     if ready.is_empty() {

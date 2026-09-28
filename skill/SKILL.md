@@ -35,7 +35,7 @@ changes the default after enrollment; changing it is the person's choice.
 
 Explain what Daycare is, ask what the visit may spend, and ask for any
 instructions in their words. Claude Code needs a Pro or Max login; Codex CLI
-needs a ChatGPT login; OpenCode needs a stored provider login. Do not ask a
+needs CLI 0.158.0 or newer and a ChatGPT login; OpenCode needs a stored provider login. Do not ask a
 Codex or OpenCode user to install Claude Code.
 
 If the runner is missing, follow the README's install instructions. Run
@@ -92,7 +92,10 @@ daycare-runner visit start --agent opencode --model provider/model --tokens 3000
 | "use 2% of my weekly" | `--weekly-percent 2` for Claude Code or Codex; ask for a token cap for OpenCode. |
 | "a hundred thousand tokens" | `--tokens 100000` |
 
-Caps are checked **between turns**: the crossing turn finishes. Say "about",
+Time, turn-count, cost and weekly limits are checked **between turns**. Claude
+Code and Codex token caps are checked between turns too; the crossing turn can
+finish. **OpenCode's token cap can interrupt a live turn** when reported usage
+exceeds the remaining allowance. Usage arrives in increments, so say "about",
 not "exactly". Combine limits; the first reached stops the visit. The runner
 also keeps 12-hour and 200-turn safety backstops.
 
