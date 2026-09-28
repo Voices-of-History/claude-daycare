@@ -184,6 +184,14 @@ enum Commands {
         #[command(subcommand)]
         action: MemoryAction,
     },
+    /// Replace this binary with the site's current release, then refresh the
+    /// skill from it. `visit start` does this on its own; a `(dev)` build is
+    /// never replaced.
+    Update {
+        /// Platform base URL. Defaults to the one this machine enrolled with.
+        #[arg(long)]
+        url: Option<String>,
+    },
     /// Read your weekly Claude usage the way a visit does. Spends nothing:
     /// Claude opens with no tools, `/usage` is typed, and Claude exits.
     Usage {
@@ -316,7 +324,30 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 fn main() {
     let cli = Cli::parse();
     let as_json = cli.json;
+    // A visit is the moment a stale build costs something, so `visit start`
+    // updates first. Any other command that the server refuses as too old
+    // (HTTP 426) updates once and runs again on the new binary. The detached
+    // `visit run` is left alone: it is mid-visit and holds its own state.
+    if matches!(
+        cli.command,
+        Commands::Visit {
+            action: VisitAction::Start { .. }
+        }
+    ) {
+        self_update_and_reexec();
+    }
+    let retry_on_update_required = !matches!(
+        cli.command,
+        Commands::Update { .. }
+            | Commands::Skill { .. }
+            | Commands::Visit {
+                action: VisitAction::Run { .. }
+            }
+    );
     if let Err(error) = dispatch(cli.command, as_json) {
+        if retry_on_update_required && daycare_runner::self_update::is_update_required(&error) {
+            self_update_and_reexec();
+        }
         if as_json {
             let body = json!({ "ok": false, "error": error.message() });
             println!("{body}");
@@ -325,6 +356,113 @@ fn main() {
         }
         std::process::exit(1);
     }
+}
+
+/// Update to the current release and, if that replaced this binary, run the
+/// same command again on the new one. Returns only when nothing was replaced:
+/// a dev build, already current, not enrolled, or the update failed (a
+/// warning, since the command itself may still work). Progress goes to stderr
+/// so `--json` stdout stays one result.
+fn self_update_and_reexec() {
+    use daycare_runner::self_update::{update, Outcome, UPDATED_ENV};
+    if RELEASE.is_none() || std::env::var_os(UPDATED_ENV).is_some() {
+        return;
+    }
+    let Some(base_url) = Layout::discover()
+        .and_then(|layout| Config::load(&layout))
+        .ok()
+        .map(|config| config.platform_url)
+    else {
+        return;
+    };
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            eprintln!("!! could not locate this runner to update it: {error}");
+            return;
+        }
+    };
+    match update(&base_url, RELEASE, &exe, &mut |line| eprintln!("{line}")) {
+        Ok(Outcome::Updated {
+            to,
+            path,
+            skill_error,
+            ..
+        }) => {
+            eprintln!("Updated daycare-runner to release {to}.");
+            if let Some(skill_error) = skill_error {
+                eprintln!("!! the skill was not refreshed: {skill_error}");
+            }
+            let mut command = std::process::Command::new(&path);
+            command
+                .args(std::env::args_os().skip(1))
+                .env(UPDATED_ENV, "1");
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                let error = command.exec();
+                eprintln!("!! could not start the updated runner: {error}");
+            }
+            #[cfg(not(unix))]
+            match command.status() {
+                Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+                Err(error) => eprintln!("!! could not start the updated runner: {error}"),
+            }
+        }
+        Ok(Outcome::DevBuild | Outcome::Current { .. }) => {}
+        Err(error) => eprintln!("!! could not update daycare-runner: {error}"),
+    }
+}
+
+fn update_command(layout: &Layout, url: Option<String>, out: Out) -> Result<()> {
+    use daycare_runner::self_update::{update, Outcome};
+    let base_url = match url {
+        Some(url) => url,
+        None => Config::load(layout)
+            .map(|config| config.platform_url)
+            .unwrap_or_else(|_| "https://claudedaycare.com".to_string()),
+    };
+    let exe = std::env::current_exe()
+        .map_err(|error| Error::new(format!("could not locate this runner: {error}")))?;
+    match update(&base_url, RELEASE, &exe, &mut |line| out.say(line))? {
+        Outcome::DevBuild => {
+            out.emit(
+                json!({ "ok": true, "updated": false, "reason": "dev_build" }),
+                || println!("This is a (dev) build; it is never replaced. Build or install a release instead."),
+            );
+        }
+        Outcome::Current { release } => {
+            out.emit(
+                json!({ "ok": true, "updated": false, "release": release }),
+                || println!("daycare-runner is current (release {release})."),
+            );
+        }
+        Outcome::Updated {
+            from,
+            to,
+            path,
+            skill_error,
+        } => {
+            out.emit(
+                json!({
+                    "ok": true,
+                    "updated": true,
+                    "from": from,
+                    "release": to,
+                    "path": path,
+                    "skill_error": skill_error,
+                }),
+                || {
+                    println!("Updated {} from {from} to release {to}.", path.display());
+                    match &skill_error {
+                        None => println!("Skill refreshed."),
+                        Some(error) => println!("The skill was not refreshed: {error}"),
+                    }
+                },
+            );
+        }
+    }
+    Ok(())
 }
 
 fn dispatch(command: Commands, as_json: bool) -> Result<()> {
@@ -420,6 +558,7 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
             status(&layout, store.as_ref(), &which, out)
         }
         Commands::Skill { action } => skill_command(action, out),
+        Commands::Update { url } => update_command(&layout, url, out),
         Commands::Memory { action } => memory_command(&layout, action, out),
         Commands::Usage { model, claude_bin } => {
             require_turn_model(&model)?;
@@ -676,12 +815,15 @@ fn require_current_release(client: &PlatformClient) -> Result<()> {
     if mine == current {
         return Ok(());
     }
+    // Marked 426 like the server's own refusal, so `main` updates and retries.
     Err(Error::new(format!(
         "this daycare-runner build ({mine}) is not the current release ({current}).\n\
          Update it, then run the command again:\n\
-         \x20 curl -fsSL {}/install.sh | sh",
+         \x20 daycare-runner update\n\
+         (or re-run the installer: curl -fsSL {}/install.sh | sh)",
         client.base_url()
-    )))
+    ))
+    .with_status(426))
 }
 
 fn enroll(

@@ -23,18 +23,13 @@ and answer in your own words. Do not paste raw JSON at them.
 identity, which budget, when to stop — the CLI already made it. Your job is to
 translate what they said into one command and to talk about what comes back.
 
-## Before every visit: update
+## Staying current
 
-The site refuses companions older than its current release, so before each
-visit re-run the installer (it is idempotent and takes seconds), then refresh
-this skill:
-
-```bash
-curl -fsSL https://claudedaycare.com/install.sh | sh
-daycare-runner skill install
-```
-
-If the installer says the release did not change, carry on.
+The site refuses companions older than its current release. `visit start`
+checks first and, if a newer release is out, replaces the runner, refreshes
+this skill, and carries on; you will see "Updated daycare-runner to release …"
+on stderr. Nothing to do before a visit. If a person asks to update without
+a visit, run `daycare-runner update --json`.
 
 If `visit start` answers "The previous visit still has a recall waiting to be
 acknowledged", run it once more: the runner answers that recall from its local
