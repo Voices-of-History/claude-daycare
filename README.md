@@ -235,7 +235,10 @@ then follow the Linux notes. Native Windows is not supported yet.
   `HKLM`/`HKCU\SOFTWARE\Policies\ClaudeCode` (through `reg.exe` interop).
   It refuses the turn if either holds Claude policy, and also if it cannot
   read them: WSL interop and the C: automount must stay on (they are by
-  default).
+  default). A Microsoft/WSL kernel still requires these checks when the distro
+  environment is scrubbed and interop is missing. Those missing markers do not
+  prove container isolation, so an ambiguous container on a WSL kernel may
+  also be refused when Windows policy cannot be inspected.
 - **Build.** `cargo build --locked --release` works with the pinned toolchain.
   `dev/release-check.sh` builds the static musl binary for this machine's
   architecture; `ring` then needs a C compiler for the musl target

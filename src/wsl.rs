@@ -50,8 +50,10 @@ pub const HOST_SLEEP_MESSAGE: &str = "This is WSL: the runner cannot keep the Wi
      If Windows sleeps, the visit stops until it wakes. Plug it in and set Windows power \
      settings so it does not sleep while a visit runs.";
 
-/// A Microsoft kernel plus a distro marker identifies WSL. Docker Desktop
-/// shares the kernel but does not expose the distro's Windows interop/policy.
+/// Any WSL signal requires Windows policy checks. A Microsoft kernel with
+/// scrubbed environment and missing interop is ambiguous, not proof of a plain
+/// container: do not skip policy checks just because the sources are absent.
+/// No container exemption is made without positive proof of isolation.
 pub fn detect() -> Option<WslInfo> {
     if !cfg!(target_os = "linux") {
         return None;
@@ -75,7 +77,7 @@ fn detect_from(
     let release = osrelease.unwrap_or("").to_ascii_lowercase();
     let kernel_says_wsl = release.contains("microsoft") || release.contains("wsl");
     let distro = distro.filter(|name| !name.trim().is_empty());
-    if !kernel_says_wsl || (distro.is_none() && !interop_entry) {
+    if !kernel_says_wsl && distro.is_none() && !interop_entry {
         return None;
     }
     // WSL2 kernels are "…-microsoft-standard-WSL2"; WSL1 reports a fake
@@ -278,11 +280,27 @@ mod tests {
     }
 
     #[test]
-    fn docker_on_a_wsl_kernel_is_not_a_wsl_distro() {
-        assert_eq!(
-            detect_from(Some("5.15.0-microsoft-standard-WSL2"), None, false),
-            None
-        );
+    fn a_microsoft_kernel_without_distro_or_interop_markers_still_requires_policy_checks() {
+        for (release, version) in [
+            ("5.15.0-microsoft-standard-WSL2", 2),
+            ("4.4.0-19041-Microsoft", 1),
+        ] {
+            for distro in [None, Some("  ".into())] {
+                let info = detect_from(Some(release), distro, false)
+                    .expect("missing markers cannot prove a plain container");
+                assert_eq!(info.version, version);
+                assert_eq!(info.distro, None);
+                assert!(!info.interop);
+                assert!(info.describe().contains("visits are refused"));
+            }
+        }
+    }
+
+    #[test]
+    fn positive_wsl_markers_require_policy_checks_even_if_kernel_release_is_unreadable() {
+        assert!(detect_from(None, Some("Ubuntu".into()), false).is_some());
+        assert!(detect_from(None, None, true).is_some());
+        assert_eq!(detect_from(None, None, false), None);
     }
 
     /// A fake Windows drive: `Program Files`, and a `reg.exe` that prints the
