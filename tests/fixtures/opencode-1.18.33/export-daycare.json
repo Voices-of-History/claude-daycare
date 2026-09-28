@@ -1,0 +1,326 @@
+{
+  "info": {
+    "id": "ses_f173d91f7ffebhfg3cOJwHnscV",
+    "slug": "nimble-harbor",
+    "projectID": "global",
+    "directory": "/private/tmp/daycare-fixture/ws",
+    "path": "private/tmp/daycare-fixture/ws",
+    "title": "Daycare visit",
+    "agent": "daycare",
+    "model": {
+      "id": "m1",
+      "providerID": "mock",
+      "variant": "default"
+    },
+    "version": "1.18.33",
+    "summary": {
+      "additions": 0,
+      "deletions": 0,
+      "files": 0
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 2100,
+      "output": 90,
+      "reasoning": 60,
+      "cache": {
+        "read": 900,
+        "write": 0
+      }
+    },
+    "permission": [
+      {
+        "permission": "question",
+        "pattern": "*",
+        "action": "deny"
+      },
+      {
+        "permission": "plan_enter",
+        "pattern": "*",
+        "action": "deny"
+      },
+      {
+        "permission": "plan_exit",
+        "pattern": "*",
+        "action": "deny"
+      }
+    ],
+    "time": {
+      "created": 1790611451400,
+      "updated": 1790611455806
+    }
+  },
+  "messages": [
+    {
+      "info": {
+        "role": "user",
+        "time": {
+          "created": 1790611451447
+        },
+        "agent": "daycare",
+        "model": {
+          "providerID": "mock",
+          "modelID": "m1"
+        },
+        "summary": {
+          "diffs": []
+        },
+        "id": "msg_0e8c26e370014DeCiZeHMy85S3",
+        "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV"
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "Look around.\n",
+          "id": "prt_0e8c26e3e0010uq6w3mnK9LjCp",
+          "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV",
+          "messageID": "msg_0e8c26e370014DeCiZeHMy85S3"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_0e8c26e370014DeCiZeHMy85S3",
+        "role": "assistant",
+        "mode": "daycare",
+        "agent": "daycare",
+        "path": {
+          "cwd": "/private/tmp/daycare-fixture/ws",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 1050,
+          "input": 700,
+          "output": 30,
+          "reasoning": 20,
+          "cache": {
+            "write": 0,
+            "read": 300
+          }
+        },
+        "modelID": "m1",
+        "providerID": "mock",
+        "time": {
+          "created": 1790611452030,
+          "completed": 1790611452589
+        },
+        "finish": "tool-calls",
+        "id": "msg_0e8c2707e001CGdTwL8rnSCbjd",
+        "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_0e8c27281001OrjADbGGZJ8hzr",
+          "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV",
+          "messageID": "msg_0e8c2707e001CGdTwL8rnSCbjd"
+        },
+        {
+          "type": "tool",
+          "tool": "daycare_daycare_identity_get",
+          "callID": "call_0",
+          "state": {
+            "status": "completed",
+            "input": {},
+            "output": "{\n  \"actor_id\": \"actor-live\",\n  \"name\": \"Pip\",\n  \"world_session_id\": \"session-live\",\n  \"capabilities\": [\n    \"look\",\n    \"say\",\n    \"note\",\n    \"rest\"\n  ],\n  \"memories\": []\n}",
+            "metadata": {
+              "truncated": false
+            },
+            "title": "",
+            "time": {
+              "start": 1790611452562,
+              "end": 1790611452573
+            }
+          },
+          "id": "prt_0e8c27287001Gq2dxdIyv8C3re",
+          "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV",
+          "messageID": "msg_0e8c2707e001CGdTwL8rnSCbjd"
+        },
+        {
+          "reason": "tool-calls",
+          "type": "step-finish",
+          "tokens": {
+            "total": 1050,
+            "input": 700,
+            "output": 30,
+            "reasoning": 20,
+            "cache": {
+              "write": 0,
+              "read": 300
+            }
+          },
+          "cost": 0,
+          "id": "prt_0e8c272a40018NAM0WSXDEy70U",
+          "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV",
+          "messageID": "msg_0e8c2707e001CGdTwL8rnSCbjd"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_0e8c26e370014DeCiZeHMy85S3",
+        "role": "assistant",
+        "mode": "daycare",
+        "agent": "daycare",
+        "path": {
+          "cwd": "/private/tmp/daycare-fixture/ws",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 1050,
+          "input": 700,
+          "output": 30,
+          "reasoning": 20,
+          "cache": {
+            "write": 0,
+            "read": 300
+          }
+        },
+        "modelID": "m1",
+        "providerID": "mock",
+        "time": {
+          "created": 1790611452594,
+          "completed": 1790611452884
+        },
+        "finish": "stop",
+        "id": "msg_0e8c272b20010JFdwFcskHE3Mu",
+        "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_0e8c27389001GWgW3cB5mBOAve",
+          "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV",
+          "messageID": "msg_0e8c272b20010JFdwFcskHE3Mu"
+        },
+        {
+          "type": "text",
+          "text": "I looked around the courtyard.",
+          "time": {
+            "start": 1790611452818,
+            "end": 1790611452874
+          },
+          "id": "prt_0e8c27392001vb2kceih3Faint",
+          "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV",
+          "messageID": "msg_0e8c272b20010JFdwFcskHE3Mu"
+        },
+        {
+          "reason": "stop",
+          "type": "step-finish",
+          "tokens": {
+            "total": 1050,
+            "input": 700,
+            "output": 30,
+            "reasoning": 20,
+            "cache": {
+              "write": 0,
+              "read": 300
+            }
+          },
+          "cost": 0,
+          "id": "prt_0e8c273cf001PzwZ2LwKghqFFQ",
+          "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV",
+          "messageID": "msg_0e8c272b20010JFdwFcskHE3Mu"
+        }
+      ]
+    },
+    {
+      "info": {
+        "role": "user",
+        "time": {
+          "created": 1790611454697
+        },
+        "agent": "daycare",
+        "model": {
+          "providerID": "mock",
+          "modelID": "m1"
+        },
+        "summary": {
+          "diffs": []
+        },
+        "id": "msg_0e8c27ae9001oyqHVwIro6XdG7",
+        "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV"
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "Look around.\n",
+          "id": "prt_0e8c27aed001EGBZEhxIOsZ88y",
+          "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV",
+          "messageID": "msg_0e8c27ae9001oyqHVwIro6XdG7"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_0e8c27ae9001oyqHVwIro6XdG7",
+        "role": "assistant",
+        "mode": "daycare",
+        "agent": "daycare",
+        "path": {
+          "cwd": "/private/tmp/daycare-fixture/ws",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 1050,
+          "input": 700,
+          "output": 30,
+          "reasoning": 20,
+          "cache": {
+            "write": 0,
+            "read": 300
+          }
+        },
+        "modelID": "m1",
+        "providerID": "mock",
+        "time": {
+          "created": 1790611455319,
+          "completed": 1790611455778
+        },
+        "finish": "stop",
+        "id": "msg_0e8c27d57001gzEPcW2T72IdrT",
+        "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_0e8c27f0c001yXlWFjD51ALJZk",
+          "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV",
+          "messageID": "msg_0e8c27d57001gzEPcW2T72IdrT"
+        },
+        {
+          "type": "text",
+          "text": "I looked around the courtyard.",
+          "time": {
+            "start": 1790611455761,
+            "end": 1790611455765
+          },
+          "id": "prt_0e8c27f110010mHz2ziUvPPCa6",
+          "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV",
+          "messageID": "msg_0e8c27d57001gzEPcW2T72IdrT"
+        },
+        {
+          "reason": "stop",
+          "type": "step-finish",
+          "tokens": {
+            "total": 1050,
+            "input": 700,
+            "output": 30,
+            "reasoning": 20,
+            "cache": {
+              "write": 0,
+              "read": 300
+            }
+          },
+          "cost": 0,
+          "id": "prt_0e8c27f1c001ShWUsGqr5ypcW4",
+          "sessionID": "ses_f173d91f7ffebhfg3cOJwHnscV",
+          "messageID": "msg_0e8c27d57001gzEPcW2T72IdrT"
+        }
+      ]
+    }
+  ]
+}

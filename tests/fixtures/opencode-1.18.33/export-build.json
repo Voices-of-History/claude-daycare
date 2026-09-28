@@ -1,0 +1,230 @@
+{
+  "info": {
+    "id": "ses_f17417f8affeEiNBv3G12a1cvj",
+    "slug": "gentle-knight",
+    "projectID": "global",
+    "directory": "/private/tmp/daycare-fixture/ws",
+    "path": "private/tmp/daycare-fixture/ws",
+    "title": "Daycare visit",
+    "agent": "build",
+    "model": {
+      "id": "m1",
+      "providerID": "mock",
+      "variant": "default"
+    },
+    "version": "1.18.33",
+    "summary": {
+      "additions": 0,
+      "deletions": 0,
+      "files": 0
+    },
+    "cost": 0,
+    "tokens": {
+      "input": 2000,
+      "output": 100,
+      "reasoning": 0,
+      "cache": {
+        "read": 0,
+        "write": 0
+      }
+    },
+    "permission": [
+      {
+        "permission": "question",
+        "pattern": "*",
+        "action": "deny"
+      },
+      {
+        "permission": "plan_enter",
+        "pattern": "*",
+        "action": "deny"
+      },
+      {
+        "permission": "plan_exit",
+        "pattern": "*",
+        "action": "deny"
+      }
+    ],
+    "time": {
+      "created": 1790611193973,
+      "updated": 1790611199097
+    }
+  },
+  "messages": [
+    {
+      "info": {
+        "role": "user",
+        "time": {
+          "created": 1790611194173
+        },
+        "agent": "build",
+        "model": {
+          "providerID": "mock",
+          "modelID": "m1"
+        },
+        "summary": {
+          "diffs": []
+        },
+        "id": "msg_0e8be813d001OkP9rXOkaqr8fQ",
+        "sessionID": "ses_f17417f8affeEiNBv3G12a1cvj"
+      },
+      "parts": [
+        {
+          "type": "text",
+          "text": "x\n",
+          "id": "prt_0e8be8152001SfD4dW5T46hT9a",
+          "sessionID": "ses_f17417f8affeEiNBv3G12a1cvj",
+          "messageID": "msg_0e8be813d001OkP9rXOkaqr8fQ"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_0e8be813d001OkP9rXOkaqr8fQ",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/private/tmp/daycare-fixture/ws",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 1050,
+          "input": 1000,
+          "output": 50,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "modelID": "m1",
+        "providerID": "mock",
+        "time": {
+          "created": 1790611196235,
+          "completed": 1790611197594
+        },
+        "finish": "tool-calls",
+        "id": "msg_0e8be894b001KtScr3FB1gQ65Z",
+        "sessionID": "ses_f17417f8affeEiNBv3G12a1cvj"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_0e8be8dfe001t2rbUWqcD8swdn",
+          "sessionID": "ses_f17417f8affeEiNBv3G12a1cvj",
+          "messageID": "msg_0e8be894b001KtScr3FB1gQ65Z"
+        },
+        {
+          "type": "tool",
+          "tool": "daycare_daycare_action_propose",
+          "callID": "call_0",
+          "state": {
+            "status": "completed",
+            "input": {},
+            "output": "{\n  \"accepted\": false,\n  \"decision\": \"invalid\",\n  \"outcome\": \"Malformed action. Use action = look | say | note | rest.\"\n}",
+            "metadata": {
+              "truncated": false
+            },
+            "title": "",
+            "time": {
+              "start": 1790611197560,
+              "end": 1790611197577
+            }
+          },
+          "id": "prt_0e8be8e38001doifbYUrTi2f0Q",
+          "sessionID": "ses_f17417f8affeEiNBv3G12a1cvj",
+          "messageID": "msg_0e8be894b001KtScr3FB1gQ65Z"
+        },
+        {
+          "reason": "tool-calls",
+          "type": "step-finish",
+          "tokens": {
+            "total": 1050,
+            "input": 1000,
+            "output": 50,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 0
+            }
+          },
+          "cost": 0,
+          "id": "prt_0e8be8e90001kvzXDJevQ05hDE",
+          "sessionID": "ses_f17417f8affeEiNBv3G12a1cvj",
+          "messageID": "msg_0e8be894b001KtScr3FB1gQ65Z"
+        }
+      ]
+    },
+    {
+      "info": {
+        "parentID": "msg_0e8be813d001OkP9rXOkaqr8fQ",
+        "role": "assistant",
+        "mode": "build",
+        "agent": "build",
+        "path": {
+          "cwd": "/private/tmp/daycare-fixture/ws",
+          "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+          "total": 1050,
+          "input": 1000,
+          "output": 50,
+          "reasoning": 0,
+          "cache": {
+            "write": 0,
+            "read": 0
+          }
+        },
+        "modelID": "m1",
+        "providerID": "mock",
+        "time": {
+          "created": 1790611197599,
+          "completed": 1790611198957
+        },
+        "finish": "stop",
+        "id": "msg_0e8be8e9f001nprfKUvYT1hjOT",
+        "sessionID": "ses_f17417f8affeEiNBv3G12a1cvj"
+      },
+      "parts": [
+        {
+          "type": "step-start",
+          "id": "prt_0e8be938f001ubp8R4EYCypUh7",
+          "sessionID": "ses_f17417f8affeEiNBv3G12a1cvj",
+          "messageID": "msg_0e8be8e9f001nprfKUvYT1hjOT"
+        },
+        {
+          "type": "text",
+          "text": "I looked around the courtyard.",
+          "time": {
+            "start": 1790611198882,
+            "end": 1790611198897
+          },
+          "id": "prt_0e8be93a2001Y25m0h6bUUENaX",
+          "sessionID": "ses_f17417f8affeEiNBv3G12a1cvj",
+          "messageID": "msg_0e8be8e9f001nprfKUvYT1hjOT"
+        },
+        {
+          "reason": "stop",
+          "type": "step-finish",
+          "tokens": {
+            "total": 1050,
+            "input": 1000,
+            "output": 50,
+            "reasoning": 0,
+            "cache": {
+              "write": 0,
+              "read": 0
+            }
+          },
+          "cost": 0,
+          "id": "prt_0e8be93c100179XuX0YtRGywpL",
+          "sessionID": "ses_f17417f8affeEiNBv3G12a1cvj",
+          "messageID": "msg_0e8be8e9f001nprfKUvYT1hjOT"
+        }
+      ]
+    }
+  ]
+}

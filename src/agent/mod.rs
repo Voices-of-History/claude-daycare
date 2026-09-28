@@ -12,6 +12,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod opencode;
 
 use crate::launch::{LaunchPlan, SessionMode};
 use crate::meter::WeeklyMeter;
@@ -31,6 +32,7 @@ pub enum AgentKind {
     #[default]
     Claude,
     Codex,
+    Opencode,
 }
 
 impl AgentKind {
@@ -38,6 +40,7 @@ impl AgentKind {
         match self {
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
+            AgentKind::Opencode => "opencode",
         }
     }
 
@@ -45,8 +48,9 @@ impl AgentKind {
         match value.trim().to_ascii_lowercase().as_str() {
             "claude" => Ok(AgentKind::Claude),
             "codex" => Ok(AgentKind::Codex),
+            "opencode" => Ok(AgentKind::Opencode),
             other => Err(Error::new(format!(
-                "--agent must be claude or codex; got {other:?}"
+                "--agent must be claude, codex, or opencode; got {other:?}"
             ))),
         }
     }
@@ -79,6 +83,10 @@ pub struct TurnSpec<'a> {
     pub workspace: &'a Path,
     pub purpose: TurnPurpose,
     pub model: &'a str,
+    /// The acting credential, for guards that must prove the daycare server
+    /// is reachable before the turn (OpenCode drops an unreachable server
+    /// silently). `None` on the day report, which reaches no server.
+    pub device_token: Option<&'a str>,
 }
 
 /// How the homecoming reader gets the rendered visit transcript.
@@ -140,6 +148,15 @@ pub trait Agent {
         Ok(())
     }
 
+    /// How many tokens one line of the live stream spent, for agents whose
+    /// stream reports usage as the turn goes (OpenCode's `step_finish`).
+    /// With it, `run_turn` kills a turn that passes what the visit's token cap
+    /// has left instead of learning so after the turn. A plain function
+    /// because it runs on the archiving thread.
+    fn live_token_counter(&self) -> Option<fn(&str) -> u64> {
+        None
+    }
+
     /// The receipt for one archived turn stream.
     fn parse_receipt(&self, archive: &str) -> Result<StreamReceipt>;
 
@@ -190,6 +207,7 @@ pub trait Agent {
 pub struct AgentBins {
     pub claude: String,
     pub codex: String,
+    pub opencode: String,
 }
 
 impl Default for AgentBins {
@@ -197,16 +215,18 @@ impl Default for AgentBins {
         AgentBins {
             claude: "claude".into(),
             codex: "codex".into(),
+            opencode: "opencode".into(),
         }
     }
 }
 
 /// Build the adapter for `kind`. `layout` locates the runner-owned state an
-/// adapter needs (Codex's sealed home).
+/// adapter needs (Codex's sealed home, OpenCode's seal and session database).
 pub fn agent(kind: AgentKind, bins: &AgentBins, layout: &Layout) -> Result<Box<dyn Agent>> {
     Ok(match kind {
         AgentKind::Claude => Box::new(claude::ClaudeAgent::new(&bins.claude)),
         AgentKind::Codex => Box::new(codex::CodexAgent::new(&bins.codex, layout)?),
+        AgentKind::Opencode => Box::new(opencode::OpencodeAgent::new(&bins.opencode, layout)),
     })
 }
 
@@ -219,7 +239,7 @@ mod tests {
         assert_eq!(AgentKind::parse(" Codex ").unwrap(), AgentKind::Codex);
         assert_eq!(AgentKind::parse("claude").unwrap(), AgentKind::Claude);
         let error = AgentKind::parse("gemini").unwrap_err().to_string();
-        assert!(error.contains("claude or codex"), "{error}");
+        assert!(error.contains("claude, codex, or opencode"), "{error}");
         assert_eq!(AgentKind::default(), AgentKind::Claude);
         assert_eq!(
             serde_json::to_string(&AgentKind::Codex).unwrap(),

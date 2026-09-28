@@ -1,0 +1,55 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "share": "disabled",
+  "provider": {
+    "mock": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Mock",
+      "options": {
+        "baseURL": "http://127.0.0.1:18431/v1",
+        "apiKey": "***"
+      },
+      "models": {
+        "m1": {
+          "name": "m1"
+        }
+      }
+    }
+  },
+  "mcp": {
+    "daycare": {
+      "type": "remote",
+      "url": "http://127.0.0.1:18432/api/daycare/mcp/mcp",
+      "headers": {
+        "Authorization": "***"
+      },
+      "oauth": false,
+      "enabled": true,
+      "timeout": 30000
+    }
+  },
+  "permission": {
+    "*": "deny",
+    "daycare_*": "allow",
+    "daycare_daycare_memory_save": "deny"
+  },
+  "agent": {
+    "daycare": {
+      "mode": "primary",
+      "prompt": "You are Pip.",
+      "steps": 40,
+      "permission": {
+        "*": "deny",
+        "daycare_*": "allow",
+        "daycare_daycare_memory_save": "deny"
+      },
+      "options": {}
+    }
+  },
+  "snapshot": false,
+  "mode": {},
+  "plugin": [],
+  "command": {},
+  "username": "unknown"
+}

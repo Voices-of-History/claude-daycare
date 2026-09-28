@@ -12,6 +12,8 @@ use crate::{Error, Result};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
@@ -42,6 +44,13 @@ pub struct TurnRequest<'a> {
     /// child's tool list. `agent.mcp_settle()` in production; zero in tests,
     /// which never launch a real child.
     pub mcp_settle: Duration,
+    /// The tokens the visit has left. For an agent that reports usage while
+    /// the turn runs (`Agent::live_token_counter`), the turn is killed once it
+    /// spends more than this. Usage arrives after a model step, and shutdown
+    /// happens on the next process poll, so this is not a provider-side cap. `None`
+    /// outside a token-capped visit, and ignored by agents that report usage
+    /// only at the end.
+    pub token_ceiling: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +77,8 @@ pub struct TurnOutcome {
     /// The turn succeeded without calling any daycare tool: the agent watched,
     /// waited, or declined, and said so. A held turn is a turn, not a failure.
     pub held: bool,
+    /// The turn passed `token_ceiling` (killed if it was still running).
+    pub over_token_ceiling: bool,
 }
 
 impl TurnOutcome {
@@ -109,6 +120,7 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         workspace: &physical_workspace,
         purpose: request.purpose,
         model: request.model,
+        device_token: (request.purpose != TurnPurpose::DayReport).then_some(request.device_token),
     };
     // Managed policy, login, and whatever proof of the seal the agent can
     // give without a model call, before the child receives either the turn
@@ -184,14 +196,24 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         .take()
         .ok_or_else(|| Error::new("child stdout unavailable"))?;
     // Each line is flushed as it arrives, so a turn that is killed still leaves
-    // the events it produced on disk.
+    // the events it produced on disk. Agents that report usage as they go have
+    // it counted here, where the lines are.
+    let token_counter = request
+        .token_ceiling
+        .and_then(|_| agent.live_token_counter());
+    let tokens_spent = Arc::new(AtomicU64::new(0));
     let (archive_done, archive_result) = std::sync::mpsc::channel();
+    let counted = Arc::clone(&tokens_spent);
     std::thread::spawn(move || {
         let mut archive = archive;
         let mut outcome = Ok(());
         for line in BufReader::new(stdout).split(b'\n') {
             match line {
                 Ok(mut line) => {
+                    if let Some(count) = token_counter {
+                        let spent = count(&String::from_utf8_lossy(&line));
+                        counted.fetch_add(spent, Ordering::SeqCst);
+                    }
                     line.push(b'\n');
                     if let Err(error) = archive.write_all(&line).and_then(|_| archive.flush()) {
                         outcome = Err(error);
@@ -226,12 +248,22 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
     });
 
     let mut timed_out = false;
+    let mut over_token_ceiling = false;
     let status = loop {
         match child.try_wait()? {
             Some(status) => break Some(status),
             None => {
                 if started.elapsed() >= request.timeout {
                     timed_out = true;
+                    let _ = child.kill();
+                    break child.wait().ok();
+                }
+                if token_counter.is_some()
+                    && request
+                        .token_ceiling
+                        .is_some_and(|ceiling| tokens_spent.load(Ordering::SeqCst) > ceiling)
+                {
+                    over_token_ceiling = true;
                     let _ = child.kill();
                     break child.wait().ok();
                 }
@@ -253,6 +285,12 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         )));
     }
     let stderr_text = stderr_result.recv_timeout(drain).unwrap_or_default();
+    // A short final step can finish and exit between polls. Recheck after
+    // draining stdout so an over-budget exit cannot be reported as success.
+    over_token_ceiling |= token_counter.is_some()
+        && request
+            .token_ceiling
+            .is_some_and(|ceiling| tokens_spent.load(Ordering::SeqCst) > ceiling);
     // Whatever the turn did, the agent may have state to settle (Codex hands a
     // refreshed login back to the owner's own home).
     let after_turn = agent.after_turn();
@@ -263,6 +301,13 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         failure = Some(format!(
             "turn exceeded {}s and was killed",
             request.timeout.as_secs()
+        ));
+    }
+    if over_token_ceiling {
+        failure = Some(format!(
+            "turn spent {} tokens, more than the {} left in the visit's token cap",
+            tokens_spent.load(Ordering::SeqCst),
+            request.token_ceiling.unwrap_or(0)
         ));
     }
 
@@ -349,6 +394,7 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         exit_code,
         failure,
         held,
+        over_token_ceiling,
     })
 }
 

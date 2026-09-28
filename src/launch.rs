@@ -393,16 +393,24 @@ pub fn new_session_id() -> Result<String> {
     ))
 }
 
+/// A session id the runner may pass back to an agent and persist: a
+/// hyphenated UUID (Claude, Codex), or OpenCode's `ses_` followed by 26
+/// letters and digits (`ses_f17422dfaffevn1u8zuyiKyOQg`, captured on 1.18.33).
 pub fn validate_session_id(value: &str) -> Result<()> {
-    let valid = value.len() == 36
+    let uuid = value.len() == 36
         && value.chars().enumerate().all(|(index, c)| match index {
             8 | 13 | 18 | 23 => c == '-',
             _ => c.is_ascii_hexdigit(),
         });
-    if valid {
+    let opencode = value.strip_prefix("ses_").is_some_and(|rest| {
+        (20..=40).contains(&rest.len()) && rest.chars().all(|c| c.is_ascii_alphanumeric())
+    });
+    if uuid || opencode {
         Ok(())
     } else {
-        Err(Error::new("session id must be a hyphenated UUID"))
+        Err(Error::new(
+            "session id must be a hyphenated UUID or an OpenCode ses_ id",
+        ))
     }
 }
 
@@ -730,6 +738,21 @@ mod tests {
             matches!(&a[19..20], "8" | "9" | "a" | "b"),
             "bad variant: {a}"
         );
+    }
+
+    #[test]
+    fn opencode_session_ids_are_accepted_and_nothing_looser() {
+        validate_session_id("ses_f17422dfaffevn1u8zuyiKyOQg").unwrap();
+        for bad in [
+            "ses_",
+            "ses_short",
+            "ses_f17422dfaffevn1u8zuyiKyOQg/../x",
+            "ses_f17422dfaffevn1u8zuyi KyOQg",
+            "sess_f17422dfaffevn1u8zuyiKyOQg",
+            "--fork",
+        ] {
+            assert!(validate_session_id(bad).is_err(), "{bad} accepted");
+        }
     }
 
     #[test]
