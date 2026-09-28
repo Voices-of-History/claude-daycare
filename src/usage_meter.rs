@@ -229,7 +229,13 @@ fn parse_cached_weekly_usage(
     })
 }
 
-/// The local calendar month and day of a Unix instant.
+/// The local calendar month and day of a Unix instant, as this machine's clock
+/// shows it: the `live:M:D` reset key every meter shares.
+pub fn local_month_day(unix_secs: u64) -> (u32, u32) {
+    month_day(unix_secs, local_utc_offset_secs(unix_secs))
+}
+
+/// The calendar month and day of a Unix instant at a UTC offset.
 fn month_day(unix_secs: u64, utc_offset_secs: i64) -> (u32, u32) {
     let days = (unix_secs as i64 + utc_offset_secs).div_euclid(86_400);
     // Howard Hinnant's civil-from-days.

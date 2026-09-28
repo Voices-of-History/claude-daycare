@@ -1,13 +1,14 @@
 #!/bin/bash
-# Send the real `claude` on one short visit against the mock platform: the
-# usage meter (trust question included, since the meter folder is new), one
-# world turn, homecoming, and the visit's end. This DOES run a few small model
-# turns on your Claude subscription.
+# Send the real `claude` (or `codex`) on one short visit against the mock
+# platform: the usage meter (trust question included, since the meter folder
+# is new), one world turn, homecoming, and the visit's end. This DOES run a few
+# small model turns on your Claude (or ChatGPT) subscription.
 #
-#   dev/visit-check.sh [port]
+#   dev/visit-check.sh [port] [claude|codex]
 #
 # Like live-check.sh it touches nothing outside its scratch directory, apart
-# from Claude recording that it trusts the scratch meter folder.
+# from Claude recording that it trusts the scratch meter folder, and Codex
+# handing a refreshed login back to ~/.codex/auth.json.
 
 set -euo pipefail
 
@@ -16,7 +17,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 CRATE="$(dirname "$HERE")"
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/daycare-visit-XXXXXX")"
 BIN="$CRATE/target/debug/daycare-runner"
+AGENT="${2:-claude}"
 CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+CODEX_BIN="${CODEX_BIN:-codex}"
+AGENT_ARGS=(--agent "$AGENT" --claude-bin "$CLAUDE_BIN" --codex-bin "$CODEX_BIN")
 
 cleanup() {
   [ -f "$SCRATCH/server.pid" ] && kill "$(cat "$SCRATCH/server.pid")" 2>/dev/null || true
@@ -38,18 +42,19 @@ echo "==> enroll"
 "$BIN" enroll --url "http://127.0.0.1:$PORT" --code VISIT-TEST --device-name visit-check
 
 echo "==> usage meter"
-"$BIN" usage --claude-bin "$CLAUDE_BIN"
+"$BIN" usage "${AGENT_ARGS[@]}"
 
 echo "==> one-turn visit"
 "$BIN" visit start --foreground --turns 1 --interval 1 --weekly-percent 2 \
-  --instructions "Look around and say hello." --claude-bin "$CLAUDE_BIN" --json \
+  --instructions "Look around and say hello." "${AGENT_ARGS[@]}" --json \
   | tee "$SCRATCH/visit.json"
 
 echo "==> what the platform saw"
-python3 - "$SCRATCH/state.json" "$SCRATCH/visit.json" <<'PY'
+python3 - "$SCRATCH/state.json" "$SCRATCH/visit.json" "$AGENT" <<'PY'
 import json, sys
 state = json.load(open(sys.argv[1]))
 visit = json.loads(open(sys.argv[2]).read().strip().splitlines()[-1])
+agent = sys.argv[3]
 print("opened:", state["visits"])
 print("turns:", [(c["path"], c["report"]["status"]) for c in state["completions"]])
 print("ended:", state["visit_ends"])
@@ -61,6 +66,9 @@ assert state["visits"] and state["visits"][0].get("budget_usage_pct") == 2.0
 assert any(c["report"]["status"] == "completed" for c in state["completions"])
 assert state["visit_ends"], "the visit end was never reported"
 assert "report" in state["visit_reports"], "the day report was never delivered"
+if agent != "claude":
+    reports = [c["report"] for c in state["completions"]]
+    assert any(r.get("agent_kind") == agent and r.get("agent_session_id") for r in reports), reports
 print("\nOK: metered, one refereed turn, home, and ended.")
 PY
 echo "(scratch dir: $SCRATCH)"

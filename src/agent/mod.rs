@@ -11,6 +11,7 @@
 //! `sessions.json`, because a Claude session id cannot be resumed by Codex.
 
 pub mod claude;
+pub mod codex;
 
 use crate::launch::{LaunchPlan, SessionMode};
 use crate::meter::WeeklyMeter;
@@ -29,19 +30,24 @@ use std::time::Duration;
 pub enum AgentKind {
     #[default]
     Claude,
+    Codex,
 }
 
 impl AgentKind {
     pub fn as_str(self) -> &'static str {
         match self {
             AgentKind::Claude => "claude",
+            AgentKind::Codex => "codex",
         }
     }
 
     pub fn parse(value: &str) -> Result<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "claude" => Ok(AgentKind::Claude),
-            other => Err(Error::new(format!("--agent must be claude; got {other:?}"))),
+            "codex" => Ok(AgentKind::Codex),
+            other => Err(Error::new(format!(
+                "--agent must be claude or codex; got {other:?}"
+            ))),
         }
     }
 
@@ -183,20 +189,41 @@ pub trait Agent {
 #[derive(Debug, Clone)]
 pub struct AgentBins {
     pub claude: String,
+    pub codex: String,
 }
 
 impl Default for AgentBins {
     fn default() -> Self {
         AgentBins {
             claude: "claude".into(),
+            codex: "codex".into(),
         }
     }
 }
 
 /// Build the adapter for `kind`. `layout` locates the runner-owned state an
 /// adapter needs (Codex's sealed home).
-pub fn agent(kind: AgentKind, bins: &AgentBins, _layout: &Layout) -> Box<dyn Agent> {
-    match kind {
+pub fn agent(kind: AgentKind, bins: &AgentBins, layout: &Layout) -> Result<Box<dyn Agent>> {
+    Ok(match kind {
         AgentKind::Claude => Box::new(claude::ClaudeAgent::new(&bins.claude)),
+        AgentKind::Codex => Box::new(codex::CodexAgent::new(&bins.codex, layout)?),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kinds_parse_and_serialize_lowercase_and_claude_is_the_default() {
+        assert_eq!(AgentKind::parse(" Codex ").unwrap(), AgentKind::Codex);
+        assert_eq!(AgentKind::parse("claude").unwrap(), AgentKind::Claude);
+        let error = AgentKind::parse("gemini").unwrap_err().to_string();
+        assert!(error.contains("claude or codex"), "{error}");
+        assert_eq!(AgentKind::default(), AgentKind::Claude);
+        assert_eq!(
+            serde_json::to_string(&AgentKind::Codex).unwrap(),
+            "\"codex\""
+        );
     }
 }

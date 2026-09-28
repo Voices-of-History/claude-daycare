@@ -30,7 +30,7 @@ use daycare_runner::platform::{
     WorldCommand,
 };
 use daycare_runner::session::{activate, device_token, migrate_legacy, resolve, Active};
-use daycare_runner::stream::{parse_stream_file, StreamReceipt};
+use daycare_runner::stream::StreamReceipt;
 use daycare_runner::turn::{
     run_turn, TurnOutcome, TurnPurpose, TurnRequest, DEFAULT_TIMEOUT_SECS,
     PRE_INPUT_BROKEN_PIPE_ERROR,
@@ -165,7 +165,7 @@ enum Commands {
     Open {
         #[command(flatten)]
         which: Which,
-        /// Whose session to open: claude (default).
+        /// Whose session to open: claude (default) or codex.
         #[arg(long, default_value = "claude", value_parser = AgentKind::parse)]
         agent: AgentKind,
     },
@@ -173,7 +173,7 @@ enum Commands {
     Status {
         #[command(flatten)]
         which: Which,
-        /// Whose session to report: claude (default).
+        /// Whose session to report: claude (default) or codex.
         #[arg(long, default_value = "claude", value_parser = AgentKind::parse)]
         agent: AgentKind,
     },
@@ -565,7 +565,7 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
         Commands::Update { url } => update_command(&layout, url, out),
         Commands::Memory { action } => memory_command(&layout, action, out),
         Commands::Usage { model, agents } => {
-            let agent = agents.build(agents.agent, &layout);
+            let agent = agents.build(agents.agent, &layout)?;
             let model = model.unwrap_or_else(|| agent.default_model().to_string());
             agent.check_model(&model)?;
             let sample = sample_weekly(agent.as_ref(), &model, &layout)?;
@@ -594,28 +594,37 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
 /// new visits and standalone turns.
 #[derive(Args, Debug, Clone)]
 struct AgentOpts {
-    /// The coding agent that runs the turns: claude (default).
+    /// The coding agent that runs the turns: claude (default) or codex.
     #[arg(long, default_value = "claude", value_parser = AgentKind::parse)]
     agent: AgentKind,
     /// Claude Code binary to run.
     #[arg(long, default_value = "claude")]
     claude_bin: String,
+    /// Codex CLI binary to run.
+    #[arg(long, default_value = "codex")]
+    codex_bin: String,
 }
 
 impl AgentOpts {
     fn bins(&self) -> AgentBins {
         AgentBins {
             claude: self.claude_bin.clone(),
+            codex: self.codex_bin.clone(),
         }
     }
 
-    fn build(&self, kind: AgentKind, layout: &Layout) -> Box<dyn Agent> {
+    fn build(&self, kind: AgentKind, layout: &Layout) -> Result<Box<dyn Agent>> {
         agent::agent(kind, &self.bins(), layout)
     }
 
     /// The flags that name the binaries, for a detached child.
     fn bin_args(&self) -> Vec<String> {
-        vec!["--claude-bin".into(), self.claude_bin.clone()]
+        vec![
+            "--claude-bin".into(),
+            self.claude_bin.clone(),
+            "--codex-bin".into(),
+            self.codex_bin.clone(),
+        ]
     }
 }
 
@@ -1388,7 +1397,7 @@ fn run_once(
     ));
 
     let kind = visit.map_or(agents.agent, |visit| visit.agent);
-    let agent = agents.build(kind, layout);
+    let agent = agents.build(kind, layout)?;
     let outcome = execute(layout, active, agent.as_ref(), timeout, &command, visit);
 
     // Persist the session id before reporting: if the report fails, the next
@@ -1825,7 +1834,7 @@ fn visit_command(
             timeout,
             agents,
         } => {
-            let agent = agents.build(agents.agent, layout);
+            let agent = agents.build(agents.agent, layout)?;
             let model = model.unwrap_or_else(|| agent.default_model().to_string());
             agent.check_model(&model)?;
             if weekly_percent.is_some() && agent.meter().is_none() {
@@ -2457,7 +2466,7 @@ fn run_visit(
     let mut record = VisitRecord::load(layout, visit_id)?;
     // The visit's own agent, whatever `--agent` says: a session one agent
     // started cannot be resumed by another.
-    let agent = agents.build(record.agent, layout);
+    let agent = agents.build(record.agent, layout)?;
     // A visit created by an older runner can be resumed by this binary. Fill
     // the new weekly default and safety fields before any further turn so an
     // upgrade cannot leave that adopted visit unbounded.
@@ -3138,9 +3147,9 @@ fn write_private_account(
     let adoptable_session_id = record.homecoming_session_id.clone().or(legacy_session_id);
 
     if completed_path.exists() {
-        match parse_stream_file(&completed_path) {
+        match parse_archive(agent, &completed_path) {
             Ok(receipt) => {
-                let expected = adoptable_session_id.as_deref().unwrap_or("");
+                let expected = adoptable_id(agent, adoptable_session_id.as_deref(), &receipt);
                 match validate_private_homecoming_receipt(
                     agent,
                     &receipt,
@@ -3180,10 +3189,10 @@ fn write_private_account(
     }
 
     for attempt_path in homecoming_attempt_paths(layout, &record.visit_id)? {
-        let Ok(receipt) = parse_stream_file(&attempt_path) else {
+        let Ok(receipt) = parse_archive(agent, &attempt_path) else {
             continue;
         };
-        let expected = adoptable_session_id.as_deref().unwrap_or("");
+        let expected = adoptable_id(agent, adoptable_session_id.as_deref(), &receipt);
         match validate_private_homecoming_receipt(agent, &receipt, expected, &physical_workspace) {
             Ok(Some(account)) => {
                 std::fs::rename(&attempt_path, &completed_path)?;
@@ -3228,13 +3237,22 @@ fn write_private_account(
         attempt_path = homecoming_attempt_path(layout, &record.visit_id)?;
         // A fresh session per attempt, never the identity's visit session.
         // Persist the id before launch so an archive this attempt leaves
-        // behind can be adopted against it after a crash.
+        // behind can be adopted against it after a crash. An agent that mints
+        // its own ids (Codex) reports one only in the stream; its archive is
+        // adopted on the id it carries, and the record learns the id below.
         session_id = new_session_id()?;
-        record.homecoming_session_id = Some(session_id.clone());
+        record.homecoming_session_id = agent.reserves_session_ids().then(|| session_id.clone());
         record.save(layout)?;
         eprintln!(
             "homecoming reader {} reading {} ({} lines) for visit {}",
-            session_id, transcript.relative, transcript.lines, record.visit_id
+            if agent.reserves_session_ids() {
+                session_id.as_str()
+            } else {
+                "(new thread)"
+            },
+            transcript.relative,
+            transcript.lines,
+            record.visit_id
         );
         // Keep the advisory lock open in Claude itself. If the runner is
         // SIGKILLed mid-turn, the child retains ownership until it exits, so an
@@ -3258,6 +3276,13 @@ fn write_private_account(
         });
         lock.set_inheritable(false)?;
         outcome = result?;
+        if !agent.reserves_session_ids() {
+            if let Some(minted) = outcome.session_id() {
+                session_id = minted.to_string();
+                record.homecoming_session_id = Some(session_id.clone());
+                record.save(layout)?;
+            }
+        }
         if outcome.failure.is_none() || waited_for_reset {
             break;
         }
@@ -3317,7 +3342,7 @@ fn write_day_report(
     // A crash between writing this archive and the Complete checkpoint lands
     // back here; adopt the validated report rather than asking twice.
     if completed_path.exists() {
-        match parse_stream_file(&completed_path) {
+        match parse_archive(agent, &completed_path) {
             Ok(receipt) => {
                 match validate_day_report_receipt(agent, &receipt, session_id, &physical_workspace)
                 {
@@ -3416,7 +3441,11 @@ fn weekly_usage_line(record: &VisitRecord) -> Option<String> {
         format!("{percent:.1}")
     };
     Some(format!(
-        "About {displayed}% of the weekly allowance was used while this visit ran (other Claude activity on the account counts too)."
+        "About {displayed}% of the weekly allowance was used while this visit ran (other {} activity on the account counts too).",
+        match record.agent {
+            AgentKind::Claude => "Claude",
+            AgentKind::Codex => "Codex",
+        }
     ))
 }
 
@@ -3443,6 +3472,27 @@ const DAY_REPORT_MESSAGE: &str =
      match result accurately. An empty reply is fine; the visit's facts are on \
      record either way. Unlike your last note, this one WILL be shown to your \
      owner. Do not call any tool.";
+
+/// One archived turn, read by the agent that wrote it.
+fn parse_archive(agent: &dyn Agent, path: &std::path::Path) -> Result<StreamReceipt> {
+    agent.parse_receipt(&std::fs::read_to_string(path)?)
+}
+
+/// The session a homecoming archive must carry to be adopted. Claude's id is
+/// reserved and persisted before launch, so the archive must match it. An
+/// agent that mints its own ids can only be held to the one its archive
+/// reports; the rest of the receipt checks still apply.
+fn adoptable_id<'a>(
+    agent: &dyn Agent,
+    persisted: Option<&'a str>,
+    receipt: &'a StreamReceipt,
+) -> &'a str {
+    if agent.reserves_session_ids() {
+        persisted.unwrap_or("")
+    } else {
+        &receipt.session_id
+    }
+}
 
 fn validate_private_homecoming_receipt(
     agent: &dyn Agent,
@@ -3801,10 +3851,10 @@ fn open(
     let active = active_for(layout, store, which)?;
     let sessions = Sessions::load(layout)?;
     let session = sessions.get(&active.identity.identity_id, kind);
-    let command = agent::agent(kind, &AgentBins::default(), layout)
+    let command = agent::agent(kind, &AgentBins::default(), layout)?
         .reopen_command(&active.workspace.dir, session);
     out.emit(
-        json!({ "ok": true, "command": command, "claude_session_id": session }),
+        json!({ "ok": true, "command": command, "agent": kind, session_key(kind): session }),
         || println!("{command}"),
     );
     Ok(())
@@ -3919,7 +3969,7 @@ fn status(
     let session = sessions.get(&active.identity.identity_id, kind);
     // Turn archives for every Claude share one machine directory. The selected
     // identity's resumable session is the only safe attribution key.
-    let last = latest_turn(layout, session)?;
+    let last = latest_turn(layout, session, archive_parser(kind))?;
     let visits = VisitRecord::list(layout)?;
     let live_visit = visits
         .iter()
@@ -3948,7 +3998,8 @@ fn status(
             "scaffolded": active.workspace.is_scaffolded(),
             "credentials": credentials_json,
             "host": host.json,
-            "claude_session_id": session,
+            "agent": kind,
+            session_key(kind): session,
             "active_visit": live_visit.map(|visit| visit.visit_id.clone()),
             "last_turn": last.as_ref().map(|(path, summary)| json!({
                 "archive": path, "summary": summary,
@@ -4475,10 +4526,14 @@ mod tests {
         )
         .unwrap();
 
-        let last = latest_turn(&layout, Some(SESSION)).unwrap().unwrap();
+        let last = latest_turn(&layout, Some(SESSION), parse_stream)
+            .unwrap()
+            .unwrap();
         assert_eq!(last.0, selected);
         assert!(last.1.contains("selected identity"), "{}", last.1);
-        assert!(latest_turn(&layout, Some("no-session")).unwrap().is_none());
+        assert!(latest_turn(&layout, Some("no-session"), parse_stream)
+            .unwrap()
+            .is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4616,7 +4671,28 @@ mod tests {
     }
 }
 
-fn latest_turn(layout: &Layout, session_id: Option<&str>) -> Result<Option<(PathBuf, String)>> {
+/// The stream parser for an agent's turn archives, without the adapter (and
+/// its login) behind it: status only reads what is already on disk.
+fn archive_parser(kind: AgentKind) -> fn(&str) -> Result<StreamReceipt> {
+    match kind {
+        AgentKind::Claude => daycare_runner::stream::parse_stream,
+        AgentKind::Codex => daycare_runner::agent::codex::stream::parse,
+    }
+}
+
+/// The JSON key a session id is reported under: Claude's keeps its old name.
+fn session_key(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Claude => "claude_session_id",
+        _ => "agent_session_id",
+    }
+}
+
+fn latest_turn(
+    layout: &Layout,
+    session_id: Option<&str>,
+    parse: fn(&str) -> Result<StreamReceipt>,
+) -> Result<Option<(PathBuf, String)>> {
     let Some(session_id) = session_id else {
         return Ok(None);
     };
@@ -4630,7 +4706,10 @@ fn latest_turn(layout: &Layout, session_id: Option<&str>) -> Result<Option<(Path
         if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
             continue;
         }
-        let Ok(receipt) = parse_stream_file(&path) else {
+        let Ok(receipt) = std::fs::read_to_string(&path)
+            .map_err(Error::from)
+            .and_then(|text| parse(&text))
+        else {
             continue;
         };
         if receipt.session_id != session_id {

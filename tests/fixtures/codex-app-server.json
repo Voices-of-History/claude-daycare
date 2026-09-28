@@ -1,0 +1,123 @@
+{
+ "_note": "codex-cli 0.154.0 app-server answers, captured 2026-09-28 against a ChatGPT Pro login; email, account id, and paths redacted, model entries trimmed.",
+ "initialize": {
+  "id": 0,
+  "result": {
+   "userAgent": "daycare/0.154.0 (Ubuntu 24.4.0; x86_64) tmux-256color (daycare; 0)",
+   "codexHome": "/Users/owner/.claude-daycare/codex/home",
+   "platformFamily": "unix",
+   "platformOs": "linux"
+  }
+ },
+ "account/read": {
+  "id": 1,
+  "result": {
+   "account": {
+    "type": "chatgpt",
+    "email": "owner@example.com",
+    "planType": "pro"
+   },
+   "requiresOpenaiAuth": true
+  }
+ },
+ "account/rateLimits/read": {
+  "id": 2,
+  "result": {
+   "rateLimits": {
+    "limitId": "codex",
+    "limitName": null,
+    "normalModelSlug": null,
+    "primary": {
+     "usedPercent": 14,
+     "windowDurationMins": 10080,
+     "resetsAt": 1791055017
+    },
+    "secondary": null,
+    "credits": {
+     "hasCredits": false,
+     "unlimited": false,
+     "balance": "0"
+    },
+    "individualLimit": null,
+    "spendControlReached": false,
+    "planType": "pro",
+    "rateLimitReachedType": null
+   },
+   "rateLimitsByLimitId": {
+    "codex": {
+     "limitId": "codex",
+     "limitName": null,
+     "normalModelSlug": null,
+     "primary": {
+      "usedPercent": 14,
+      "windowDurationMins": 10080,
+      "resetsAt": 1791055017
+     },
+     "secondary": null,
+     "credits": {
+      "hasCredits": false,
+      "unlimited": false,
+      "balance": "0"
+     },
+     "individualLimit": null,
+     "spendControlReached": false,
+     "planType": "pro",
+     "rateLimitReachedType": null
+    }
+   }
+  }
+ },
+ "model/list": {
+  "id": 3,
+  "result": {
+   "data": [
+    {
+     "id": "gpt-6-astra",
+     "model": "gpt-6-astra",
+     "displayName": "GPT-6-Astra",
+     "hidden": false,
+     "isDefault": true,
+     "defaultReasoningEffort": "medium",
+     "multiAgentVersion": "v2"
+    },
+    {
+     "id": "gpt-5.6-sol",
+     "model": "gpt-5.6-sol",
+     "displayName": "GPT-5.6-Sol",
+     "hidden": false,
+     "isDefault": false,
+     "defaultReasoningEffort": "low",
+     "multiAgentVersion": "v2"
+    },
+    {
+     "id": "gpt-5.6-terra",
+     "model": "gpt-5.6-terra",
+     "displayName": "GPT-5.6-Terra",
+     "hidden": false,
+     "isDefault": false,
+     "defaultReasoningEffort": "medium",
+     "multiAgentVersion": "v2"
+    },
+    {
+     "id": "gpt-5.6-luna",
+     "model": "gpt-5.6-luna",
+     "displayName": "GPT-5.6-Luna",
+     "hidden": false,
+     "isDefault": false,
+     "defaultReasoningEffort": "medium",
+     "multiAgentVersion": "v1"
+    },
+    {
+     "id": "gpt-5.5",
+     "model": "gpt-5.5",
+     "displayName": "GPT-5.5",
+     "hidden": false,
+     "isDefault": false,
+     "defaultReasoningEffort": "medium",
+     "multiAgentVersion": null
+    }
+   ],
+   "nextCursor": null
+  }
+ }
+}
