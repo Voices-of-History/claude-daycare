@@ -219,6 +219,9 @@ mod tests {
             workspace_dir: layout.workspace_dir("actor-1"),
             mcp_url: "https://example.test/api/daycare/mcp/mcp".into(),
             device_name: Some("laptop".into()),
+            default_agent: crate::agent::AgentKind::Claude,
+            installed_agents: vec![],
+            ready_agents: vec![],
         }
     }
 
@@ -509,6 +512,9 @@ mod multi_identity_guard {
             workspace_dir: layout.workspace_dir("actor-1"),
             mcp_url: "https://example.test/api/daycare/mcp/mcp".into(),
             device_name: None,
+            default_agent: crate::agent::AgentKind::Claude,
+            installed_agents: vec![],
+            ready_agents: vec![],
         };
         let store = MemoryTokenStore::default();
         store.store(&token_account("actor-1"), "dck_patch").unwrap();

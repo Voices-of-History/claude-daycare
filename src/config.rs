@@ -22,6 +22,13 @@ pub struct Config {
     pub mcp_url: String,
     #[serde(default)]
     pub device_name: Option<String>,
+    /// Older enrollments retain their Claude default.
+    #[serde(default)]
+    pub default_agent: AgentKind,
+    #[serde(default)]
+    pub installed_agents: Vec<AgentKind>,
+    #[serde(default)]
+    pub ready_agents: Vec<AgentKind>,
 }
 
 impl Config {
@@ -163,6 +170,9 @@ mod tests {
             workspace_dir: layout.workspace_dir("actor-1"),
             mcp_url: "https://example.test/api/daycare/mcp".into(),
             device_name: Some("josh-mbp".into()),
+            default_agent: AgentKind::Claude,
+            installed_agents: vec![],
+            ready_agents: vec![],
         }
     }
 
