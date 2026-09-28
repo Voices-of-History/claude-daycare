@@ -17,6 +17,7 @@ pub mod launch;
 pub mod memory;
 pub mod paths;
 pub mod platform;
+pub mod self_update;
 pub mod session;
 pub mod stream;
 pub mod terminal;
