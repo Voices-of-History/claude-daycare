@@ -13,8 +13,7 @@
 //! `server` + `tool`; the receipt names it `mcp__daycare__<tool>` so the shared
 //! world-reach and homecoming checks hold unchanged. Every item that is not
 //! words, reasoning, a warning, or a daycare call lands in `foreign_reach`:
-//! Codex 0.154 cannot switch its multi-agent tools off, so the seal for Codex
-//! is partly proven after the turn, from this list.
+//! This remains a backstop even with collaboration disabled before launch.
 
 use crate::launch::{MCP_SERVER, MCP_TOOL_PREFIX};
 use crate::stream::{looks_like_invented_tool_call, StreamReceipt, TurnEvent, TurnUsage};

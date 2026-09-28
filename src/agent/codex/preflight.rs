@@ -8,11 +8,10 @@
 //! the proof is an allow-list over those kinds plus exact text for the parts
 //! Daycare wrote.
 //!
-//! Sealed, codex-cli 0.154 renders four parts
+//! Sealed, codex-cli 0.158 renders two parts
 //! (`tests/fixtures/codex-prompt-input-sealed.json`): the persona
-//! (`generic.developer_instructions`), two multi-agent blocks that 0.154 has
-//! no switch for (`multi_agent.usage_hint`, `multi_agent.mode_instructions`),
-//! and the user message (`user.text`). Unsealed, the owner's skills, AGENTS.md,
+//! (`generic.developer_instructions`) and the user message (`user.text`).
+//! Multi-agent blocks are forbidden. Unsealed, the owner's skills, AGENTS.md,
 //! plugin list, permissions, and environment appear
 //! (`tests/fixtures/codex-prompt-input-leaky.json`).
 
@@ -23,15 +22,8 @@ use std::process::Stdio;
 
 pub const PROBE_MESSAGE: &str = "DAYCARE-SEAL-PROBE";
 
-/// The kinds a sealed prompt may hold. The two multi-agent kinds are the
-/// accepted leak: they cannot be removed in 0.154, the persona forbids what
-/// they describe, and the post-turn check fails any turn that acts on them.
-const ALLOWED_KINDS: [&str; 4] = [
-    "generic.developer_instructions",
-    "multi_agent.usage_hint",
-    "multi_agent.mode_instructions",
-    "user.text",
-];
+/// Only Daycare's persona and the user message may reach the model.
+const ALLOWED_KINDS: [&str; 2] = ["generic.developer_instructions", "user.text"];
 
 /// Run the proof. `seal_args` are the turn's own features, settings, model,
 /// and persona (`launch::seal_args`).
@@ -193,7 +185,7 @@ mod tests {
         assert!(error.contains("persona"), "{error}");
 
         let mut items: Value = serde_json::from_str(&with_probe(SEALED)).unwrap();
-        items[3]["internal_chat_message_metadata_passthrough"]["content_item_kinds"] =
+        items[1]["internal_chat_message_metadata_passthrough"]["content_item_kinds"] =
             serde_json::json!(["environments.environment_context"]);
         let error = check_prompt_input(&items.to_string(), "You are Pip, a visitor.")
             .unwrap_err()
@@ -210,5 +202,12 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("expected one of each"), "{error}");
+    }
+
+    #[test]
+    fn legacy_multi_agent_prompt_blocks_are_rejected_before_launch() {
+        let legacy = include_str!("../../../tests/fixtures/codex-prompt-input-multi-agent.json");
+        let error = check_prompt_input(&with_probe(legacy), "You are Pip, a visitor.").unwrap_err();
+        assert!(error.to_string().contains("multi_agent."));
     }
 }

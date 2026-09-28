@@ -1,14 +1,14 @@
 //! OpenAI Codex CLI as a Daycare visitor, on the owner's ChatGPT plan.
 //!
 //! Ported from the Sep 1 prototype (voices-of-history@daycare-codex-0901)
-//! against codex-cli 0.154, with its known holes closed:
+//! now requiring codex-cli 0.158.0 or newer:
 //! - Codex runs in a sealed `CODEX_HOME` and a throwaway `HOME`, both under
 //!   the Daycare root, so the owner's global AGENTS.md, config, skills, and
 //!   thread history stay out of visits (and visit threads stay out of theirs).
 //!   The login is copied in and a refreshed one carried back (`login`).
 //! - Before every turn, `codex debug prompt-input` with the turn's own flags
-//!   proves the prompt holds only Daycare's persona, the two multi-agent
-//!   blocks 0.154 cannot drop, and the message (`preflight`).
+//!   proves the prompt holds only Daycare's persona and the message.
+//!   `agents.enabled=false` removes collaboration tools before launch.
 //! - After every turn, Codex's own rollout record proves the turn ran
 //!   read-only, never asking, in the workspace; and the stream proves nothing
 //!   but daycare tools and words happened (`rollout`, `stream`).
@@ -30,10 +30,10 @@ use crate::paths::{create_private_dir, shell_quote, shell_quote_path, Layout};
 use crate::stream::{StreamReceipt, TurnEvent};
 use crate::turn::TurnPurpose;
 use crate::{Error, Result};
-use appserver::{AppServer, AppServerMeter, CodexCommand};
-use login::{CodexLogin, CopiedLogin};
+use appserver::{AppServerMeter, CodexCommand};
+use login::{with_synced_login, CodexLogin, CopiedLogin};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// Environment that would move Codex off the owner's ChatGPT plan (API
 /// billing, another endpoint) or out of the sealed homes.
@@ -78,12 +78,13 @@ impl SealedHomes {
 pub struct CodexAgent {
     bin: String,
     homes: SealedHomes,
-    login: Box<dyn CodexLogin>,
+    login: Arc<dyn CodexLogin>,
     meter: AppServerMeter,
     /// The plan type, once `account/read` accepted the login.
     account: OnceLock<String>,
     /// The visible catalog, once read.
     models: OnceLock<Vec<String>>,
+    version_checked: OnceLock<()>,
 }
 
 impl CodexAgent {
@@ -97,13 +98,20 @@ impl CodexAgent {
 
     pub fn with_login(bin: &str, homes: SealedHomes, login: Box<dyn CodexLogin>) -> Self {
         let codex = codex_command(bin, &homes, &homes.user_home);
+        let login: Arc<dyn CodexLogin> = Arc::from(login);
+        let meter = AppServerMeter {
+            codex,
+            login: Arc::clone(&login),
+            sealed_home: homes.codex_home.clone(),
+        };
         CodexAgent {
             bin: bin.to_string(),
             homes,
             login,
-            meter: AppServerMeter { codex },
+            meter,
             account: OnceLock::new(),
             models: OnceLock::new(),
+            version_checked: OnceLock::new(),
         }
     }
 
@@ -114,10 +122,9 @@ impl CodexAgent {
     /// Logged in with ChatGPT, in the sealed home. Checked once per process.
     fn ensure_login(&self) -> Result<()> {
         self.homes.ensure()?;
-        self.login.bring_in(&self.homes.codex_home)?;
+        self.ensure_version()?;
         if self.account.get().is_none() {
-            let mut server = AppServer::start(&self.meter.codex)?;
-            let plan = appserver::check_account(&server.request("account/read", None)?)?;
+            let plan = appserver::check_account(&self.meter.request("account/read", None)?)?;
             let _ = self.account.set(plan);
         }
         Ok(())
@@ -128,10 +135,27 @@ impl CodexAgent {
             return Ok(models);
         }
         self.ensure_login()?;
-        let mut server = AppServer::start(&self.meter.codex)?;
-        let models =
-            appserver::model_ids(&server.request("model/list", Some(serde_json::json!({})))?);
+        let models = appserver::model_ids(
+            &self
+                .meter
+                .request("model/list", Some(serde_json::json!({})))?,
+        );
         Ok(self.models.get_or_init(|| models))
+    }
+
+    fn ensure_version(&self) -> Result<()> {
+        if self.version_checked.get().is_some() {
+            return Ok(());
+        }
+        let output = self.meter.codex.command().arg("--version").output()?;
+        if !output.status.success() {
+            return Err(Error::new(
+                "could not read Codex CLI version; Daycare requires 0.158.0 or newer",
+            ));
+        }
+        launch::check_version(&String::from_utf8_lossy(&output.stdout))?;
+        let _ = self.version_checked.set(());
+        Ok(())
     }
 
     fn verify_rollout(&self, receipt: &StreamReceipt, workspace: &Path) -> Result<()> {
@@ -262,6 +286,7 @@ impl Agent for CodexAgent {
     }
 
     fn check_model(&self, model: &str) -> Result<()> {
+        launch::check_verified_model(model)?;
         let catalog = self.catalog()?;
         if catalog.iter().any(|known| known == model) {
             return Ok(());
@@ -277,15 +302,23 @@ impl Agent for CodexAgent {
     }
 
     fn guard(&self, spec: &TurnSpec<'_>) -> Result<()> {
+        self.check_model(spec.model)?;
         guard_no_managed_codex(&self.homes.codex_home)?;
         guard_codex_ancestors(spec.workspace)?;
         self.ensure_login()?;
         let persona = launch::developer_instructions(spec.actor_name);
         let codex = codex_command(&self.bin, &self.homes, spec.workspace);
-        preflight::prove_sealed_prompt(&codex, &launch::seal_args(spec.model, &persona), &persona)
+        with_synced_login(self.login.as_ref(), &self.homes.codex_home, || {
+            preflight::prove_sealed_prompt(
+                &codex,
+                &launch::seal_args(spec.model, &persona),
+                &persona,
+            )
+        })
     }
 
     fn launch_plan(&self, spec: &TurnSpec<'_>) -> Result<LaunchPlan> {
+        self.ensure_version()?;
         let mut plan = launch::build_exec_plan(&self.bin, spec)?;
         plan.env_remove = env_remove();
         plan.env = sealed_env(&self.homes);
@@ -317,9 +350,8 @@ impl Agent for CodexAgent {
         purpose: TurnPurpose,
         workspace: &Path,
     ) -> Result<()> {
-        // 0.154 cannot switch its multi-agent tools off, so this is where the
-        // seal is enforced for them: anything but daycare calls and words
-        // throws the turn away.
+        // Defense in depth after the launch configuration and preflight:
+        // anything but daycare calls and words throws the turn away.
         if !receipt.foreign_reach.is_empty() {
             return Err(Error::new(format!(
                 "codex used more than the daycare tools: {}",

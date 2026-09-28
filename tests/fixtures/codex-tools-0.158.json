@@ -1,0 +1,11 @@
+{
+  "version": "codex-cli 0.158.0",
+  "synthetic_multi_agent_version": "v2",
+  "agents_enabled_true": [
+    "apply_patch",
+    "collaboration"
+  ],
+  "agents_enabled_false": [
+    "apply_patch"
+  ]
+}

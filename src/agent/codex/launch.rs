@@ -16,9 +16,10 @@
 //!   fails the turn before any model call. The device token reaches it through
 //!   `bearer_token_env_var`, never argv.
 //!
-//! What cannot be switched off in 0.154: the multi-agent tools and their two
-//! instruction blocks. The persona forbids them and the post-turn seal check
-//! fails any turn that used anything but daycare tools.
+//! `agents.enabled=false` removes multi-agent tools before launch. Feature
+//! flags alone do not suffice. This seal was verified on CLI 0.158.0;
+//! preflight rejects multi-agent instruction blocks and post-turn checks
+//! remain a backstop.
 
 use crate::agent::TurnSpec;
 use crate::launch::{
@@ -36,6 +37,28 @@ use std::path::Path;
 /// included, reach the model only through the code-mode host, a script
 /// runtime the seal switches off. On those models the daycare tools vanish.
 pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
+
+pub fn check_verified_model(model: &str) -> Result<()> {
+    if model == DEFAULT_CODEX_MODEL {
+        return Ok(());
+    }
+    Err(Error::new(format!(
+        "Codex Daycare supports only the verified model {DEFAULT_CODEX_MODEL}; got {model:?}. Other catalog models may require the disabled code-mode tool host"
+    )))
+}
+
+pub fn check_version(output: &str) -> Result<()> {
+    let version = output.trim().strip_prefix("codex-cli ");
+    let numbers: Option<Vec<u64>> = version
+        .map(|version| version.split('.').map(|n| n.parse().ok()).collect())
+        .flatten();
+    if let Some(numbers) = numbers {
+        if numbers.len() == 3 && (numbers[0], numbers[1], numbers[2]) >= (0, 158, 0) {
+            return Ok(());
+        }
+    }
+    Err(Error::new("Daycare requires Codex CLI 0.158.0 or newer to disable multi-agent tools before launch; upgrade Codex or select it with --codex-bin"))
+}
 
 /// How long one daycare tool call may run, and how long the server gets to
 /// answer `initialize`, in seconds. Image generation waits on a remote model
@@ -85,7 +108,10 @@ pub const DISABLED_FEATURES: [&str; 27] = [
 /// `skills.include_instructions=false` keeps `~/.agents/skills` out even if
 /// the throwaway HOME were bypassed: Codex reads that folder from HOME
 /// whatever `CODEX_HOME` says (Mac check, codex 0.155).
-pub const SEAL_SETTINGS: [&str; 10] = [
+pub const SEAL_SETTINGS: [&str; 13] = [
+    "agents.enabled=false",
+    "tools.experimental_request_user_input.enabled=false",
+    "tools.update_plan.enabled=false",
     "skills.include_instructions=false",
     "orchestrator.skills.enabled=false",
     "include_apps_instructions=false",
@@ -176,6 +202,7 @@ little at a time.
 
 /// The argv and stdin for one Codex turn.
 pub fn build_exec_plan(program: &str, spec: &TurnSpec<'_>) -> Result<LaunchPlan> {
+    check_verified_model(spec.model)?;
     if spec.message.trim().is_empty() {
         return Err(Error::new("turn message must not be empty"));
     }
@@ -364,6 +391,7 @@ mod tests {
         assert!(has_pair(a, "-c", r#"sandbox_mode="read-only""#));
         assert!(has_pair(a, "-c", r#"approval_policy="never""#));
         assert!(has_pair(a, "-c", "skills.include_instructions=false"));
+        assert!(has_pair(a, "-c", "agents.enabled=false"));
         assert!(has_pair(a, "-c", r#"web_search="disabled""#));
         assert!(has_pair(a, "-c", r#"model="gpt-5.5""#));
         assert!(has_pair(
@@ -479,5 +507,29 @@ mod tests {
     fn toml_strings_survive_quotes_and_newlines() {
         assert_eq!(toml_string(r#"a "b""#), r#""a \"b\"""#);
         assert_eq!(toml_string("l1\nl2"), r#""l1\nl2""#);
+    }
+
+    #[test]
+    fn only_verified_models_and_supported_versions_pass() {
+        check_verified_model("gpt-5.5").unwrap();
+        for model in ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.5-latest", ""] {
+            assert!(check_verified_model(model).is_err());
+        }
+        for version in [
+            "codex-cli 0.158.0\n",
+            "codex-cli 0.159.0",
+            "codex-cli 1.0.0",
+        ] {
+            check_version(version).unwrap();
+        }
+        for version in [
+            "codex-cli 0.154.0",
+            "codex-cli 0.157.9",
+            "codex-cli 0.158.0-alpha.1",
+            "codex-cli 0.158",
+            "garbage",
+        ] {
+            assert!(check_version(version).is_err(), "{version}");
+        }
     }
 }

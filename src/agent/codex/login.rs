@@ -9,8 +9,9 @@
 //!
 //! ChatGPT refresh tokens rotate. If Codex refreshes inside the sealed home,
 //! the owner's own copy now holds a spent refresh token, and their next
-//! ordinary `codex` run would be logged out. So after every turn the newer
-//! login is written back, under a lock, atomically, at 0600.
+//! ordinary `codex` run would be logged out. After turns, preflight probes,
+//! and every app-server read (including errors), the newer login is written
+//! back under a lock, atomically, at 0600.
 //!
 //! `CodexLogin` is the interface; `CopiedLogin` is the one implementation.
 //! A keychain-backed login would be a second one if Codex ever supports it.
@@ -28,6 +29,26 @@ pub trait CodexLogin: Send + Sync {
     fn bring_in(&self, sealed_home: &Path) -> Result<()>;
     /// After a Codex child exits, hand a refreshed login back to the owner.
     fn carry_back(&self, sealed_home: &Path) -> Result<()>;
+}
+
+/// Every app-server/probe child can rotate credentials, including a child
+/// which returns an error. Stop the child inside `operation` before copying
+/// its last refresh back under the login implementation's lock.
+pub fn with_synced_login<T>(
+    login: &dyn CodexLogin,
+    sealed_home: &Path,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    login.bring_in(sealed_home)?;
+    let result = operation();
+    let sync = login.carry_back(sealed_home);
+    match (result, sync) {
+        (result, Ok(())) => result,
+        (Ok(_), Err(error)) => Err(error),
+        (Err(operation), Err(sync)) => Err(Error::new(format!(
+            "{operation}; also could not return the refreshed Codex login: {sync}"
+        ))),
+    }
 }
 
 /// The owner's `auth.json`, copied in and reconciled back.

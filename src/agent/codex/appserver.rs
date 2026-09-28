@@ -10,6 +10,7 @@
 //! windowDurationMins, resetsAt}`; `model/list` → `{data: [{id, hidden,
 //! isDefault}]}`.
 
+use super::login::{with_synced_login, CodexLogin};
 use crate::meter::WeeklyMeter;
 use crate::paths::Layout;
 use crate::usage_meter::{local_month_day, WeeklyUsageSnapshot};
@@ -19,6 +20,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The weekly window, in minutes. On a Pro plan it is `primary`; on other
@@ -253,12 +255,25 @@ pub fn weekly_snapshot(result: &Value) -> Result<WeeklyUsageSnapshot> {
 /// The weekly meter: one `account/rateLimits/read`, no model call.
 pub struct AppServerMeter {
     pub codex: CodexCommand,
+    pub login: Arc<dyn CodexLogin>,
+    pub sealed_home: PathBuf,
+}
+
+impl AppServerMeter {
+    /// Account, catalog, and meter reads all share the same auth lifecycle.
+    /// The closure drops the app-server before reconciliation, on errors too.
+    pub fn request(&self, method: &str, params: Option<Value>) -> Result<Value> {
+        crate::paths::create_private_dir(&self.codex.cwd)?;
+        with_synced_login(self.login.as_ref(), &self.sealed_home, || {
+            let mut server = AppServer::start(&self.codex)?;
+            server.request(method, params)
+        })
+    }
 }
 
 impl WeeklyMeter for AppServerMeter {
     fn sample(&self, _model: &str, _layout: &Layout) -> Result<WeeklyUsageSnapshot> {
-        let mut server = AppServer::start(&self.codex)?;
-        let result = server.request("account/rateLimits/read", None)?;
+        let result = self.request("account/rateLimits/read", None)?;
         weekly_snapshot(&result)
     }
 }
