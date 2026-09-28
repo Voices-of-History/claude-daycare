@@ -2,6 +2,7 @@
 
 mod support;
 
+use daycare_runner::agent::claude::ClaudeAgent;
 use daycare_runner::launch::SessionMode;
 use daycare_runner::turn::{run_turn, TurnPurpose, TurnRequest};
 use daycare_runner::workspace::Workspace;
@@ -30,7 +31,8 @@ fn the_child_never_inherits_api_credentials_or_the_parent_session() {
         support::fake_claude(&dir, &support::fixture_stream_from(&workspace.dir), 0, 0);
 
     let outcome = run_turn(TurnRequest {
-        claude_bin: claude_bin.to_str().unwrap(),
+        agent: &ClaudeAgent::new(claude_bin.to_str().unwrap()),
+        actor_name: "Pip",
         workspace: &workspace,
         mode: SessionMode::Resume {
             session_id: "18f44c2e-ff64-4e94-a89d-bdbeaa9ab9f7".into(),
@@ -48,15 +50,15 @@ fn the_child_never_inherits_api_credentials_or_the_parent_session() {
 
     let env = support::recorded_env(&dir);
     assert!(
-        env.get("ANTHROPIC_API_KEY").is_none(),
+        !env.contains_key("ANTHROPIC_API_KEY"),
         "API key reached the turn"
     );
-    assert!(env.get("ANTHROPIC_AUTH_TOKEN").is_none());
+    assert!(!env.contains_key("ANTHROPIC_AUTH_TOKEN"));
     assert!(
-        env.get("CLAUDECODE").is_none(),
+        !env.contains_key("CLAUDECODE"),
         "turn ran as a nested session"
     );
-    assert!(env.get("CLAUDE_CODE_ENTRYPOINT").is_none());
+    assert!(!env.contains_key("CLAUDE_CODE_ENTRYPOINT"));
 
     // Everything else is inherited, including PATH and the device token.
     assert_eq!(
@@ -71,7 +73,8 @@ fn the_child_never_inherits_api_credentials_or_the_parent_session() {
     // The homecoming saves the visit's memories through the same MCP server,
     // so it carries the device token too — and still nothing API-shaped.
     let private = run_turn(TurnRequest {
-        claude_bin: claude_bin.to_str().unwrap(),
+        agent: &ClaudeAgent::new(claude_bin.to_str().unwrap()),
+        actor_name: "Pip",
         workspace: &workspace,
         mode: SessionMode::Resume {
             session_id: "18f44c2e-ff64-4e94-a89d-bdbeaa9ab9f7".into(),
@@ -91,6 +94,6 @@ fn the_child_never_inherits_api_credentials_or_the_parent_session() {
         private_env.get("DAYCARE_DEVICE_TOKEN").map(String::as_str),
         Some("dev_token_abc")
     );
-    assert!(private_env.get("ANTHROPIC_API_KEY").is_none());
+    assert!(!private_env.contains_key("ANTHROPIC_API_KEY"));
     assert!(env.contains_key("PATH"));
 }

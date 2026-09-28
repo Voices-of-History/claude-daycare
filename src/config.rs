@@ -1,3 +1,4 @@
+use crate::agent::AgentKind;
 use crate::launch::validate_session_id;
 use crate::paths::{shell_quote, shell_quote_path, write_atomic, Layout};
 use crate::{Error, Result};
@@ -75,8 +76,13 @@ impl Config {
     }
 }
 
-/// `actor_id -> claude_session_id`. This map is how the same Claude — with its
-/// memory of previous turns — comes back on the next turn via `--resume`.
+/// `(actor_id, agent) -> session_id`. This map is how the same Claude — with
+/// its memory of previous turns — comes back on the next turn via `--resume`.
+///
+/// A Claude session keeps the bare `actor_id` key it always had, so the file
+/// stays readable by older runners; every other agent's key is
+/// `actor_id@agent`. One identity can hold a session per agent, and none is
+/// ever resumed by the wrong one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Sessions(pub BTreeMap<String, String>);
@@ -100,12 +106,15 @@ impl Sessions {
         }
     }
 
-    pub fn get(&self, actor_id: &str) -> Option<&str> {
-        self.0.get(actor_id).map(String::as_str)
+    pub fn get(&self, actor_id: &str, agent: AgentKind) -> Option<&str> {
+        self.0
+            .get(&session_key(actor_id, agent))
+            .map(String::as_str)
     }
 
-    pub fn set(&mut self, actor_id: &str, session_id: &str) {
-        self.0.insert(actor_id.to_string(), session_id.to_string());
+    pub fn set(&mut self, actor_id: &str, agent: AgentKind, session_id: &str) {
+        self.0
+            .insert(session_key(actor_id, agent), session_id.to_string());
     }
 
     pub fn save(&self, layout: &Layout) -> Result<()> {
@@ -124,6 +133,14 @@ impl Sessions {
             })?;
         }
         Ok(())
+    }
+}
+
+fn session_key(actor_id: &str, agent: AgentKind) -> String {
+    if agent.is_claude() {
+        actor_id.to_string()
+    } else {
+        format!("{actor_id}@{agent}")
     }
 }
 
@@ -171,15 +188,22 @@ mod tests {
         assert_eq!(Sessions::load(&layout).unwrap(), Sessions::default());
 
         let mut sessions = Sessions::default();
-        sessions.set("actor-1", "550e8400-e29b-41d4-a716-446655440000");
+        sessions.set(
+            "actor-1",
+            AgentKind::Claude,
+            "550e8400-e29b-41d4-a716-446655440000",
+        );
         sessions.save(&layout).unwrap();
 
         let reloaded = Sessions::load(&layout).unwrap();
         assert_eq!(
-            reloaded.get("actor-1"),
+            reloaded.get("actor-1", AgentKind::Claude),
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
-        assert_eq!(reloaded.get("actor-2"), None);
+        assert_eq!(reloaded.get("actor-2", AgentKind::Claude), None);
+        // A Claude session keeps the bare key older runners read.
+        let raw = fs::read_to_string(layout.sessions_file()).unwrap();
+        assert!(raw.contains("\"actor-1\": \"550e8400"), "{raw}");
         fs::remove_dir_all(layout.root()).ok();
     }
 
@@ -187,7 +211,11 @@ mod tests {
     fn invalid_session_ids_are_never_loaded_or_saved() {
         let layout = scratch("invalid-sessions");
         let mut sessions = Sessions::default();
-        sessions.set("actor-1", "bad; touch /tmp/daycare-owned");
+        sessions.set(
+            "actor-1",
+            AgentKind::Claude,
+            "bad; touch /tmp/daycare-owned",
+        );
         let error = sessions.save(&layout).unwrap_err();
         assert!(error.message().contains("invalid Claude session id"));
 

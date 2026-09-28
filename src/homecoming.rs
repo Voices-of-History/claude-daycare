@@ -9,10 +9,11 @@
 //! prompt that points the reader at it. Who may launch the reader, and what it
 //! may call, stays in `launch.rs` / `turn.rs`.
 
+use crate::agent::Agent;
 use crate::paths::{create_private_dir, sanitize_segment, write_atomic, Layout};
+use crate::stream::TurnEvent;
 use crate::visit::VisitRecord;
 use crate::{Error, Result};
-use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -42,10 +43,11 @@ pub struct Transcript {
 }
 
 /// Render every recorded turn archive of `record` into one markdown
-/// transcript, in visit order. Fails — and names the file — when a visit has
-/// no recorded archives or any archive is missing, unreadable, or not stream
+/// transcript, in visit order, reading each archive through `agent` (the one
+/// that ran the visit). Fails — and names the file — when a visit has no
+/// recorded archives or any archive is missing, unreadable, or not stream
 /// JSON: a homecoming is never written from nothing.
-pub fn render(layout: &Layout, record: &VisitRecord) -> Result<String> {
+pub fn render(layout: &Layout, record: &VisitRecord, agent: &dyn Agent) -> Result<String> {
     if record.turn_archives.is_empty() {
         return Err(Error::new(format!(
             "visit {} has no recorded turn archives; a homecoming cannot be written from nothing",
@@ -88,10 +90,11 @@ pub fn render(layout: &Layout, record: &VisitRecord) -> Result<String> {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "Each turn below is the raw record of one Claude Code run: `[you said]` is \
+        "Each turn below is the raw record of one {} run: `[you said]` is \
          your own text, `[you called <tool>]` is a tool call with its input, and \
          `[result of <tool>]` is what the tool returned. Results are the record; \
-         your words are what you believed at the time."
+         your words are what you believed at the time.",
+        agent.product_name()
     );
 
     for (index, command_id) in record.turn_archives.iter().enumerate() {
@@ -103,6 +106,13 @@ pub fn render(layout: &Layout, record: &VisitRecord) -> Result<String> {
                 record.visit_id
             ))
         })?;
+        let events = agent.transcript_events(&text).map_err(|error| {
+            Error::new(format!(
+                "turn archive {} {}",
+                path.display(),
+                error.message()
+            ))
+        })?;
         let _ = writeln!(out);
         let _ = writeln!(
             out,
@@ -110,120 +120,62 @@ pub fn render(layout: &Layout, record: &VisitRecord) -> Result<String> {
             index + 1
         );
         let _ = writeln!(out);
-        render_turn(&mut out, &path, &text)?;
+        render_turn(&mut out, &events);
     }
     Ok(out)
 }
 
-fn render_turn(out: &mut String, path: &Path, text: &str) -> Result<()> {
-    let mut names_by_id: HashMap<String, String> = HashMap::new();
+fn render_turn(out: &mut String, events: &[TurnEvent]) {
+    let mut names_by_id: HashMap<&str, &str> = HashMap::new();
     let mut rendered_anything = false;
-    for (index, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let event: Value = serde_json::from_str(line).map_err(|error| {
-            Error::new(format!(
-                "turn archive {} line {} is not stream JSON: {error}",
-                path.display(),
-                index + 1
-            ))
-        })?;
-        match event.get("type").and_then(Value::as_str) {
-            Some("assistant") => {
-                for block in content_blocks(&event) {
-                    match block.get("type").and_then(Value::as_str) {
-                        Some("text") => {
-                            if let Some(text) = block.get("text").and_then(Value::as_str) {
-                                if !text.trim().is_empty() {
-                                    rendered_anything = true;
-                                    let _ = writeln!(out, "[you said]");
-                                    let _ = writeln!(out, "{}", text.trim());
-                                    let _ = writeln!(out);
-                                }
-                            }
-                        }
-                        Some("tool_use") => {
-                            let name = block
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or("<unnamed tool>")
-                                .to_string();
-                            if let Some(id) = block.get("id").and_then(Value::as_str) {
-                                names_by_id.insert(id.to_string(), name.clone());
-                            }
-                            rendered_anything = true;
-                            let _ = writeln!(out, "[you called {name}]");
-                            let input = block
-                                .get("input")
-                                .map(|input| input.to_string())
-                                .unwrap_or_else(|| "{}".into());
-                            let _ = writeln!(out, "{}", clip(&input));
-                            let _ = writeln!(out);
-                        }
-                        _ => {}
-                    }
-                }
+    for event in events {
+        match event {
+            TurnEvent::Said(text) => {
+                rendered_anything = true;
+                let _ = writeln!(out, "[you said]");
+                let _ = writeln!(out, "{text}");
+                let _ = writeln!(out);
             }
-            Some("user") => {
-                for block in content_blocks(&event) {
-                    if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-                        continue;
-                    }
-                    let name = block
-                        .get("tool_use_id")
-                        .and_then(Value::as_str)
-                        .and_then(|id| names_by_id.get(id))
-                        .map(String::as_str)
-                        .unwrap_or("<unknown tool>");
-                    let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
-                    rendered_anything = true;
-                    let _ = writeln!(
-                        out,
-                        "[result of {name}{}]",
-                        if is_error { ": error" } else { "" }
-                    );
-                    let _ = writeln!(out, "{}", clip(&result_text(block)));
-                    let _ = writeln!(out);
+            TurnEvent::Called { id, name, input } => {
+                if let Some(id) = id {
+                    names_by_id.insert(id, name);
                 }
+                rendered_anything = true;
+                let _ = writeln!(out, "[you called {name}]");
+                let _ = writeln!(out, "{}", clip(input));
+                let _ = writeln!(out);
             }
-            Some("result") => {
-                let subtype = event.get("subtype").and_then(Value::as_str).unwrap_or("");
-                if subtype != "success"
-                    || event.get("is_error").and_then(Value::as_bool) == Some(true)
-                {
-                    let _ = writeln!(out, "[this turn ended abnormally: {subtype}]");
-                    let _ = writeln!(out);
-                }
+            TurnEvent::Returned {
+                call_id,
+                name,
+                is_error,
+                text,
+            } => {
+                let name = name
+                    .as_deref()
+                    .or_else(|| {
+                        call_id
+                            .as_deref()
+                            .and_then(|id| names_by_id.get(id).copied())
+                    })
+                    .unwrap_or("<unknown tool>");
+                rendered_anything = true;
+                let _ = writeln!(
+                    out,
+                    "[result of {name}{}]",
+                    if *is_error { ": error" } else { "" }
+                );
+                let _ = writeln!(out, "{}", clip(text));
+                let _ = writeln!(out);
             }
-            _ => {}
+            TurnEvent::EndedAbnormally(subtype) => {
+                let _ = writeln!(out, "[this turn ended abnormally: {subtype}]");
+                let _ = writeln!(out);
+            }
         }
     }
     if !rendered_anything {
         let _ = writeln!(out, "(no words or tool calls were recorded for this turn)");
-    }
-    Ok(())
-}
-
-fn content_blocks(event: &Value) -> Vec<&Value> {
-    event
-        .get("message")
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_array)
-        .map(|blocks| blocks.iter().collect())
-        .unwrap_or_default()
-}
-
-fn result_text(block: &Value) -> String {
-    match block.get("content") {
-        Some(Value::String(text)) => text.clone(),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Some(other) => other.to_string(),
-        None => String::new(),
     }
 }
 
@@ -286,9 +238,31 @@ pub fn reader_message(transcript: &Transcript, facts_and_reflection: &str) -> St
     )
 }
 
+/// The reader's prompt for an agent that gets the record inline instead of
+/// reading a file (`TranscriptDelivery::Inline`): the same instructions, with
+/// the whole transcript between two markers.
+pub fn inline_reader_message(transcript_text: &str, facts_and_reflection: &str) -> String {
+    let lines = transcript_text.lines().count();
+    format!(
+        "Your visit is over and you are on your way home. This is a fresh session: you \
+         do not carry the visit in your own memory, and nothing here asks you to trust a \
+         summary of it. The complete record of the visit — every turn in order, what you \
+         said, every tool you called, and what came back — is below, {lines} lines \
+         between the two markers. Read all of it before you decide anything. Do not stop \
+         early, do not skim, and do not save anything until you have read the last line. \
+         Keep three things apart as you go: what you were asked to do, what you said you \
+         did, and what the record shows actually happened — tool results are the record, \
+         and where your words and the record differ, the record wins. Behind anything you \
+         keep, know the evidence: the turn, the call, the result.\n\n\
+         ===== VISIT RECORD BEGINS =====\n{transcript_text}\n===== VISIT RECORD ENDS =====\n\n\
+         {facts_and_reflection}"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::claude::ClaudeAgent;
     use crate::testdir::unique_path;
     use crate::visit::{Budget, VisitRecord};
 
@@ -339,7 +313,7 @@ mod tests {
         .unwrap();
         let record = record(&layout, &["turn-a", "turn-b"]);
 
-        let text = render(&layout, &record).unwrap();
+        let text = render(&layout, &record, &ClaudeAgent::new("claude")).unwrap();
 
         assert!(text.contains("# Daycare visit visit-1 — Pip"), "{text}");
         assert!(text.contains("Your owner's instructions for the visit: play a round of Tycoon"));
@@ -371,7 +345,9 @@ mod tests {
         .unwrap();
         let record = record(&layout, &["turn-a", "turn-gone"]);
 
-        let error = render(&layout, &record).unwrap_err().to_string();
+        let error = render(&layout, &record, &ClaudeAgent::new("claude"))
+            .unwrap_err()
+            .to_string();
 
         assert!(error.contains("turn-gone.jsonl"), "{error}");
         assert!(error.contains("visit-1"), "{error}");
@@ -381,7 +357,9 @@ mod tests {
     fn a_visit_with_no_recorded_archives_cannot_be_read_back() {
         let layout = Layout::at(unique_path("daycare-homecoming-empty"));
         let record = record(&layout, &[]);
-        let error = render(&layout, &record).unwrap_err().to_string();
+        let error = render(&layout, &record, &ClaudeAgent::new("claude"))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("no recorded turn archives"), "{error}");
         assert!(error.contains("written from nothing"), "{error}");
     }
@@ -396,7 +374,9 @@ mod tests {
         )
         .unwrap();
         let record = record(&layout, &["turn-a"]);
-        let error = render(&layout, &record).unwrap_err().to_string();
+        let error = render(&layout, &record, &ClaudeAgent::new("claude"))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("line 2"), "{error}");
     }
 

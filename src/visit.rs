@@ -15,6 +15,7 @@
 //! corresponds to something this process saw happen; anything unrecognised
 //! becomes `Failed`, not a confident story.
 
+use crate::agent::AgentKind;
 use crate::paths::{write_atomic, Layout};
 use crate::platform::MatchOutcome;
 use crate::stream::TurnUsage;
@@ -28,6 +29,10 @@ use std::time::Duration;
 /// The product default from the original drop-off specification: two
 /// percentage points of the user's rolling weekly Claude allowance.
 pub const DEFAULT_WEEKLY_SHARE: f64 = 0.02;
+
+/// A visit's token budget when its agent has no weekly meter to hold a share
+/// against. Counted as the ledger counts: input, output, and cache tokens.
+pub const DEFAULT_TOKEN_CAP: u64 = 300_000;
 
 /// These are crash/sleep/runaway safeguards, not the visit's ordinary budget.
 /// The weekly meter is the product stop; these make an unattended child finite
@@ -69,6 +74,18 @@ impl Budget {
         filled.wall_clock_secs = filled.wall_clock_secs.or(Some(SAFETY_WALL_CLOCK.as_secs()));
         filled.turns = filled.turns.or(Some(SAFETY_TURNS));
         filled.weekly_share = filled.weekly_share.or(Some(DEFAULT_WEEKLY_SHARE));
+        filled
+    }
+
+    /// The defaults for an agent with no weekly meter: no weekly share (there
+    /// is nothing to read it against) and a token cap in its place, unless
+    /// the person named one.
+    pub fn or_default_without_meter(self) -> Budget {
+        let mut filled = self;
+        filled.wall_clock_secs = filled.wall_clock_secs.or(Some(SAFETY_WALL_CLOCK.as_secs()));
+        filled.turns = filled.turns.or(Some(SAFETY_TURNS));
+        filled.tokens = filled.tokens.or(Some(DEFAULT_TOKEN_CAP));
+        filled.weekly_share = None;
         filled
     }
 
@@ -651,6 +668,11 @@ pub struct VisitRecord {
     /// which callers read as the Sonnet default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The agent that lives this visit. Records from before agents were
+    /// pluggable are Claude visits, and a Claude record is written exactly as
+    /// it was then.
+    #[serde(default, skip_serializing_if = "AgentKind::is_claude_ref")]
+    pub agent: AgentKind,
     pub budget: Budget,
     pub ledger: Ledger,
     /// The identity's own words about its visit, written by a final local turn.
@@ -717,6 +739,8 @@ struct VisitRecordWire {
     instructions: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    agent: AgentKind,
     budget: Budget,
     ledger: Ledger,
     private_account: Option<String>,
@@ -751,6 +775,7 @@ impl From<VisitRecordWire> for VisitRecord {
             canonical_end_reason: wire.canonical_end_reason,
             instructions: wire.instructions,
             model: wire.model,
+            agent: wire.agent,
             budget: wire.budget,
             ledger: wire.ledger,
             private_account: wire.private_account,
@@ -830,6 +855,7 @@ impl VisitRecord {
             canonical_end_reason: None,
             instructions,
             model: None,
+            agent: AgentKind::Claude,
             budget: budget.or_default(),
             ledger: Ledger::default(),
             private_account: None,
@@ -858,17 +884,9 @@ impl VisitRecord {
     /// `server_turns_used` is the fallback for the case with no local record at
     /// all — a visit started on a machine that has since been re-paired. It is a
     /// floor, not a total: the server counts turns, not tokens or cost.
-    pub fn adopt(
-        layout: &Layout,
-        visit_id: &str,
-        identity_id: &str,
-        identity_name: &str,
-        budget: Budget,
-        instructions: Option<String>,
-        started_at: impl Into<String>,
-        server_turns_used: Option<u32>,
-    ) -> Self {
-        match VisitRecord::load(layout, visit_id) {
+    /// `fresh` supplies the fallback record when this machine has no copy.
+    pub fn adopt(layout: &Layout, mut fresh: Self, server_turns_used: Option<u32>) -> Self {
+        match VisitRecord::load(layout, &fresh.visit_id) {
             Ok(mut existing) => {
                 // A visit that ended locally but is still open on the server is
                 // being resumed, so it is active again.
@@ -883,14 +901,6 @@ impl VisitRecord {
                 existing
             }
             Err(_) => {
-                let mut fresh = VisitRecord::open(
-                    visit_id,
-                    identity_id,
-                    identity_name,
-                    budget,
-                    instructions,
-                    started_at,
-                );
                 fresh.ledger.turns_used = server_turns_used.unwrap_or(0);
                 // Incomplete only when the server told us about turns this
                 // machine has no record of. A visit that is new to everyone has
@@ -1147,6 +1157,41 @@ mod tests {
         assert_eq!(filled.wall_clock_secs, Some(12 * 60 * 60));
         assert_eq!(filled.turns, Some(200));
         assert_eq!(filled.weekly_share, Some(0.05));
+    }
+
+    #[test]
+    fn a_visit_without_a_meter_gets_a_token_cap_instead_of_a_weekly_share() {
+        let budget = Budget::default().or_default_without_meter();
+        assert_eq!(budget.tokens, Some(DEFAULT_TOKEN_CAP));
+        assert_eq!(budget.weekly_share, None);
+        assert_eq!(budget.wall_clock_secs, Some(12 * 60 * 60));
+        assert_eq!(budget.turns, Some(200));
+
+        // A named token budget stands; a share has nothing to be read against.
+        let named = Budget {
+            tokens: Some(50_000),
+            weekly_share: Some(0.05),
+            ..Budget::default()
+        }
+        .or_default_without_meter();
+        assert_eq!(named.tokens, Some(50_000));
+        assert_eq!(named.weekly_share, None);
+    }
+
+    #[test]
+    fn a_claude_visit_record_is_written_as_before_and_old_records_read_as_claude() {
+        let record = VisitRecord::open(
+            "visit-1",
+            "identity-1",
+            "Pip",
+            Budget::default(),
+            None,
+            "2026-09-01T18:00:00Z",
+        );
+        let value = serde_json::to_value(&record).unwrap();
+        assert!(value.get("agent").is_none(), "{value}");
+        let read: VisitRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(read.agent, AgentKind::Claude);
     }
 
     /// The share is measured against the plan's own meter, so the arithmetic
@@ -1870,12 +1915,14 @@ mod tests {
         // re-opening here would hand this Claude four more turns.
         let adopted = VisitRecord::adopt(
             &layout,
-            "v-1",
-            "id-1",
-            "Patch",
-            budget,
-            Some("Something else entirely".into()),
-            "2026-08-06T12:30:00Z",
+            VisitRecord::open(
+                "v-1",
+                "id-1",
+                "Patch",
+                budget,
+                Some("Something else entirely".into()),
+                "2026-08-06T12:30:00Z",
+            ),
             None,
         );
         assert_eq!(adopted.ledger.turns_used, 2);
@@ -1895,15 +1942,17 @@ mod tests {
         // Re-paired machine: the visit is open on the server, absent here.
         let adopted = VisitRecord::adopt(
             &layout,
-            "v-9",
-            "id-1",
-            "Patch",
-            Budget {
-                turns: Some(4),
-                ..Budget::default()
-            },
-            None,
-            "2026-08-06T12:30:00Z",
+            VisitRecord::open(
+                "v-9",
+                "id-1",
+                "Patch",
+                Budget {
+                    turns: Some(4),
+                    ..Budget::default()
+                },
+                None,
+                "2026-08-06T12:30:00Z",
+            ),
             Some(3),
         );
         assert_eq!(adopted.ledger.turns_used, 3);
@@ -1983,8 +2032,10 @@ mod tests {
 
     #[test]
     fn budget_check_states_turns_left_for_a_turn_bounded_visit() {
-        let mut ledger = Ledger::default();
-        ledger.turns_used = 5;
+        let mut ledger = Ledger {
+            turns_used: 5,
+            ..Ledger::default()
+        };
         ledger.start_weekly_meter(40.0, "Sep 3, 9am".into(), "seven_day".into());
         ledger
             .record_weekly_meter(40.6, "Sep 3, 9am".into(), "seven_day".into())
@@ -1998,8 +2049,10 @@ mod tests {
 
     #[test]
     fn budget_check_omits_the_safety_turn_cap_for_an_allowance_only_visit() {
-        let mut ledger = Ledger::default();
-        ledger.turns_used = 3;
+        let mut ledger = Ledger {
+            turns_used: 3,
+            ..Ledger::default()
+        };
         ledger.start_weekly_meter(10.0, "Sep 3, 9am".into(), "seven_day".into());
         let text = budget_check(&bounded(None, Some(0.05), None), &ledger, Duration::ZERO);
         assert_eq!(
@@ -2021,8 +2074,10 @@ mod tests {
 
     #[test]
     fn budget_check_names_the_last_turn_and_the_one_before_it() {
-        let mut ledger = Ledger::default();
-        ledger.turns_used = 2;
+        let mut ledger = Ledger {
+            turns_used: 2,
+            ..Ledger::default()
+        };
         let last = budget_check(&bounded(Some(3), None, None), &ledger, Duration::ZERO);
         assert!(
             last.starts_with("Budget check: this is the last turn of this visit;"),

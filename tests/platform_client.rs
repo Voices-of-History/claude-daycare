@@ -2,9 +2,102 @@
 
 mod support;
 
-use daycare_runner::platform::{CompletionReport, CompletionStatus, PlatformClient, TurnResult};
+use daycare_runner::agent::AgentKind;
+use daycare_runner::platform::{
+    AgentSession, CompletionReport, CompletionStatus, PlatformClient, TurnResult,
+};
 use daycare_runner::stream::TurnUsage;
+use daycare_runner::visit::Budget;
 use support::{MockPlatform, Response};
+
+#[test]
+fn visit_start_sends_the_token_cap_with_its_basis() {
+    let platform = MockPlatform::start(|_| Response::json(200, r#"{"visit_id":"visit-1"}"#));
+    let client = PlatformClient::new(&platform.base_url);
+    client
+        .start_visit(
+            "test-token",
+            &Budget::default().or_default_without_meter(),
+            None,
+            AgentKind::Codex,
+            "gpt-5.5",
+        )
+        .unwrap();
+    let sent = platform.requests()[0].json();
+    assert_eq!(sent["agent_kind"], "codex");
+    assert_eq!(sent["agent_model"], "gpt-5.5");
+    assert_eq!(sent["budget_tokens"], 300_000);
+    assert_eq!(sent["budget_basis"], "fixed_fallback");
+    assert!(sent.get("budget_usage_pct").is_none());
+}
+
+#[test]
+fn a_weekly_visit_names_its_agent_without_inventing_a_token_cap() {
+    let platform = MockPlatform::start(|_| Response::json(200, r#"{"visit_id":"visit-1"}"#));
+    let client = PlatformClient::new(&platform.base_url);
+    for (agent, model) in [(AgentKind::Claude, "sonnet"), (AgentKind::Codex, "gpt-5.5")] {
+        client
+            .start_visit(
+                "test-token",
+                &Budget::default().or_default(),
+                Some("Say hello."),
+                agent,
+                model,
+            )
+            .unwrap();
+        let requests = platform.requests();
+        let sent = requests.last().unwrap().json();
+        assert_eq!(sent["agent_kind"], agent.as_str());
+        assert_eq!(sent["agent_model"], model);
+        assert_eq!(sent["budget_usage_pct"], 2.0);
+        assert_eq!(sent["instructions"], "Say hello.");
+        assert!(sent.get("budget_tokens").is_none());
+        assert!(sent.get("budget_basis").is_none());
+    }
+    let budget = Budget {
+        tokens: Some(12345),
+        ..Budget::default().or_default()
+    };
+    client
+        .start_visit("test-token", &budget, None, AgentKind::Codex, "gpt-5.5")
+        .unwrap();
+    let sent = platform.requests().last().unwrap().json();
+    assert_eq!(sent["budget_usage_pct"], 2.0);
+    assert_eq!(sent["budget_tokens"], 12345);
+    assert_eq!(sent["budget_basis"], "fixed_fallback");
+}
+
+#[test]
+fn codex_completion_posts_an_agent_session_not_a_claude_session() {
+    let platform = MockPlatform::start(|_| Response::json(200, r#"{"ok":true}"#));
+    let report = CompletionReport {
+        status: CompletionStatus::Completed,
+        session: Some(AgentSession::new(
+            AgentKind::Codex,
+            "01900000-0000-7000-8000-000000000001",
+        )),
+        result: TurnResult {
+            result_text: Some("Hello.".into()),
+            duration_ms: None,
+            usage: None,
+            error: None,
+            held: false,
+        },
+    };
+    PlatformClient::new(&platform.base_url)
+        .complete_command("test-token", "cmd-codex", &report)
+        .unwrap();
+    let sent = &platform.requests()[0];
+    assert_eq!(sent.path, "/api/daycare/commands/cmd-codex/complete");
+    assert_eq!(sent.authorization(), Some("Bearer test-token"));
+    let body = sent.json();
+    assert_eq!(body["agent_kind"], "codex");
+    assert_eq!(
+        body["agent_session_id"],
+        "01900000-0000-7000-8000-000000000001"
+    );
+    assert!(body.get("claude_session_id").is_none());
+}
 
 #[test]
 fn claim_sends_the_code_and_returns_the_pairing() {
@@ -84,7 +177,10 @@ fn completion_posts_the_receipt_to_the_command_path() {
 
     let report = CompletionReport {
         status: CompletionStatus::Completed,
-        claude_session_id: Some("895535d7-0382-4e98-87e2-f2a3073e69a7".into()),
+        session: Some(AgentSession::new(
+            AgentKind::Claude,
+            "895535d7-0382-4e98-87e2-f2a3073e69a7",
+        )),
         result: TurnResult {
             result_text: Some("Greeted Mira by the fountain.".into()),
             duration_ms: Some(2493),

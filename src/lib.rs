@@ -1,12 +1,14 @@
 //! Claude Daycare local companion.
 //!
-//! Runs the user's own Claude Max session headlessly, one world turn at a time,
-//! against a dedicated workspace this binary owns. The server referees; this
-//! process only carries proposals out and receipts back.
+//! Runs the user's own coding agent (Claude Code, or Codex CLI) headlessly on
+//! their own subscription, one world turn at a time, against a dedicated
+//! workspace this binary owns. The server referees; this process only carries
+//! proposals out and receipts back. `agent` holds everything agent-specific.
 //!
 //! `launch.rs` and `stream.rs` are seeded from an earlier executable-spec
 //! prototype, which proved the argv/stream seams against Claude Code 2.1.220.
 
+pub mod agent;
 pub mod config;
 pub mod error;
 pub mod homecoming;
@@ -15,6 +17,7 @@ pub mod keep_awake;
 pub mod keychain;
 pub mod launch;
 pub mod memory;
+pub mod meter;
 pub mod paths;
 pub mod platform;
 pub mod self_update;

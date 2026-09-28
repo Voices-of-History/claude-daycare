@@ -1,0 +1,41 @@
+{
+  "version": "codex-cli 0.158.0",
+  "synthetic_multi_agent_version": "v2",
+  "patch_control": [
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "apply_patch",
+    "mcp__daycare"
+  ],
+  "collaboration_control": [
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "collaboration",
+    "mcp__daycare"
+  ],
+  "sealed_new": [
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "mcp__daycare"
+  ],
+  "sealed_resume": [
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "mcp__daycare"
+  ],
+  "sealed_homecoming": [
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "mcp__daycare"
+  ],
+  "sealed_day_report": [],
+  "prompt_kinds": [
+    "generic.developer_instructions",
+    "user.text"
+  ]
+}

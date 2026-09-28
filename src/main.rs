@@ -10,6 +10,7 @@
 //! has to guess what went wrong.
 
 use clap::{Args, Parser, Subcommand};
+use daycare_runner::agent::{self, Agent, AgentBins, AgentKind, TranscriptDelivery};
 use daycare_runner::config::{Config, Sessions};
 use daycare_runner::homecoming;
 use daycare_runner::identity::{
@@ -18,25 +19,23 @@ use daycare_runner::identity::{
 use daycare_runner::keep_awake::{KeepAwake, HOLD_MESSAGE};
 use daycare_runner::keychain::{default_store, CredentialBackend, FileTokenStore, TokenStore};
 use daycare_runner::launch::{
-    is_homecoming_tool, match_turn_prompt, new_session_id, standalone_turn_prompt,
-    visit_continuation_prompt, visit_turn_prompt, SessionMode, ALLOWED_TURN_MODELS,
-    DEFAULT_TURN_MODEL, MCP_SETTLE,
+    match_turn_prompt, new_session_id, standalone_turn_prompt, visit_continuation_prompt,
+    visit_turn_prompt, SessionMode,
 };
 use daycare_runner::memory::{self as local_memory, LocalMemoryMirror};
-use daycare_runner::paths::{sanitize_segment, shell_quote, shell_quote_path, Layout};
+use daycare_runner::paths::{sanitize_segment, shell_quote, Layout};
 use daycare_runner::platform::{
-    CompletionReport, CompletionStatus, MatchOutcome, MatchOutcomeResult, MatchOutcomeWinner,
-    PairingActorKind, PlatformClient, TurnResult, VisitOutcomeDelivery, WorldCommand,
+    AgentSession, CompletionReport, CompletionStatus, MatchOutcome, MatchOutcomeResult,
+    MatchOutcomeWinner, PairingActorKind, PlatformClient, TurnResult, VisitOutcomeDelivery,
+    WorldCommand,
 };
 use daycare_runner::session::{activate, device_token, migrate_legacy, resolve, Active};
-use daycare_runner::stream::{
-    parse_stream_file, verify_sandbox, verify_world_was_reachable, SandboxAllowance, StreamReceipt,
-};
+use daycare_runner::stream::StreamReceipt;
 use daycare_runner::turn::{
     run_turn, TurnOutcome, TurnPurpose, TurnRequest, DEFAULT_TIMEOUT_SECS,
     PRE_INPUT_BROKEN_PIPE_ERROR,
 };
-use daycare_runner::usage_meter::{sample_weekly_usage, MeterMiss, MeterOutage};
+use daycare_runner::usage_meter::{MeterMiss, MeterOutage, WeeklyUsageSnapshot};
 use daycare_runner::visit::{
     budget_check, clear_recall, parse_duration, process_alive, rate_limit_blocks, recall_requested,
     request_recall, weekly_share_from_percent, Budget, HomecomingState, LocalEndReason, MemorySync,
@@ -147,9 +146,8 @@ enum Commands {
         /// Kill the turn after this many seconds.
         #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
         timeout: u64,
-        /// Claude Code binary to run.
-        #[arg(long, default_value = "claude")]
-        claude_bin: String,
+        #[command(flatten)]
+        agents: AgentOpts,
     },
     /// Poll for world turns until interrupted.
     Run {
@@ -160,18 +158,24 @@ enum Commands {
         interval: u64,
         #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
         timeout: u64,
-        #[arg(long, default_value = "claude")]
-        claude_bin: String,
+        #[command(flatten)]
+        agents: AgentOpts,
     },
     /// Print the command that opens the same Claude interactively.
     Open {
         #[command(flatten)]
         which: Which,
+        /// Whose session to open: claude (default) or codex.
+        #[arg(long, default_value = "claude", value_parser = AgentKind::parse)]
+        agent: AgentKind,
     },
     /// Show enrollment, credential presence, session, and last turn.
     Status {
         #[command(flatten)]
         which: Which,
+        /// Whose session to report: claude (default) or codex.
+        #[arg(long, default_value = "claude", value_parser = AgentKind::parse)]
+        agent: AgentKind,
     },
     /// Install the Daycare skill so Claude Code can drive these commands.
     Skill {
@@ -196,10 +200,10 @@ enum Commands {
     /// Claude opens with no tools, `/usage` is typed, and Claude exits.
     Usage {
         /// The visit model whose weekly meter to read: sonnet (default) or opus.
-        #[arg(long, default_value = DEFAULT_TURN_MODEL)]
-        model: String,
-        #[arg(long, default_value = "claude")]
-        claude_bin: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[command(flatten)]
+        agents: AgentOpts,
     },
 }
 
@@ -276,8 +280,8 @@ enum VisitAction {
         #[arg(long)]
         instructions: Option<String>,
         /// The model every turn of this visit runs on: sonnet (default) or opus.
-        #[arg(long, default_value = DEFAULT_TURN_MODEL)]
-        model: String,
+        #[arg(long)]
+        model: Option<String>,
         /// Run the visit in this process instead of detaching. For debugging.
         #[arg(long)]
         foreground: bool,
@@ -285,8 +289,8 @@ enum VisitAction {
         interval: u64,
         #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
         timeout: u64,
-        #[arg(long, default_value = "claude")]
-        claude_bin: String,
+        #[command(flatten)]
+        agents: AgentOpts,
     },
     /// Run an already-created visit in this process. Used by `visit start`.
     #[command(hide = true)]
@@ -297,8 +301,8 @@ enum VisitAction {
         interval: u64,
         #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
         timeout: u64,
-        #[arg(long, default_value = "claude")]
-        claude_bin: String,
+        #[command(flatten)]
+        agents: AgentOpts,
     },
     /// Show a visit: what it was given, what it spent, why it stopped.
     Status {
@@ -498,7 +502,7 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
         Commands::RunOnce {
             which,
             timeout,
-            claude_bin,
+            agents,
         } => {
             let store = default_store(layout.fallback_token_file());
             let active = active_for(&layout, store.as_ref(), &which)?;
@@ -506,7 +510,7 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
             let receipt = run_once(
                 &layout,
                 &active,
-                &claude_bin,
+                &agents,
                 Duration::from_secs(timeout),
                 None,
                 out,
@@ -535,7 +539,7 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
             which,
             interval,
             timeout,
-            claude_bin,
+            agents,
         } => {
             let store = default_store(layout.fallback_token_file());
             let active = active_for(&layout, store.as_ref(), &which)?;
@@ -543,26 +547,28 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
             run_loop(
                 &layout,
                 &active,
-                &claude_bin,
+                &agents,
                 Duration::from_secs(timeout),
                 Duration::from_secs(interval),
                 out,
             )
         }
-        Commands::Open { which } => {
+        Commands::Open { which, agent } => {
             let store = default_store(layout.fallback_token_file());
-            open(&layout, store.as_ref(), &which, out)
+            open(&layout, store.as_ref(), &which, agent, out)
         }
-        Commands::Status { which } => {
+        Commands::Status { which, agent } => {
             let store = default_store(layout.fallback_token_file());
-            status(&layout, store.as_ref(), &which, out)
+            status(&layout, store.as_ref(), &which, agent, out)
         }
         Commands::Skill { action } => skill_command(action, out),
         Commands::Update { url } => update_command(&layout, url, out),
         Commands::Memory { action } => memory_command(&layout, action, out),
-        Commands::Usage { model, claude_bin } => {
-            require_turn_model(&model)?;
-            let sample = sample_weekly_usage(&claude_bin, &model, &layout)?;
+        Commands::Usage { model, agents } => {
+            let agent = agents.build(agents.agent, &layout)?;
+            let model = model.unwrap_or_else(|| agent.default_model().to_string());
+            agent.check_model(&model)?;
+            let sample = sample_weekly(agent.as_ref(), &model, &layout)?;
             out.emit(
                 json!({
                     "ok": true,
@@ -583,14 +589,62 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
     }
 }
 
-fn require_turn_model(model: &str) -> Result<()> {
-    if ALLOWED_TURN_MODELS.contains(&model) {
-        return Ok(());
+/// Which agent a command runs, and where each agent's binary is. A visit
+/// resumed from its record runs the record's agent; `--agent` only chooses for
+/// new visits and standalone turns.
+#[derive(Args, Debug, Clone)]
+struct AgentOpts {
+    /// The coding agent that runs the turns: claude (default) or codex.
+    #[arg(long, default_value = "claude", value_parser = AgentKind::parse)]
+    agent: AgentKind,
+    /// Claude Code binary to run.
+    #[arg(long, default_value = "claude")]
+    claude_bin: String,
+    /// Codex CLI binary to run.
+    #[arg(long, default_value = "codex")]
+    codex_bin: String,
+}
+
+impl AgentOpts {
+    fn bins(&self) -> AgentBins {
+        AgentBins {
+            claude: self.claude_bin.clone(),
+            codex: self.codex_bin.clone(),
+        }
     }
-    Err(Error::new(format!(
-        "--model must be one of {}; got {model:?}",
-        ALLOWED_TURN_MODELS.join(", ")
-    )))
+
+    fn build(&self, kind: AgentKind, layout: &Layout) -> Result<Box<dyn Agent>> {
+        agent::agent(kind, &self.bins(), layout)
+    }
+
+    /// The flags that name the binaries, for a detached child.
+    fn bin_args(&self) -> Vec<String> {
+        vec![
+            "--claude-bin".into(),
+            self.claude_bin.clone(),
+            "--codex-bin".into(),
+            self.codex_bin.clone(),
+        ]
+    }
+}
+
+/// A visit's budget with the defaults its agent's meter allows filled in.
+fn default_budget(budget: Budget, agent: &dyn Agent) -> Budget {
+    if agent.meter().is_some() {
+        budget.or_default()
+    } else {
+        budget.or_default_without_meter()
+    }
+}
+
+fn sample_weekly(agent: &dyn Agent, model: &str, layout: &Layout) -> Result<WeeklyUsageSnapshot> {
+    match agent.meter() {
+        Some(meter) => meter.sample(model, layout),
+        None => Err(Error::new(format!(
+            "{} has no weekly usage meter; its visits are bounded by tokens instead",
+            agent.product_name()
+        ))),
+    }
 }
 
 /// Output discipline in one place. Human text stays the default so the CLI is
@@ -1188,7 +1242,7 @@ fn identity_command(
                 &project_root(&cwd()),
             )?;
             let sessions = Sessions::load(layout)?;
-            let session = sessions.get(&active.identity.identity_id);
+            let session = sessions.get(&active.identity.identity_id, AgentKind::Claude);
             out.emit(
                 json!({
                     "ok": true,
@@ -1247,7 +1301,7 @@ fn describe_identity(identity: &Identity, store: &dyn TokenStore) -> Value {
 fn run_once(
     layout: &Layout,
     active: &Active,
-    claude_bin: &str,
+    agents: &AgentOpts,
     timeout: Duration,
     visit: Option<&VisitRecord>,
     out: Out,
@@ -1278,7 +1332,7 @@ fn run_once(
                     &command.id,
                     &CompletionReport {
                         status: CompletionStatus::Failed,
-                        claude_session_id: None,
+                        session: None,
                         result: TurnResult {
                             result_text: None,
                             duration_ms: Some(0),
@@ -1299,7 +1353,7 @@ fn run_once(
                 &command.id,
                 &CompletionReport {
                     status: CompletionStatus::Completed,
-                    claude_session_id: None,
+                    session: None,
                     result: TurnResult {
                         result_text: Some("visit end acknowledged".into()),
                         duration_ms: Some(0),
@@ -1321,7 +1375,7 @@ fn run_once(
                 &command.id,
                 &CompletionReport {
                     status: CompletionStatus::Failed,
-                    claude_session_id: None,
+                    session: None,
                     result: TurnResult {
                         result_text: None,
                         duration_ms: Some(0),
@@ -1342,7 +1396,9 @@ fn run_once(
         command.id, active.identity.name
     ));
 
-    let outcome = execute(layout, active, claude_bin, timeout, &command, visit);
+    let kind = visit.map_or(agents.agent, |visit| visit.agent);
+    let agent = agents.build(kind, layout)?;
+    let outcome = execute(layout, active, agent.as_ref(), timeout, &command, visit);
 
     // Persist the session id before reporting: if the report fails, the next
     // turn must still resume the same Claude rather than start a stranger.
@@ -1352,8 +1408,8 @@ fn run_once(
     };
     if let Some(session_id) = &session_id {
         let mut sessions = Sessions::load(layout)?;
-        if sessions.get(&active.identity.identity_id) != Some(session_id.as_str()) {
-            sessions.set(&active.identity.identity_id, session_id);
+        if sessions.get(&active.identity.identity_id, kind) != Some(session_id.as_str()) {
+            sessions.set(&active.identity.identity_id, kind, session_id);
             sessions.save(layout)?;
         }
     }
@@ -1367,7 +1423,7 @@ fn run_once(
                 } else {
                     CompletionStatus::Failed
                 },
-                claude_session_id: session_id.clone(),
+                session: session_id.clone().map(|id| AgentSession::new(kind, id)),
                 result: TurnResult {
                     result_text: receipt.and_then(|receipt| receipt.result_text.clone()),
                     duration_ms: Some(outcome.elapsed_ms),
@@ -1381,7 +1437,7 @@ fn run_once(
         }
         Err(error) => CompletionReport {
             status: CompletionStatus::Failed,
-            claude_session_id: None,
+            session: None,
             result: TurnResult {
                 result_text: None,
                 duration_ms: None,
@@ -1513,13 +1569,13 @@ impl TurnReceipt {
 fn execute(
     layout: &Layout,
     active: &Active,
-    claude_bin: &str,
+    agent: &dyn Agent,
     timeout: Duration,
     command: &WorldCommand,
     visit: Option<&VisitRecord>,
 ) -> Result<TurnOutcome> {
     let sessions = Sessions::load(layout)?;
-    let mode = match sessions.get(&active.identity.identity_id) {
+    let mode = match sessions.get(&active.identity.identity_id, agent.kind()) {
         Some(session_id) => SessionMode::Resume {
             session_id: session_id.to_string(),
         },
@@ -1603,9 +1659,10 @@ that authoritative value.",
     let was_resume = matches!(mode, SessionMode::Resume { .. });
     let model = visit
         .map(VisitRecord::turn_model)
-        .unwrap_or(DEFAULT_TURN_MODEL);
+        .unwrap_or(agent.default_model());
     let first = run_turn(TurnRequest {
-        claude_bin,
+        agent,
+        actor_name: &active.identity.name,
         workspace: &active.workspace,
         mode,
         message: &message,
@@ -1614,7 +1671,7 @@ that authoritative value.",
         timeout,
         purpose: TurnPurpose::World,
         model,
-        mcp_settle: MCP_SETTLE,
+        mcp_settle: agent.mcp_settle(),
     });
 
     let should_start_fresh = was_resume
@@ -1634,7 +1691,8 @@ that authoritative value.",
     }
 
     run_turn(TurnRequest {
-        claude_bin,
+        agent,
+        actor_name: &active.identity.name,
         workspace: &active.workspace,
         mode: SessionMode::New {
             reserved_session_id: new_session_id()?,
@@ -1645,14 +1703,14 @@ that authoritative value.",
         timeout,
         purpose: TurnPurpose::World,
         model,
-        mcp_settle: MCP_SETTLE,
+        mcp_settle: agent.mcp_settle(),
     })
 }
 
 fn run_loop(
     layout: &Layout,
     active: &Active,
-    claude_bin: &str,
+    agents: &AgentOpts,
     timeout: Duration,
     interval: Duration,
     out: Out,
@@ -1667,7 +1725,7 @@ fn run_loop(
 
     let mut consecutive_errors = 0u32;
     while !INTERRUPTED.load(Ordering::Relaxed) {
-        match run_once(layout, active, claude_bin, timeout, None, out) {
+        match run_once(layout, active, agents, timeout, None, out) {
             Ok(_) => consecutive_errors = 0,
             Err(error) => {
                 consecutive_errors += 1;
@@ -1774,9 +1832,17 @@ fn visit_command(
             foreground,
             interval,
             timeout,
-            claude_bin,
+            agents,
         } => {
-            require_turn_model(&model)?;
+            let agent = agents.build(agents.agent, layout)?;
+            let model = model.unwrap_or_else(|| agent.default_model().to_string());
+            agent.check_model(&model)?;
+            if weekly_percent.is_some() && agent.meter().is_none() {
+                return Err(Error::new(format!(
+                    "{} has no weekly usage meter, so --weekly-percent cannot be enforced; use --tokens instead",
+                    agent.product_name()
+                )));
+            }
             let active = active_for(layout, store, &which)?;
             // A normal `visit start` must finish any older durable homecoming
             // for this identity before opening a new server visit. Otherwise a
@@ -1786,7 +1852,7 @@ fn visit_command(
                 layout,
                 store,
                 &active.identity.identity_id,
-                &claude_bin,
+                &agents,
                 Duration::from_secs(timeout),
                 Duration::from_secs(interval),
                 out.inner(),
@@ -1801,8 +1867,8 @@ fn visit_command(
                 cost_usd: cost,
                 turns,
                 weekly_share: weekly_share_from_percent(weekly_percent)?,
-            }
-            .or_default();
+            };
+            let budget = default_budget(budget, agent.as_ref());
 
             // Sampling, opening the server visit, and saving its local baseline
             // are one identity-scoped transaction. Without this lock, two
@@ -1814,11 +1880,19 @@ fn visit_command(
             // machine already owns, the sample is discarded; if it creates a
             // new visit, this is the only reading known to precede the first
             // claimable command.
-            let initial_weekly = sample_weekly_usage(&claude_bin, &model, layout)?;
+            let initial_weekly = match agent.meter() {
+                Some(meter) => Some(meter.sample(&model, layout)?),
+                None => None,
+            };
 
             let client = PlatformClient::new(&active.platform_url);
-            let started = match client.start_visit(active.token(), &budget, instructions.as_deref())
-            {
+            let started = match client.start_visit(
+                active.token(),
+                &budget,
+                instructions.as_deref(),
+                agent.kind(),
+                &model,
+            ) {
                 Ok(started) => started,
                 // The platform refuses a new generation while the last visit's
                 // recall sits unanswered. If this machine's record says that
@@ -1826,7 +1900,13 @@ fn visit_command(
                 // is tried once more; otherwise the platform's sentence stands.
                 Err(error) if error.http_status() == Some(409) => {
                     if settle_prior_visit_delivery(layout, &client, &active)? {
-                        client.start_visit(active.token(), &budget, instructions.as_deref())?
+                        client.start_visit(
+                            active.token(),
+                            &budget,
+                            instructions.as_deref(),
+                            agent.kind(),
+                            &model,
+                        )?
                     } else {
                         return Err(error);
                     }
@@ -1837,10 +1917,12 @@ fn visit_command(
             let trusted_local_record = local_record.as_ref().is_some_and(|record| {
                 record.is_active()
                     && record.identity_id == active.identity.identity_id
+                    && record.agent == agent.kind()
                     && record.model.is_some()
-                    && record.ledger.weekly_meter_first_pct.is_some()
-                    && record.ledger.weekly_meter_resets_at.is_some()
-                    && record.ledger.weekly_meter_key.is_some()
+                    && (agent.meter().is_none()
+                        || (record.ledger.weekly_meter_first_pct.is_some()
+                            && record.ledger.weekly_meter_resets_at.is_some()
+                            && record.ledger.weekly_meter_key.is_some()))
             });
 
             if local_record.is_some() && !trusted_local_record {
@@ -1869,12 +1951,14 @@ fn visit_command(
             // should decide whether to read the local file.
             let mut record = VisitRecord::adopt(
                 layout,
-                &started.visit_id,
-                &active.identity.identity_id,
-                &active.identity.name,
-                budget,
-                instructions,
-                now_rfc3339(),
+                VisitRecord::open(
+                    &started.visit_id,
+                    &active.identity.identity_id,
+                    &active.identity.name,
+                    budget,
+                    instructions,
+                    now_rfc3339(),
+                ),
                 started.turns_used,
             );
             // The model is fixed at drop-off. Re-adopting a visit already in
@@ -1882,8 +1966,9 @@ fn visit_command(
             // running visit onto a different bill mid-flight.
             if !trusted_local_record {
                 record.model = Some(model);
+                record.agent = agent.kind();
             }
-            if !trusted_local_record {
+            if let (false, Some(initial_weekly)) = (trusted_local_record, initial_weekly) {
                 if record.ledger.weekly_meter_first_pct.is_none() {
                     record.ledger.start_weekly_meter(
                         initial_weekly.used_percentage,
@@ -1952,7 +2037,7 @@ fn visit_command(
                     layout,
                     store,
                     &record.visit_id,
-                    &claude_bin,
+                    &agents,
                     Duration::from_secs(timeout),
                     Duration::from_secs(interval),
                     out,
@@ -1999,9 +2084,8 @@ fn visit_command(
                     &interval.to_string(),
                     "--timeout",
                     &timeout.to_string(),
-                    "--claude-bin",
-                    &claude_bin,
                 ])
+                .args(agents.bin_args())
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::from(log))
                 .stderr(std::process::Stdio::from(log_err));
@@ -2100,12 +2184,12 @@ fn visit_command(
             visit,
             interval,
             timeout,
-            claude_bin,
+            agents,
         } => run_visit(
             layout,
             store,
             &visit,
-            &claude_bin,
+            &agents,
             Duration::from_secs(timeout),
             Duration::from_secs(interval),
             out,
@@ -2282,6 +2366,7 @@ impl VisitStartLock {
             .join(format!(".{}.start.lock", sanitize_segment(identity_id)));
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)?;
@@ -2303,6 +2388,7 @@ impl HomecomingLock {
             .with_extension("homecoming.lock");
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)?;
@@ -2340,7 +2426,7 @@ fn resume_incomplete_homecomings(
     layout: &Layout,
     store: &dyn TokenStore,
     identity_id: &str,
-    claude_bin: &str,
+    agents: &AgentOpts,
     timeout: Duration,
     interval: Duration,
     out: Out,
@@ -2365,7 +2451,7 @@ fn resume_incomplete_homecomings(
             layout,
             store,
             &record.visit_id,
-            claude_bin,
+            agents,
             timeout,
             interval,
             out,
@@ -2386,18 +2472,21 @@ fn run_visit(
     layout: &Layout,
     store: &dyn TokenStore,
     visit_id: &str,
-    claude_bin: &str,
+    agents: &AgentOpts,
     timeout: Duration,
     interval: Duration,
     out: Out,
 ) -> Result<()> {
     install_interrupt_handler();
     let mut record = VisitRecord::load(layout, visit_id)?;
+    // The visit's own agent, whatever `--agent` says: a session one agent
+    // started cannot be resumed by another.
+    let agent = agents.build(record.agent, layout)?;
     // A visit created by an older runner can be resumed by this binary. Fill
     // the new weekly default and safety fields before any further turn so an
     // upgrade cannot leave that adopted visit unbounded.
     if record.homecoming_state != HomecomingState::AwaitingOutcome {
-        record.budget = record.budget.clone().or_default();
+        record.budget = default_budget(record.budget.clone(), agent.as_ref());
     }
     let recovery_lock = if record.homecoming_state == HomecomingState::AwaitingOutcome {
         Some(HomecomingLock::acquire(layout, &record.visit_id)?)
@@ -2427,12 +2516,14 @@ fn run_visit(
         return finish_homecoming(
             layout,
             &active,
-            claude_bin,
+            agent.as_ref(),
             timeout,
             interval,
-            record,
-            must_report_end,
-            recovery_lock,
+            HomecomingDelivery {
+                record,
+                must_report_end,
+                lock: recovery_lock,
+            },
             out,
         );
     }
@@ -2440,7 +2531,7 @@ fn run_visit(
     // start line before launching another model turn; never infer zero usage.
     let mut last_meter_answer: Option<Instant> = None;
     if record.budget.weekly_share.is_some() && record.ledger.weekly_meter_first_pct.is_none() {
-        let sample = sample_weekly_usage(claude_bin, record.turn_model(), layout)?;
+        let sample = sample_weekly(agent.as_ref(), record.turn_model(), layout)?;
         record.ledger.start_weekly_meter(
             sample.used_percentage,
             sample.resets_at,
@@ -2490,7 +2581,7 @@ fn run_visit(
         match run_once(
             layout,
             &active,
-            claude_bin,
+            agents,
             timeout,
             Some(&record),
             if out.json { out.inner() } else { out },
@@ -2536,7 +2627,7 @@ fn run_visit(
             record.save(layout)?;
         }
         if completed_turn && record.budget.weekly_share.is_some() {
-            match sample_weekly_usage(claude_bin, record.turn_model(), layout) {
+            match sample_weekly(agent.as_ref(), record.turn_model(), layout) {
                 Ok(sample) => {
                     // A reset window or a changed meter is a real verdict, not
                     // a flake: the percentage control would become fiction.
@@ -2597,7 +2688,17 @@ fn run_visit(
     record.command_match_outcome = match_outcome;
     record.save(layout)?;
     finish_homecoming(
-        layout, &active, claude_bin, timeout, interval, record, true, None, out,
+        layout,
+        &active,
+        agent.as_ref(),
+        timeout,
+        interval,
+        HomecomingDelivery {
+            record,
+            must_report_end: true,
+            lock: None,
+        },
+        out,
     )
 }
 
@@ -2635,17 +2736,26 @@ fn sync_visit_memories(layout: &Layout, client: &PlatformClient, active: &Active
     }
 }
 
+struct HomecomingDelivery {
+    record: VisitRecord,
+    must_report_end: bool,
+    lock: Option<HomecomingLock>,
+}
+
 fn finish_homecoming(
     layout: &Layout,
     active: &Active,
-    claude_bin: &str,
+    agent: &dyn Agent,
     timeout: Duration,
     interval: Duration,
-    mut record: VisitRecord,
-    mut must_report_end: bool,
-    lock: Option<HomecomingLock>,
+    delivery: HomecomingDelivery,
     out: Out,
 ) -> Result<()> {
+    let HomecomingDelivery {
+        mut record,
+        mut must_report_end,
+        lock,
+    } = delivery;
     let _lock = match lock {
         Some(lock) => lock,
         None => HomecomingLock::acquire(layout, &record.visit_id)?,
@@ -2705,14 +2815,14 @@ fn finish_homecoming(
     let account = write_private_account(
         layout,
         active,
-        claude_bin,
+        agent,
         timeout,
         &mut record,
         outcome.as_ref(),
         &_lock,
     )?;
     if account.is_some() && record.budget.weekly_share.is_some() {
-        record_weekly_homecoming_sample(layout, claude_bin, &mut record);
+        record_weekly_homecoming_sample(layout, agent, &mut record);
     }
 
     // The owner-facing day report: a second message in the resumed reader
@@ -2723,10 +2833,10 @@ fn finish_homecoming(
     let mut day_report = None;
     let mut day_report_delivered = false;
     if account.is_some() {
-        match write_day_report(layout, active, claude_bin, timeout, &record, &_lock) {
+        match write_day_report(layout, active, agent, timeout, &record, &_lock) {
             Ok(Some(report)) => {
                 if record.budget.weekly_share.is_some() {
-                    record_weekly_homecoming_sample(layout, claude_bin, &mut record);
+                    record_weekly_homecoming_sample(layout, agent, &mut record);
                 }
                 // The report is offered, never owed: an empty reply means the
                 // owner reads the visit's recorded facts and nothing more.
@@ -2831,7 +2941,7 @@ fn settle_prior_visit_delivery(
         };
         let report = |status: CompletionStatus, text: String| CompletionReport {
             status,
-            claude_session_id: None,
+            session: None,
             result: TurnResult {
                 result_text: None,
                 duration_ms: Some(0),
@@ -2851,7 +2961,7 @@ fn settle_prior_visit_delivery(
                             &command.id,
                             &CompletionReport {
                                 status: CompletionStatus::Completed,
-                                claude_session_id: None,
+                                session: None,
                                 result: TurnResult {
                                     result_text: Some(
                                         "visit end acknowledged: the visit had already ended on this machine".into(),
@@ -2895,7 +3005,7 @@ fn settle_prior_visit_delivery(
                             &command.id,
                             &CompletionReport {
                                 status: CompletionStatus::Completed,
-                                claude_session_id: None,
+                                session: None,
                                 result: TurnResult {
                                     result_text: Some(
                                         "visit end acknowledged: the visit's runner on this machine had already exited".into(),
@@ -2926,7 +3036,7 @@ fn settle_prior_visit_delivery(
                             &command.id,
                             &CompletionReport {
                                 status: CompletionStatus::Completed,
-                                claude_session_id: None,
+                                session: None,
                                 result: TurnResult {
                                     result_text: Some(
                                         "visit end acknowledged: this machine has no record of the visit and the server had already ended it".into(),
@@ -2967,8 +3077,12 @@ fn settle_prior_visit_delivery(
     Ok(settled)
 }
 
-fn record_weekly_homecoming_sample(layout: &Layout, claude_bin: &str, record: &mut VisitRecord) {
-    match sample_weekly_usage(claude_bin, record.turn_model(), layout) {
+fn record_weekly_homecoming_sample(layout: &Layout, agent: &dyn Agent, record: &mut VisitRecord) {
+    // An agent without a meter has no weekly total to extend.
+    let Some(meter) = agent.meter() else {
+        return;
+    };
+    match meter.sample(record.turn_model(), layout) {
         Ok(sample) => {
             if let Err(error) = record.ledger.record_weekly_meter(
                 sample.used_percentage,
@@ -3029,7 +3143,7 @@ fn reconcile_match_outcomes(
 fn write_private_account(
     layout: &Layout,
     active: &Active,
-    claude_bin: &str,
+    agent: &dyn Agent,
     timeout: Duration,
     record: &mut VisitRecord,
     match_outcome: Option<&MatchOutcome>,
@@ -3045,7 +3159,7 @@ fn write_private_account(
 
     // Render the whole visit before anything else: if the record cannot be
     // read back in full, there is no homecoming to write.
-    let transcript_text = homecoming::render(layout, record)?;
+    let transcript_text = homecoming::render(layout, record, agent)?;
     let transcript = homecoming::write(&active.workspace.dir, &record.visit_id, &transcript_text)?;
 
     let completed_path = layout.turn_file(&format!("{}-homecoming", record.visit_id));
@@ -3056,15 +3170,20 @@ fn write_private_account(
     // wrote their homecoming in the identity's visit session; adopt such an
     // archive against that id once, so the day report can still resume it.
     let legacy_session_id = Sessions::load(layout)?
-        .get(&active.identity.identity_id)
+        .get(&active.identity.identity_id, record.agent)
         .map(str::to_string);
     let adoptable_session_id = record.homecoming_session_id.clone().or(legacy_session_id);
 
     if completed_path.exists() {
-        match parse_stream_file(&completed_path) {
+        match parse_archive(agent, &completed_path) {
             Ok(receipt) => {
-                let expected = adoptable_session_id.as_deref().unwrap_or("");
-                match validate_private_homecoming_receipt(&receipt, expected, &physical_workspace) {
+                let expected = adoptable_id(agent, adoptable_session_id.as_deref(), &receipt);
+                match validate_private_homecoming_receipt(
+                    agent,
+                    &receipt,
+                    expected,
+                    &physical_workspace,
+                ) {
                     Ok(Some(account)) => {
                         record.homecoming_session_id = Some(expected.to_string());
                         record.save(layout)?;
@@ -3098,11 +3217,11 @@ fn write_private_account(
     }
 
     for attempt_path in homecoming_attempt_paths(layout, &record.visit_id)? {
-        let Ok(receipt) = parse_stream_file(&attempt_path) else {
+        let Ok(receipt) = parse_archive(agent, &attempt_path) else {
             continue;
         };
-        let expected = adoptable_session_id.as_deref().unwrap_or("");
-        match validate_private_homecoming_receipt(&receipt, expected, &physical_workspace) {
+        let expected = adoptable_id(agent, adoptable_session_id.as_deref(), &receipt);
+        match validate_private_homecoming_receipt(agent, &receipt, expected, &physical_workspace) {
             Ok(Some(account)) => {
                 std::fs::rename(&attempt_path, &completed_path)?;
                 record.homecoming_session_id = Some(expected.to_string());
@@ -3120,12 +3239,18 @@ fn write_private_account(
         }
     }
 
-    let message = homecoming::reader_message(
-        &transcript,
-        homecoming_message(match_outcome)
-            .strip_prefix(HOMECOMING_OPENER)
-            .expect("every homecoming message opens the same way"),
-    );
+    let facts_and_reflection = homecoming_message(match_outcome)
+        .strip_prefix(HOMECOMING_OPENER)
+        .expect("every homecoming message opens the same way")
+        .to_string();
+    let message = match agent.transcript_delivery() {
+        TranscriptDelivery::ReadFile => {
+            homecoming::reader_message(&transcript, &facts_and_reflection)
+        }
+        TranscriptDelivery::Inline => {
+            homecoming::inline_reader_message(&transcript_text, &facts_and_reflection)
+        }
+    };
     // The homecoming is the visit's payoff, so a blocked account window gets
     // the same patience the visit loop shows: wait out one near reset and try
     // again with a fresh attempt archive. Both failures on the same wall still
@@ -3140,13 +3265,22 @@ fn write_private_account(
         attempt_path = homecoming_attempt_path(layout, &record.visit_id)?;
         // A fresh session per attempt, never the identity's visit session.
         // Persist the id before launch so an archive this attempt leaves
-        // behind can be adopted against it after a crash.
+        // behind can be adopted against it after a crash. An agent that mints
+        // its own ids (Codex) reports one only in the stream; its archive is
+        // adopted on the id it carries, and the record learns the id below.
         session_id = new_session_id()?;
-        record.homecoming_session_id = Some(session_id.clone());
+        record.homecoming_session_id = agent.reserves_session_ids().then(|| session_id.clone());
         record.save(layout)?;
         eprintln!(
             "homecoming reader {} reading {} ({} lines) for visit {}",
-            session_id, transcript.relative, transcript.lines, record.visit_id
+            if agent.reserves_session_ids() {
+                session_id.as_str()
+            } else {
+                "(new thread)"
+            },
+            transcript.relative,
+            transcript.lines,
+            record.visit_id
         );
         // Keep the advisory lock open in Claude itself. If the runner is
         // SIGKILLed mid-turn, the child retains ownership until it exits, so an
@@ -3154,7 +3288,8 @@ fn write_private_account(
         // visit.
         lock.set_inheritable(true)?;
         let result = run_turn(TurnRequest {
-            claude_bin,
+            agent,
+            actor_name: &active.identity.name,
             workspace: &active.workspace,
             mode: SessionMode::New {
                 reserved_session_id: session_id.clone(),
@@ -3165,10 +3300,17 @@ fn write_private_account(
             timeout,
             purpose: TurnPurpose::PrivateHomecoming,
             model: record.turn_model(),
-            mcp_settle: MCP_SETTLE,
+            mcp_settle: agent.mcp_settle(),
         });
         lock.set_inheritable(false)?;
         outcome = result?;
+        if !agent.reserves_session_ids() {
+            if let Some(minted) = outcome.session_id() {
+                session_id = minted.to_string();
+                record.homecoming_session_id = Some(session_id.clone());
+                record.save(layout)?;
+            }
+        }
         if outcome.failure.is_none() || waited_for_reset {
             break;
         }
@@ -3194,8 +3336,9 @@ fn write_private_account(
         .receipt
         .as_ref()
         .ok_or_else(|| Error::new("private homecoming produced no terminal receipt"))?;
-    let account = validate_private_homecoming_receipt(receipt, &session_id, &physical_workspace)?
-        .ok_or_else(|| Error::new("private homecoming did not complete successfully"))?;
+    let account =
+        validate_private_homecoming_receipt(agent, receipt, &session_id, &physical_workspace)?
+            .ok_or_else(|| Error::new("private homecoming did not complete successfully"))?;
     std::fs::rename(&attempt_path, &completed_path)?;
     Ok(Some(account))
 }
@@ -3213,7 +3356,7 @@ const DAY_REPORT_MAX_CHARS: usize = 3500;
 fn write_day_report(
     layout: &Layout,
     active: &Active,
-    claude_bin: &str,
+    agent: &dyn Agent,
     timeout: Duration,
     record: &VisitRecord,
     lock: &HomecomingLock,
@@ -3227,9 +3370,10 @@ fn write_day_report(
     // A crash between writing this archive and the Complete checkpoint lands
     // back here; adopt the validated report rather than asking twice.
     if completed_path.exists() {
-        match parse_stream_file(&completed_path) {
+        match parse_archive(agent, &completed_path) {
             Ok(receipt) => {
-                match validate_day_report_receipt(&receipt, session_id, &physical_workspace) {
+                match validate_day_report_receipt(agent, &receipt, session_id, &physical_workspace)
+                {
                     Ok(Some(report)) => return Ok(Some(clip_day_report(&report))),
                     _ => quarantine_homecoming_archive(&completed_path)?,
                 }
@@ -3250,7 +3394,8 @@ fn write_day_report(
         ));
         lock.set_inheritable(true)?;
         let result = run_turn(TurnRequest {
-            claude_bin,
+            agent,
+            actor_name: &active.identity.name,
             workspace: &active.workspace,
             mode: SessionMode::Resume {
                 session_id: session_id.to_string(),
@@ -3261,7 +3406,7 @@ fn write_day_report(
             timeout,
             purpose: TurnPurpose::DayReport,
             model: record.turn_model(),
-            mcp_settle: MCP_SETTLE,
+            mcp_settle: agent.mcp_settle(),
         });
         lock.set_inheritable(false)?;
         outcome = result?;
@@ -3288,7 +3433,7 @@ fn write_day_report(
         .receipt
         .as_ref()
         .ok_or_else(|| Error::new("day report produced no terminal receipt"))?;
-    let report = validate_day_report_receipt(receipt, session_id, &physical_workspace)?
+    let report = validate_day_report_receipt(agent, receipt, session_id, &physical_workspace)?
         .ok_or_else(|| Error::new("day report did not complete successfully"))?;
     std::fs::rename(&attempt_path, &completed_path)?;
     Ok(Some(clip_day_report(&report)))
@@ -3324,7 +3469,11 @@ fn weekly_usage_line(record: &VisitRecord) -> Option<String> {
         format!("{percent:.1}")
     };
     Some(format!(
-        "About {displayed}% of the weekly allowance was used while this visit ran (other Claude activity on the account counts too)."
+        "About {displayed}% of the weekly allowance was used while this visit ran (other {} activity on the account counts too).",
+        match record.agent {
+            AgentKind::Claude => "Claude",
+            AgentKind::Codex => "Codex",
+        }
     ))
 }
 
@@ -3352,7 +3501,29 @@ const DAY_REPORT_MESSAGE: &str =
      record either way. Unlike your last note, this one WILL be shown to your \
      owner. Do not call any tool.";
 
+/// One archived turn, read by the agent that wrote it.
+fn parse_archive(agent: &dyn Agent, path: &std::path::Path) -> Result<StreamReceipt> {
+    agent.parse_receipt(&std::fs::read_to_string(path)?)
+}
+
+/// The session a homecoming archive must carry to be adopted. Claude's id is
+/// reserved and persisted before launch, so the archive must match it. An
+/// agent that mints its own ids can only be held to the one its archive
+/// reports; the rest of the receipt checks still apply.
+fn adoptable_id<'a>(
+    agent: &dyn Agent,
+    persisted: Option<&'a str>,
+    receipt: &'a StreamReceipt,
+) -> &'a str {
+    if agent.reserves_session_ids() {
+        persisted.unwrap_or("")
+    } else {
+        &receipt.session_id
+    }
+}
+
 fn validate_private_homecoming_receipt(
+    agent: &dyn Agent,
     receipt: &StreamReceipt,
     expected_session_id: &str,
     physical_workspace: &std::path::Path,
@@ -3362,25 +3533,9 @@ fn validate_private_homecoming_receipt(
             "private homecoming receipt did not resume the expected session",
         ));
     }
-    let init = receipt
-        .init
-        .as_ref()
-        .ok_or_else(|| Error::new("private homecoming receipt omitted its sandbox report"))?;
-    verify_sandbox(init, physical_workspace, SandboxAllowance::Read)?;
     // The memory tools had to be reachable, and nothing else may have been
-    // called: a homecoming looks back and remembers; it does not play on. A
-    // call the permission layer refused reached nothing and does not count —
-    // failing on it would rerun the turn and save every memory twice.
-    verify_world_was_reachable(init)?;
-    if let Some(name) = receipt
-        .permitted_tool_calls
-        .iter()
-        .find(|name| !is_homecoming_tool(name))
-    {
-        return Err(Error::new(format!(
-            "private homecoming receipt invoked {name} and cannot be adopted; only memory tools may be called after a visit"
-        )));
-    }
+    // called: a homecoming looks back and remembers; it does not play on.
+    agent.verify_archived(receipt, TurnPurpose::PrivateHomecoming, physical_workspace)?;
     if !receipt.success {
         return Ok(None);
     }
@@ -3393,6 +3548,7 @@ fn validate_private_homecoming_receipt(
 /// reach — no tools, no MCP server, no calls. The owner's story never waits
 /// on the daycare server.
 fn validate_day_report_receipt(
+    agent: &dyn Agent,
     receipt: &StreamReceipt,
     expected_session_id: &str,
     physical_workspace: &std::path::Path,
@@ -3402,21 +3558,7 @@ fn validate_day_report_receipt(
             "day report receipt did not resume the expected session",
         ));
     }
-    let init = receipt
-        .init
-        .as_ref()
-        .ok_or_else(|| Error::new("day report receipt omitted its sandbox report"))?;
-    verify_sandbox(init, physical_workspace, SandboxAllowance::None)?;
-    if !init.tools.is_empty() || !init.mcp_servers.is_empty() {
-        return Err(Error::new(
-            "day report receipt exposed tools or MCP servers",
-        ));
-    }
-    if !receipt.tool_calls.is_empty() {
-        return Err(Error::new(
-            "day report receipt invoked a tool and cannot be adopted",
-        ));
-    }
+    agent.verify_archived(receipt, TurnPurpose::DayReport, physical_workspace)?;
     if !receipt.success {
         return Ok(None);
     }
@@ -3727,23 +3869,20 @@ fn describe_duration(secs: u64) -> String {
     }
 }
 
-fn open(layout: &Layout, store: &dyn TokenStore, which: &Which, out: Out) -> Result<()> {
+fn open(
+    layout: &Layout,
+    store: &dyn TokenStore,
+    which: &Which,
+    kind: AgentKind,
+    out: Out,
+) -> Result<()> {
     let active = active_for(layout, store, which)?;
     let sessions = Sessions::load(layout)?;
-    let session = sessions.get(&active.identity.identity_id);
-    let command = match session {
-        Some(id) => format!(
-            "cd {} && claude --resume {}",
-            shell_quote_path(&active.workspace.dir),
-            shell_quote(id)
-        ),
-        None => format!(
-            "cd {} && claude   # no daycare session yet; run a turn first",
-            shell_quote_path(&active.workspace.dir)
-        ),
-    };
+    let session = sessions.get(&active.identity.identity_id, kind);
+    let command = agent::agent(kind, &AgentBins::default(), layout)?
+        .reopen_command(&active.workspace.dir, session);
     out.emit(
-        json!({ "ok": true, "command": command, "claude_session_id": session }),
+        json!({ "ok": true, "command": command, "agent": kind, session_key(kind): session }),
         || println!("{command}"),
     );
     Ok(())
@@ -3833,7 +3972,13 @@ fn describe_host() -> HostDescription {
     }
 }
 
-fn status(layout: &Layout, store: &dyn TokenStore, which: &Which, out: Out) -> Result<()> {
+fn status(
+    layout: &Layout,
+    store: &dyn TokenStore,
+    which: &Which,
+    kind: AgentKind,
+    out: Out,
+) -> Result<()> {
     let config = Config::load(layout)?;
     let mut identities = Identities::load(layout)?;
     migrate_legacy(layout, store, &config, &mut identities, &now_rfc3339())?;
@@ -3849,10 +3994,10 @@ fn status(layout: &Layout, store: &dyn TokenStore, which: &Which, out: Out) -> R
     };
     let active = resolve(layout, store, &config, &selector, &project_root(&cwd()))?;
     let sessions = Sessions::load(layout)?;
-    let session = sessions.get(&active.identity.identity_id);
+    let session = sessions.get(&active.identity.identity_id, kind);
     // Turn archives for every Claude share one machine directory. The selected
     // identity's resumable session is the only safe attribution key.
-    let last = latest_turn(layout, session)?;
+    let last = latest_turn(layout, session, archive_parser(kind))?;
     let visits = VisitRecord::list(layout)?;
     let live_visit = visits
         .iter()
@@ -3881,7 +4026,8 @@ fn status(layout: &Layout, store: &dyn TokenStore, which: &Which, out: Out) -> R
             "scaffolded": active.workspace.is_scaffolded(),
             "credentials": credentials_json,
             "host": host.json,
-            "claude_session_id": session,
+            "agent": kind,
+            session_key(kind): session,
             "active_visit": live_visit.map(|visit| visit.visit_id.clone()),
             "last_turn": last.as_ref().map(|(path, summary)| json!({
                 "archive": path, "summary": summary,
@@ -3924,10 +4070,113 @@ fn status(layout: &Layout, store: &dyn TokenStore, which: &Which, out: Out) -> R
     Ok(())
 }
 
+/// The stream parser for an agent's turn archives, without the adapter (and
+/// its login) behind it: status only reads what is already on disk.
+fn archive_parser(kind: AgentKind) -> fn(&str) -> Result<StreamReceipt> {
+    match kind {
+        AgentKind::Claude => daycare_runner::stream::parse_stream,
+        AgentKind::Codex => daycare_runner::agent::codex::stream::parse,
+    }
+}
+
+/// The JSON key a session id is reported under: Claude's keeps its old name.
+fn session_key(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Claude => "claude_session_id",
+        _ => "agent_session_id",
+    }
+}
+
+fn latest_turn(
+    layout: &Layout,
+    session_id: Option<&str>,
+    parse: fn(&str) -> Result<StreamReceipt>,
+) -> Result<Option<(PathBuf, String)>> {
+    let Some(session_id) = session_id else {
+        return Ok(None);
+    };
+    let dir = layout.turns_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(None);
+    };
+    let mut newest: Option<(std::time::SystemTime, PathBuf, StreamReceipt)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(receipt) = std::fs::read_to_string(&path)
+            .map_err(Error::from)
+            .and_then(|text| parse(&text))
+        else {
+            continue;
+        };
+        if receipt.session_id != session_id {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if newest
+            .as_ref()
+            .map(|(current, _, _)| modified > *current)
+            .unwrap_or(true)
+        {
+            newest = Some((modified, path, receipt));
+        }
+    }
+
+    let Some((_, path, receipt)) = newest else {
+        return Ok(None);
+    };
+    let usage = if receipt.usage.is_empty() {
+        "usage unknown".to_string()
+    } else {
+        format!(
+            "in {} / out {} tokens",
+            describe(receipt.usage.input_tokens),
+            describe(receipt.usage.output_tokens)
+        )
+    };
+    let summary = format!(
+        "{} · {} · {} · {}",
+        if receipt.success { "success" } else { "failed" },
+        receipt.session_id,
+        usage,
+        receipt
+            .result_text
+            .as_deref()
+            .map(first_line)
+            .unwrap_or_else(|| "(no result text)".to_string())
+    );
+    Ok(Some((path, summary)))
+}
+
+fn describe(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn first_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.chars().count() > 120 {
+        format!("{}…", line.chars().take(120).collect::<String>())
+    } else {
+        line.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use daycare_runner::agent::claude::ClaudeAgent;
     use daycare_runner::stream::parse_stream;
+
+    fn claude() -> ClaudeAgent {
+        ClaudeAgent::new("claude")
+    }
 
     const SESSION: &str = "18f44c2e-ff64-4e94-a89d-bdbeaa9ab9f7";
 
@@ -4018,21 +4267,35 @@ mod tests {
     fn live_and_archived_homecomings_share_one_strict_receipt_validator() {
         let clean = private_receipt(SESSION, "/tmp", "success", false);
         assert_eq!(
-            validate_private_homecoming_receipt(&clean, SESSION, std::path::Path::new("/tmp"))
-                .unwrap(),
+            validate_private_homecoming_receipt(
+                &claude(),
+                &clean,
+                SESSION,
+                std::path::Path::new("/tmp")
+            )
+            .unwrap(),
             Some("A private account.".to_string()),
         );
 
         let failed = private_receipt(SESSION, "/tmp", "error_during_execution", false);
         assert_eq!(
-            validate_private_homecoming_receipt(&failed, SESSION, std::path::Path::new("/tmp"))
-                .unwrap(),
+            validate_private_homecoming_receipt(
+                &claude(),
+                &failed,
+                SESSION,
+                std::path::Path::new("/tmp")
+            )
+            .unwrap(),
             None,
         );
         let tool = private_receipt(SESSION, "/tmp", "success", true);
-        let error =
-            validate_private_homecoming_receipt(&tool, SESSION, std::path::Path::new("/tmp"))
-                .unwrap_err();
+        let error = validate_private_homecoming_receipt(
+            &claude(),
+            &tool,
+            SESSION,
+            std::path::Path::new("/tmp"),
+        )
+        .unwrap_err();
         assert!(
             error.message().contains("daycare_world_snapshot"),
             "{error}"
@@ -4052,8 +4315,13 @@ mod tests {
             ],
         );
         assert_eq!(
-            validate_private_homecoming_receipt(&remembered, SESSION, std::path::Path::new("/tmp"))
-                .unwrap(),
+            validate_private_homecoming_receipt(
+                &claude(),
+                &remembered,
+                SESSION,
+                std::path::Path::new("/tmp")
+            )
+            .unwrap(),
             Some("A private account.".to_string()),
         );
         // One stray world call among the memory calls still spoils it.
@@ -4066,10 +4334,13 @@ mod tests {
                 "mcp__daycare__daycare_match_join",
             ],
         );
-        assert!(
-            validate_private_homecoming_receipt(&mixed, SESSION, std::path::Path::new("/tmp"))
-                .is_err()
-        );
+        assert!(validate_private_homecoming_receipt(
+            &claude(),
+            &mixed,
+            SESSION,
+            std::path::Path::new("/tmp")
+        )
+        .is_err());
         // A homecoming whose memory tools were never reachable cannot be
         // adopted as complete: the Claude had no way to save anything.
         let mut unreachable = private_receipt(SESSION, "/tmp", "success", false);
@@ -4080,6 +4351,7 @@ mod tests {
             .tools
             .retain(|tool| tool == "ToolSearch");
         let error = validate_private_homecoming_receipt(
+            &claude(),
             &unreachable,
             SESSION,
             std::path::Path::new("/tmp"),
@@ -4108,8 +4380,13 @@ mod tests {
             vec!["mcp__daycare__daycare_memory_save".to_string()]
         );
         assert_eq!(
-            validate_private_homecoming_receipt(&denied, SESSION, std::path::Path::new("/tmp"))
-                .unwrap(),
+            validate_private_homecoming_receipt(
+                &claude(),
+                &denied,
+                SESSION,
+                std::path::Path::new("/tmp")
+            )
+            .unwrap(),
             Some("A private account.".to_string()),
         );
     }
@@ -4121,26 +4398,38 @@ mod tests {
     fn day_report_receipts_are_tool_free_and_server_free() {
         let clean = day_report_receipt(SESSION, "/tmp", false);
         assert_eq!(
-            validate_day_report_receipt(&clean, SESSION, std::path::Path::new("/tmp")).unwrap(),
+            validate_day_report_receipt(&claude(), &clean, SESSION, std::path::Path::new("/tmp"))
+                .unwrap(),
             Some("A day report.".to_string()),
         );
         let called = day_report_receipt(SESSION, "/tmp", true);
-        assert!(
-            validate_day_report_receipt(&called, SESSION, std::path::Path::new("/tmp")).is_err()
-        );
+        assert!(validate_day_report_receipt(
+            &claude(),
+            &called,
+            SESSION,
+            std::path::Path::new("/tmp")
+        )
+        .is_err());
         // A homecoming-shaped receipt (server connected, tools listed) is not
         // a day report even with zero calls.
         let connected = private_receipt(SESSION, "/tmp", "success", false);
-        let error = validate_day_report_receipt(&connected, SESSION, std::path::Path::new("/tmp"))
-            .unwrap_err();
+        let error = validate_day_report_receipt(
+            &claude(),
+            &connected,
+            SESSION,
+            std::path::Path::new("/tmp"),
+        )
+        .unwrap_err();
         assert!(error.message().contains("exposed tools"), "{error}");
         assert!(validate_day_report_receipt(
+            &claude(),
             &clean,
             "895535d7-0382-4e98-87e2-f2a3073e69a7",
             std::path::Path::new("/tmp")
         )
         .is_err());
         assert!(validate_private_homecoming_receipt(
+            &claude(),
             &clean,
             "895535d7-0382-4e98-87e2-f2a3073e69a7",
             std::path::Path::new("/tmp")
@@ -4148,6 +4437,7 @@ mod tests {
         .is_err());
         let wrong_cwd = private_receipt(SESSION, "/var", "success", false);
         assert!(validate_private_homecoming_receipt(
+            &claude(),
             &wrong_cwd,
             SESSION,
             std::path::Path::new("/tmp")
@@ -4226,9 +4516,13 @@ mod tests {
     fn an_empty_homecoming_reply_validates_and_is_kept_as_nothing() {
         let mut silent = private_receipt(SESSION, "/tmp", "success", false);
         silent.result_text = Some("  \n".into());
-        let account =
-            validate_private_homecoming_receipt(&silent, SESSION, std::path::Path::new("/tmp"))
-                .unwrap();
+        let account = validate_private_homecoming_receipt(
+            &claude(),
+            &silent,
+            SESSION,
+            std::path::Path::new("/tmp"),
+        )
+        .unwrap();
         // The turn is valid — it neither failed nor invented anything.
         assert!(account.is_some());
         assert_eq!(account.and_then(non_empty), None);
@@ -4236,6 +4530,7 @@ mod tests {
         let mut missing = private_receipt(SESSION, "/tmp", "success", false);
         missing.result_text = None;
         assert!(validate_private_homecoming_receipt(
+            &claude(),
             &missing,
             SESSION,
             std::path::Path::new("/tmp")
@@ -4357,10 +4652,14 @@ mod tests {
         )
         .unwrap();
 
-        let last = latest_turn(&layout, Some(SESSION)).unwrap().unwrap();
+        let last = latest_turn(&layout, Some(SESSION), parse_stream)
+            .unwrap()
+            .unwrap();
         assert_eq!(last.0, selected);
         assert!(last.1.contains("selected identity"), "{}", last.1);
-        assert!(latest_turn(&layout, Some("no-session")).unwrap().is_none());
+        assert!(latest_turn(&layout, Some("no-session"), parse_stream)
+            .unwrap()
+            .is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -4495,79 +4794,5 @@ mod tests {
         .unwrap();
         assert!(credentials_in_fallback(&layout, "actor-1", "device-1"));
         let _ = std::fs::remove_dir_all(root);
-    }
-}
-
-fn latest_turn(layout: &Layout, session_id: Option<&str>) -> Result<Option<(PathBuf, String)>> {
-    let Some(session_id) = session_id else {
-        return Ok(None);
-    };
-    let dir = layout.turns_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(None);
-    };
-    let mut newest: Option<(std::time::SystemTime, PathBuf, StreamReceipt)> = None;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Ok(receipt) = parse_stream_file(&path) else {
-            continue;
-        };
-        if receipt.session_id != session_id {
-            continue;
-        }
-        let modified = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        if newest
-            .as_ref()
-            .map(|(current, _, _)| modified > *current)
-            .unwrap_or(true)
-        {
-            newest = Some((modified, path, receipt));
-        }
-    }
-
-    let Some((_, path, receipt)) = newest else {
-        return Ok(None);
-    };
-    let usage = if receipt.usage.is_empty() {
-        "usage unknown".to_string()
-    } else {
-        format!(
-            "in {} / out {} tokens",
-            describe(receipt.usage.input_tokens),
-            describe(receipt.usage.output_tokens)
-        )
-    };
-    let summary = format!(
-        "{} · {} · {} · {}",
-        if receipt.success { "success" } else { "failed" },
-        receipt.session_id,
-        usage,
-        receipt
-            .result_text
-            .as_deref()
-            .map(first_line)
-            .unwrap_or_else(|| "(no result text)".to_string())
-    );
-    Ok(Some((path, summary)))
-}
-
-fn describe(value: Option<u64>) -> String {
-    value
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn first_line(text: &str) -> String {
-    let line = text.lines().next().unwrap_or("").trim();
-    if line.chars().count() > 120 {
-        format!("{}…", line.chars().take(120).collect::<String>())
-    } else {
-        line.to_string()
     }
 }

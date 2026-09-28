@@ -1,9 +1,13 @@
-//! Parsing the `--output-format stream-json` NDJSON that a turn produces.
+//! The normalized turn receipt every agent adapter produces, and the Claude
+//! Code parser that produces it from `--output-format stream-json` NDJSON.
 //!
 //! The raw stream is archived to `turns/<command_id>.jsonl` before this runs;
 //! everything here is a projection over that archive, never a second source of
 //! truth. Shapes were taken from a real Claude Code 2.1.220 run — see
-//! `tests/fixtures/turn-stream-2.1.220.jsonl`.
+//! `tests/fixtures/turn-stream-2.1.220.jsonl`. Other agents' parsers live in
+//! their adapters (`agent::codex::stream`) and fill the same `StreamReceipt`,
+//! naming daycare tools in the `mcp__daycare__<tool>` form so the shared
+//! checks below hold for every agent.
 
 use crate::launch::{MCP_SERVER, MCP_TOOL_PREFIX, TOOL_SEARCH_TOOL};
 use crate::{Error, Result};
@@ -60,6 +64,11 @@ pub struct TurnUsage {
     /// reasons about how full the window is has to read this.
     pub rate_limit_utilization: Option<f64>,
     pub rate_limit_resets_at: Option<i64>,
+    /// The part of `output_tokens` spent on reasoning, when the agent reports
+    /// it separately (Codex does; Claude does not). Already inside
+    /// `output_tokens`, so never added to a total.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_output_tokens: Option<u64>,
 }
 
 impl TurnUsage {
@@ -97,6 +106,38 @@ pub struct StreamReceipt {
     /// True when the child wrote a tool call out as prose instead of invoking
     /// one — the signature of a model inventing results it never received.
     pub invented_tool_calls: bool,
+    /// What happened in the turn, in order, in agent-neutral terms. The
+    /// homecoming transcript is rendered from these, whatever agent ran.
+    pub events: Vec<TurnEvent>,
+    /// Anything the turn did besides speaking and calling the daycare server
+    /// (a shell command, a file edit, a web search, another MCP server), named
+    /// as the agent reported it. For agents that cannot prove their tool set
+    /// before the turn, this is the after-the-fact seal check: it must be
+    /// empty. Claude's parser leaves it empty; its seal is proven by `init`.
+    pub foreign_reach: Vec<String>,
+}
+
+/// One thing that happened in a turn, as the homecoming reader will see it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum TurnEvent {
+    /// The agent's own words.
+    Said(String),
+    /// A tool call. `input` is the call's JSON arguments as text.
+    Called {
+        id: Option<String>,
+        name: String,
+        input: String,
+    },
+    /// What a tool returned. `call_id` pairs it with its call when the agent
+    /// reports results separately; `name` is set when it reports them inline.
+    Returned {
+        call_id: Option<String>,
+        name: Option<String>,
+        is_error: bool,
+        text: String,
+    },
+    /// The turn ended in an error state the agent named (`error_max_turns`).
+    EndedAbnormally(String),
 }
 
 pub fn parse_stream_file(path: &Path) -> Result<StreamReceipt> {
@@ -227,6 +268,8 @@ pub fn parse_stream(stream: &str) -> Result<StreamReceipt> {
 
     let session_id = session_id
         .ok_or_else(|| Error::new("stream carried no session_id; the turn cannot be resumed"))?;
+    // Every line already parsed above, so this cannot fail on bad JSON.
+    let events = transcript_events(stream)?;
 
     let (denied_tool_calls, permitted_tool_calls): (Vec<_>, Vec<_>) = tool_uses
         .into_iter()
@@ -255,7 +298,98 @@ pub fn parse_stream(stream: &str) -> Result<StreamReceipt> {
         permitted_tool_calls,
         denied_tool_calls,
         invented_tool_calls,
+        events,
+        foreign_reach: Vec::new(),
     })
+}
+
+/// The transcript events of one Claude Code stream archive. Lenient where
+/// `parse_stream` is strict: an archive with no session id or no result still
+/// renders what it holds. A line that is not JSON fails, naming the line
+/// (`line N is not stream JSON: …`).
+pub fn transcript_events(stream: &str) -> Result<Vec<TurnEvent>> {
+    let mut events = Vec::new();
+    for (index, line) in stream.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: Value = serde_json::from_str(line).map_err(|error| {
+            Error::new(format!("line {} is not stream JSON: {error}", index + 1))
+        })?;
+        match event.get("type").and_then(Value::as_str) {
+            Some("assistant") => {
+                for block in content_blocks(&event) {
+                    match block.get("type").and_then(Value::as_str) {
+                        Some("text") => {
+                            if let Some(text) = block.get("text").and_then(Value::as_str) {
+                                if !text.trim().is_empty() {
+                                    events.push(TurnEvent::Said(text.trim().to_string()));
+                                }
+                            }
+                        }
+                        Some("tool_use") => events.push(TurnEvent::Called {
+                            id: string_at(block, "id"),
+                            name: block
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("<unnamed tool>")
+                                .to_string(),
+                            input: block
+                                .get("input")
+                                .map(|input| input.to_string())
+                                .unwrap_or_else(|| "{}".into()),
+                        }),
+                        _ => {}
+                    }
+                }
+            }
+            Some("user") => {
+                for block in content_blocks(&event) {
+                    if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                        continue;
+                    }
+                    events.push(TurnEvent::Returned {
+                        call_id: string_at(block, "tool_use_id"),
+                        name: None,
+                        is_error: block.get("is_error").and_then(Value::as_bool) == Some(true),
+                        text: tool_result_text(block),
+                    });
+                }
+            }
+            Some("result") => {
+                let subtype = event.get("subtype").and_then(Value::as_str).unwrap_or("");
+                if subtype != "success"
+                    || event.get("is_error").and_then(Value::as_bool) == Some(true)
+                {
+                    events.push(TurnEvent::EndedAbnormally(subtype.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(events)
+}
+
+fn content_blocks(event: &Value) -> Vec<&Value> {
+    event
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .map(|blocks| blocks.iter().collect())
+        .unwrap_or_default()
+}
+
+fn tool_result_text(block: &Value) -> String {
+    match block.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
 }
 
 /// A tool_result Claude Code wrote itself when its permission layer refused
@@ -288,7 +422,7 @@ const INVENTED_TOOL_CALL_MARKERS: [&str; 5] = [
     "<tool_result",
 ];
 
-fn looks_like_invented_tool_call(text: &str) -> bool {
+pub fn looks_like_invented_tool_call(text: &str) -> bool {
     INVENTED_TOOL_CALL_MARKERS
         .iter()
         .any(|marker| text.contains(marker))

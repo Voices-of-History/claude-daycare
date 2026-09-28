@@ -1,0 +1,38 @@
+[
+  {
+    "type": "message",
+    "id": "message-0",
+    "role": "developer",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "You are Pip, a visitor."
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "auto-compact-0",
+      "create_time": 0,
+      "content_item_kinds": [
+        "generic.developer_instructions"
+      ]
+    }
+  },
+  {
+    "type": "message",
+    "id": "message-1",
+    "role": "user",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "DAYCARE-SEAL-PROBE"
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "auto-compact-0",
+      "create_time": 0,
+      "content_item_kinds": [
+        "user.text"
+      ]
+    }
+  }
+]
