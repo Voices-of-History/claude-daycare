@@ -57,6 +57,7 @@ fn run(h: &Harness, mode: SessionMode, timeout_secs: u64) -> daycare_runner::tur
         purpose: TurnPurpose::World,
         model: daycare_runner::launch::DEFAULT_TURN_MODEL,
         mcp_settle: Duration::ZERO,
+        token_ceiling: None,
     })
     .unwrap()
 }
@@ -76,6 +77,7 @@ fn run_private(h: &Harness, message: &str) -> daycare_runner::turn::TurnOutcome 
         purpose: TurnPurpose::PrivateHomecoming,
         model: daycare_runner::launch::DEFAULT_TURN_MODEL,
         mcp_settle: Duration::ZERO,
+        token_ceiling: None,
     })
     .unwrap()
 }
@@ -95,6 +97,7 @@ fn run_day_report(h: &Harness) -> daycare_runner::turn::TurnOutcome {
         purpose: TurnPurpose::DayReport,
         model: daycare_runner::launch::DEFAULT_TURN_MODEL,
         mcp_settle: Duration::ZERO,
+        token_ceiling: None,
     })
     .unwrap()
 }
@@ -342,6 +345,7 @@ fn a_day_report_rejects_a_child_with_tools_enabled() {
         purpose: TurnPurpose::DayReport,
         model: daycare_runner::launch::DEFAULT_TURN_MODEL,
         mcp_settle: Duration::ZERO,
+        token_ceiling: None,
     })
     .unwrap();
     assert!(!outcome.succeeded());
@@ -551,6 +555,7 @@ fn a_turn_uses_the_inspected_physical_workspace_behind_a_parent_symlink() {
         purpose: TurnPurpose::World,
         model: daycare_runner::launch::DEFAULT_TURN_MODEL,
         mcp_settle: Duration::ZERO,
+        token_ceiling: None,
     })
     .unwrap();
     assert!(outcome.succeeded(), "{:?}", outcome.failure);
@@ -839,6 +844,7 @@ fn a_missing_mcp_config_stops_the_turn_before_claude_starts() {
         purpose: TurnPurpose::World,
         model: daycare_runner::launch::DEFAULT_TURN_MODEL,
         mcp_settle: Duration::ZERO,
+        token_ceiling: None,
     })
     .unwrap_err();
 
@@ -866,6 +872,7 @@ fn an_empty_device_token_is_refused_before_launch() {
         purpose: TurnPurpose::World,
         model: daycare_runner::launch::DEFAULT_TURN_MODEL,
         mcp_settle: Duration::ZERO,
+        token_ceiling: None,
     })
     .unwrap_err();
 

@@ -1,0 +1,9 @@
+[0m
+┌  MCP Servers
+│
+●  ✗ daycare [90mfailed
+│      SSE error: Non-200 status code (404)
+│      [90mhttp://127.0.0.1:18432/api/daycare/mcp/mcp
+│
+└  1 server(s)
+

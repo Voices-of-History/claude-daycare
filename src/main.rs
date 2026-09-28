@@ -594,7 +594,7 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
 /// new visits and standalone turns.
 #[derive(Args, Debug, Clone)]
 struct AgentOpts {
-    /// The coding agent that runs the turns: claude (default) or codex.
+    /// The coding agent that runs the turns: claude (default), codex, or opencode.
     #[arg(long, default_value = "claude", value_parser = AgentKind::parse)]
     agent: AgentKind,
     /// Claude Code binary to run.
@@ -603,6 +603,9 @@ struct AgentOpts {
     /// Codex CLI binary to run.
     #[arg(long, default_value = "codex")]
     codex_bin: String,
+    /// OpenCode binary to run.
+    #[arg(long, default_value = "opencode")]
+    opencode_bin: String,
 }
 
 impl AgentOpts {
@@ -610,6 +613,7 @@ impl AgentOpts {
         AgentBins {
             claude: self.claude_bin.clone(),
             codex: self.codex_bin.clone(),
+            opencode: self.opencode_bin.clone(),
         }
     }
 
@@ -624,6 +628,8 @@ impl AgentOpts {
             self.claude_bin.clone(),
             "--codex-bin".into(),
             self.codex_bin.clone(),
+            "--opencode-bin".into(),
+            self.opencode_bin.clone(),
         ]
     }
 }
@@ -1657,6 +1663,14 @@ that authoritative value.",
 
     let archive_path = layout.turn_file(&command.id);
     let was_resume = matches!(mode, SessionMode::Resume { .. });
+    // What the visit's token cap has left, for agents that can stop a turn
+    // mid-way when it runs past it.
+    let token_ceiling = visit.and_then(|visit| {
+        visit
+            .budget
+            .tokens
+            .map(|cap| cap.saturating_sub(visit.ledger.tokens_used))
+    });
     let model = visit
         .map(VisitRecord::turn_model)
         .unwrap_or(agent.default_model());
@@ -1672,6 +1686,7 @@ that authoritative value.",
         purpose: TurnPurpose::World,
         model,
         mcp_settle: agent.mcp_settle(),
+        token_ceiling,
     });
 
     let should_start_fresh = was_resume
@@ -1704,6 +1719,7 @@ that authoritative value.",
         purpose: TurnPurpose::World,
         model,
         mcp_settle: agent.mcp_settle(),
+        token_ceiling,
     })
 }
 
@@ -3301,6 +3317,7 @@ fn write_private_account(
             purpose: TurnPurpose::PrivateHomecoming,
             model: record.turn_model(),
             mcp_settle: agent.mcp_settle(),
+            token_ceiling: None,
         });
         lock.set_inheritable(false)?;
         outcome = result?;
@@ -3336,9 +3353,22 @@ fn write_private_account(
         .receipt
         .as_ref()
         .ok_or_else(|| Error::new("private homecoming produced no terminal receipt"))?;
+    // An agent that mints its own session ids reported the reader's in the
+    // stream; `run_turn` has already checked it is well formed.
+    if !agent.reserves_session_ids() {
+        session_id = outcome
+            .session_id()
+            .ok_or_else(|| Error::new("private homecoming reported no session id"))?
+            .to_string();
+    }
     let account =
         validate_private_homecoming_receipt(agent, receipt, &session_id, &physical_workspace)?
             .ok_or_else(|| Error::new("private homecoming did not complete successfully"))?;
+    if record.homecoming_session_id.as_deref() != Some(session_id.as_str()) {
+        // The day report resumes this session.
+        record.homecoming_session_id = Some(session_id.clone());
+        record.save(layout)?;
+    }
     std::fs::rename(&attempt_path, &completed_path)?;
     Ok(Some(account))
 }
@@ -3407,6 +3437,7 @@ fn write_day_report(
             purpose: TurnPurpose::DayReport,
             model: record.turn_model(),
             mcp_settle: agent.mcp_settle(),
+            token_ceiling: None,
         });
         lock.set_inheritable(false)?;
         outcome = result?;

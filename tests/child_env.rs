@@ -44,6 +44,7 @@ fn the_child_never_inherits_api_credentials_or_the_parent_session() {
         purpose: TurnPurpose::World,
         model: daycare_runner::launch::DEFAULT_TURN_MODEL,
         mcp_settle: Duration::ZERO,
+        token_ceiling: None,
     })
     .unwrap();
     assert!(outcome.succeeded(), "{:?}", outcome.failure);
@@ -86,6 +87,7 @@ fn the_child_never_inherits_api_credentials_or_the_parent_session() {
         purpose: TurnPurpose::PrivateHomecoming,
         model: daycare_runner::launch::DEFAULT_TURN_MODEL,
         mcp_settle: Duration::ZERO,
+        token_ceiling: None,
     })
     .unwrap();
     assert!(private.succeeded(), "{:?}", private.failure);
