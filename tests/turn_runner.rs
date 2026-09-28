@@ -2,6 +2,7 @@
 
 mod support;
 
+use daycare_runner::agent::claude::ClaudeAgent;
 use daycare_runner::launch::SessionMode;
 use daycare_runner::turn::{run_turn, TurnPurpose, TurnRequest};
 use daycare_runner::workspace::Workspace;
@@ -50,7 +51,8 @@ fn harness(label: &str, delay_secs: u64, exit_code: i32) -> Harness {
 
 fn run(h: &Harness, mode: SessionMode, timeout_secs: u64) -> daycare_runner::turn::TurnOutcome {
     run_turn(TurnRequest {
-        claude_bin: h.claude_bin.to_str().unwrap(),
+        agent: &ClaudeAgent::new(h.claude_bin.to_str().unwrap()),
+        actor_name: "Pip",
         workspace: &h.workspace,
         mode,
         message: "A world turn has been requested for your character Pip.",
@@ -66,7 +68,8 @@ fn run(h: &Harness, mode: SessionMode, timeout_secs: u64) -> daycare_runner::tur
 
 fn run_private(h: &Harness, message: &str) -> daycare_runner::turn::TurnOutcome {
     run_turn(TurnRequest {
-        claude_bin: h.claude_bin.to_str().unwrap(),
+        agent: &ClaudeAgent::new(h.claude_bin.to_str().unwrap()),
+        actor_name: "Pip",
         workspace: &h.workspace,
         mode: SessionMode::Resume {
             session_id: SESSION.into(),
@@ -84,7 +87,8 @@ fn run_private(h: &Harness, message: &str) -> daycare_runner::turn::TurnOutcome 
 
 fn run_day_report(h: &Harness) -> daycare_runner::turn::TurnOutcome {
     run_turn(TurnRequest {
-        claude_bin: h.claude_bin.to_str().unwrap(),
+        agent: &ClaudeAgent::new(h.claude_bin.to_str().unwrap()),
+        actor_name: "Pip",
         workspace: &h.workspace,
         mode: SessionMode::Resume {
             session_id: SESSION.into(),
@@ -331,7 +335,8 @@ fn a_day_report_runs_tool_free_and_server_free() {
 fn a_day_report_rejects_a_child_with_tools_enabled() {
     let h = harness("day-report-tools", 0, 0);
     let outcome = run_turn(TurnRequest {
-        claude_bin: h.claude_bin.to_str().unwrap(),
+        agent: &ClaudeAgent::new(h.claude_bin.to_str().unwrap()),
+        actor_name: "Pip",
         workspace: &h.workspace,
         mode: SessionMode::Resume {
             session_id: SESSION.into(),
@@ -540,7 +545,8 @@ fn a_turn_uses_the_inspected_physical_workspace_behind_a_parent_symlink() {
     let archive = dir.join("turns/cmd-1.jsonl");
 
     let outcome = run_turn(TurnRequest {
-        claude_bin: claude_bin.to_str().unwrap(),
+        agent: &ClaudeAgent::new(claude_bin.to_str().unwrap()),
+        actor_name: "Pip",
         workspace: &workspace,
         mode: SessionMode::Resume {
             session_id: SESSION.into(),
@@ -826,7 +832,8 @@ fn a_missing_mcp_config_stops_the_turn_before_claude_starts() {
     std::fs::remove_file(h.workspace.mcp_config()).unwrap();
 
     let error = run_turn(TurnRequest {
-        claude_bin: h.claude_bin.to_str().unwrap(),
+        agent: &ClaudeAgent::new(h.claude_bin.to_str().unwrap()),
+        actor_name: "Pip",
         workspace: &h.workspace,
         mode: SessionMode::Resume {
             session_id: SESSION.into(),
@@ -852,7 +859,8 @@ fn a_missing_mcp_config_stops_the_turn_before_claude_starts() {
 fn an_empty_device_token_is_refused_before_launch() {
     let h = harness("turn-no-token", 0, 0);
     let error = run_turn(TurnRequest {
-        claude_bin: h.claude_bin.to_str().unwrap(),
+        agent: &ClaudeAgent::new(h.claude_bin.to_str().unwrap()),
+        actor_name: "Pip",
         workspace: &h.workspace,
         mode: SessionMode::Resume {
             session_id: SESSION.into(),

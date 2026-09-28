@@ -110,6 +110,11 @@ pub struct LaunchPlan {
     pub args: Vec<String>,
     /// One SDK user message, newline-terminated for `--input-format stream-json`.
     pub stdin: String,
+    /// Variables removed from the child's environment before launch.
+    pub env_remove: Vec<String>,
+    /// Variables set in the child's environment. Never the device token:
+    /// `turn::run_turn` adds that itself, only for turns that reach the server.
+    pub env: Vec<(String, String)>,
 }
 
 pub struct LaunchOptions<'a> {
@@ -276,6 +281,11 @@ pub fn build_launch_plan(options: LaunchOptions<'_>) -> Result<LaunchPlan> {
         cwd: options.workspace.to_path_buf(),
         args,
         stdin: format!("{input}\n"),
+        env_remove: STRIPPED_CHILD_ENV
+            .iter()
+            .map(|name| name.to_string())
+            .collect(),
+        env: Vec::new(),
     })
 }
 

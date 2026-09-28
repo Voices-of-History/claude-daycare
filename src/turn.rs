@@ -1,18 +1,13 @@
-//! Running exactly one Claude turn and turning it into a receipt.
+//! Running exactly one agent turn and turning it into a receipt.
 //!
 //! The raw stream is written to `turns/<command_id>.jsonl` as it arrives, so a
 //! turn that times out or crashes still leaves the evidence of what happened.
 
-use crate::launch::{
-    build_launch_plan, is_homecoming_tool, validate_session_id, LaunchOptions, LaunchTools,
-    SessionMode, DEVICE_TOKEN_ENV, STRIPPED_CHILD_ENV,
-};
+use crate::agent::{Agent, TurnSpec};
+use crate::launch::{validate_session_id, SessionMode, DEVICE_TOKEN_ENV};
 use crate::paths::create_private_dir;
-use crate::stream::{
-    parse_stream_file, verify_reached_the_world, verify_sandbox, verify_world_was_reachable,
-    SandboxAllowance, StreamReceipt, WorldReach,
-};
-use crate::workspace::{guard_no_managed_claude, Workspace, CONTROLLER_PROMPT, MCP_CONFIG};
+use crate::stream::{verify_reached_the_world, StreamReceipt, WorldReach};
+use crate::workspace::Workspace;
 use crate::{Error, Result};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -23,26 +18,29 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
 /// The child exited before it accepted the turn message. This is the one
 /// launch failure a resumed turn may recover from with a fresh session: no
-/// model input reached Claude, so no tool call or other side effect can have
+/// model input reached the agent, so no tool call or other side effect can have
 /// happened.
 pub const PRE_INPUT_BROKEN_PIPE_ERROR: &str =
     "claude closed stdin before accepting the turn (broken pipe)";
 
 pub struct TurnRequest<'a> {
-    pub claude_bin: &'a str,
+    pub agent: &'a dyn Agent,
     pub workspace: &'a Workspace,
     pub mode: SessionMode,
     pub message: &'a str,
+    /// The character this turn is for; agents whose persona travels with the
+    /// turn need it.
+    pub actor_name: &'a str,
     pub device_token: &'a str,
     pub archive_path: &'a Path,
     pub timeout: Duration,
     pub purpose: TurnPurpose,
-    /// One of `ALLOWED_TURN_MODELS`; the visit's stored choice, not the
-    /// machine's `claude` default.
+    /// The visit's stored model choice, already checked by the agent; not
+    /// the machine's own default.
     pub model: &'a str,
     /// How long the MCP connection gets before the first input freezes the
-    /// child's tool list. `MCP_SETTLE` in production; zero in tests, which
-    /// never launch a real child.
+    /// child's tool list. `agent.mcp_settle()` in production; zero in tests,
+    /// which never launch a real child.
     pub mcp_settle: Duration,
 }
 
@@ -67,7 +65,7 @@ pub struct TurnOutcome {
     /// `None` means the turn ran clean, produced a receipt, and the child
     /// reported the sandbox we asked for.
     pub failure: Option<String>,
-    /// The turn succeeded without calling any daycare tool: Claude watched,
+    /// The turn succeeded without calling any daycare tool: the agent watched,
     /// waited, or declined, and said so. A held turn is a turn, not a failure.
     pub held: bool,
 }
@@ -89,10 +87,8 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         ));
     }
 
-    // Enterprise policy can inject managed CLAUDE.md into every ordinary
-    // authenticated session and cannot be excluded by project settings. Refuse
-    // it before the child receives either the turn prompt or the device token.
-    guard_no_managed_claude(request.claude_bin)?;
+    let agent = request.agent;
+    let label = agent.label();
 
     // Activation checks this too. Recheck immediately before every child
     // launch because a long visit can outlive a changed workspace-root symlink.
@@ -101,26 +97,26 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
     let expected_session_id = match &request.mode {
         SessionMode::New {
             reserved_session_id,
-        } => Some(reserved_session_id.clone()),
+        } if agent.reserves_session_ids() => Some(reserved_session_id.clone()),
+        SessionMode::New { .. } => None,
         SessionMode::Resume { session_id } => Some(session_id.clone()),
         SessionMode::Fork { .. } => None,
     };
-    let plan = build_launch_plan(LaunchOptions {
-        claude_bin: request.claude_bin,
-        mode: request.mode,
+    let spec = TurnSpec {
+        mode: &request.mode,
         message: request.message,
+        actor_name: request.actor_name,
         workspace: &physical_workspace,
-        mcp_config: &physical_workspace.join(MCP_CONFIG),
-        system_prompt_file: &physical_workspace.join(CONTROLLER_PROMPT),
-        tools: match request.purpose {
-            TurnPurpose::World => LaunchTools::DaycareWorld,
-            TurnPurpose::PrivateHomecoming => LaunchTools::DaycareHomecoming,
-            TurnPurpose::DayReport => LaunchTools::None,
-        },
+        purpose: request.purpose,
         model: request.model,
-    })?;
+    };
+    // Managed policy, login, and whatever proof of the seal the agent can
+    // give without a model call, before the child receives either the turn
+    // prompt or the device token.
+    agent.guard(&spec)?;
+    let plan = agent.launch_plan(&spec)?;
     // The plan preserves the established missing-file errors. This second check
-    // adds the no-symlink property before the files reach Claude.
+    // adds the no-symlink property before the files reach the agent.
     Workspace::new(&physical_workspace).guard_scaffold_files()?;
 
     if let Some(parent) = request.archive_path.parent() {
@@ -136,35 +132,26 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for name in STRIPPED_CHILD_ENV {
+    for name in &plan.env_remove {
         command.env_remove(name);
     }
     command.env_remove(DEVICE_TOKEN_ENV);
-    // A visit is one Claude Code session resumed turn after turn, so its
-    // context only grows. Left to defaults it ran to ~583k at 100 turns and
-    // only compacted near the 1M ceiling at 200 (2026-09-01 checkpoint test).
-    // Josh: "it should compact at 250k context just like my default setting"
-    // — 25% of a 1M window, regardless of what the owner's own settings say.
-    command.env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "1000000");
-    command.env("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "25");
+    for (name, value) in &plan.env {
+        command.env(name, value);
+    }
     // The only place the device token exists outside the keychain. The
     // homecoming turn needs it too: it saves the visit's memories through the
     // same MCP server the visit used. The day report has no server to reach.
     if request.purpose != TurnPurpose::DayReport {
         command.env(DEVICE_TOKEN_ENV, request.device_token);
-        // Image generation waits on a remote model; Claude Code's default MCP
-        // tool timeout gave up before Replicate finished, so the Claude never
-        // saw the URL while the file still landed in the bucket (live,
-        // 2026-08-26). Three minutes covers a cold model; the turn timeout
-        // still bounds the whole visit turn above this.
-        command.env("MCP_TOOL_TIMEOUT", "180000");
     }
 
     let started = Instant::now();
     let mut child = command.spawn().map_err(|error| {
         Error::new(format!(
-            "could not start {}: {error}. Is Claude Code installed and on PATH?",
-            plan.program
+            "could not start {}: {error}. Is {} installed and on PATH?",
+            plan.program,
+            agent.product_name()
         ))
     })?;
 
@@ -269,6 +256,9 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         Ok(Ok(())) | Err(_) => {}
     }
     let stderr_text = stderr_result.recv_timeout(drain).unwrap_or_default();
+    // Whatever the turn did, the agent may have state to settle (Codex hands a
+    // refreshed login back to the owner's own home).
+    let after_turn = agent.after_turn();
 
     let mut failure = None;
     let mut held = false;
@@ -279,7 +269,10 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         ));
     }
 
-    let receipt = match parse_stream_file(request.archive_path) {
+    let receipt = match std::fs::read_to_string(request.archive_path)
+        .map_err(Error::from)
+        .and_then(|text| agent.parse_receipt(&text))
+    {
         Ok(receipt) => Some(receipt),
         Err(error) => {
             if failure.is_none() {
@@ -292,33 +285,27 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
     let mut trusted_session_id = None;
     if let Some(receipt) = &receipt {
         if validate_session_id(&receipt.session_id).is_err() {
-            failure =
-                Some("claude reported an invalid session id; it will not be persisted".into());
+            failure = Some(format!(
+                "{label} reported an invalid session id; it will not be persisted"
+            ));
         } else if expected_session_id
             .as_deref()
             .is_some_and(|expected| receipt.session_id != expected)
         {
-            failure = Some(
-                "claude reported a different session id than the runner assigned; it will not be persisted"
-                    .into(),
-            );
+            failure = Some(format!(
+                "{label} reported a different session id than the runner assigned; it will not be persisted"
+            ));
         } else {
             trusted_session_id = Some(receipt.session_id.clone());
         }
-        if let Some(init) = &receipt.init {
-            let allowance = match request.purpose {
-                TurnPurpose::PrivateHomecoming => SandboxAllowance::Read,
-                TurnPurpose::World | TurnPurpose::DayReport => SandboxAllowance::None,
-            };
-            if let Err(error) = verify_sandbox(init, &request.workspace.dir, allowance) {
-                // A sandbox violation outranks any other outcome: the turn may
-                // have had more reach than Daycare allows.
-                failure = Some(format!("sandbox check failed: {error}"));
-            }
+        if let Err(error) = agent.verify_seal(receipt, request.purpose, &request.workspace.dir) {
+            // A sandbox violation outranks any other outcome: the turn may
+            // have had more reach than Daycare allows.
+            failure = Some(format!("sandbox check failed: {error}"));
         }
         if failure.is_none() && !receipt.success {
             failure = Some(format!(
-                "claude reported {}{}",
+                "{label} reported {}{}",
                 receipt
                     .error_subtype
                     .clone()
@@ -329,77 +316,31 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
         // Only a turn that claims success can smuggle fiction into a receipt;
         // a turn that already failed has a more specific cause to report.
         if failure.is_none() {
-            match request.purpose {
-                TurnPurpose::World => {
-                    if let Some(init) = &receipt.init {
-                        if let Err(error) = verify_world_was_reachable(init) {
-                            failure = Some(error.to_string());
-                        }
-                    }
-                    if failure.is_none() {
-                        match verify_reached_the_world(receipt) {
-                            Ok(WorldReach::Reached) => {}
-                            Ok(WorldReach::Held) => held = true,
-                            Err(error) => failure = Some(error.to_string()),
-                        }
-                    }
-                }
-                TurnPurpose::PrivateHomecoming => {
-                    // The homecoming's one job beyond reflection is saving
-                    // memories, so the memory tools must have been reachable;
-                    // a homecoming that silently could not save is the failure
-                    // this feature exists to prevent.
-                    match &receipt.init {
-                        Some(init) => {
-                            if let Err(error) = verify_world_was_reachable(init) {
-                                failure = Some(error.to_string());
-                            }
-                        }
-                        None => {
-                            failure = Some("private homecoming omitted its sandbox report".into());
-                        }
-                    }
-                    // A call the permission layer refused reached nothing;
-                    // failing on it would rerun the homecoming and re-save
-                    // every memory a second time.
-                    if failure.is_none() {
-                        if let Some(name) = receipt
-                            .permitted_tool_calls
-                            .iter()
-                            .find(|name| !is_homecoming_tool(name))
-                        {
-                            failure = Some(format!(
-                                "private homecoming invoked {name}; only memory tools may be called after a visit"
-                            ));
-                        }
-                    }
-                    // Zero memory calls and an empty reply are a fine
-                    // homecoming: both are offered, never owed.
-                }
-                TurnPurpose::DayReport => {
-                    let exposed_capability = receipt
-                        .init
-                        .as_ref()
-                        .is_none_or(|init| !init.tools.is_empty() || !init.mcp_servers.is_empty());
-                    if exposed_capability {
-                        failure =
-                            Some("day report started with tools or MCP servers enabled".into());
-                    } else if !receipt.tool_calls.is_empty() {
-                        failure =
-                            Some("day report invoked a tool instead of remaining local".into());
-                    }
-                    // An empty reply is a fine report: offered, never owed.
-                }
+            if let Err(error) = agent.verify_capability(receipt, request.purpose) {
+                failure = Some(error.to_string());
+            }
+        }
+        if failure.is_none() && request.purpose == TurnPurpose::World {
+            match verify_reached_the_world(receipt) {
+                Ok(WorldReach::Reached) => {}
+                Ok(WorldReach::Held) => held = true,
+                Err(error) => failure = Some(error.to_string()),
             }
         }
     }
 
     if failure.is_none() && exit_code.unwrap_or(0) != 0 {
         failure = Some(format!(
-            "claude exited {}{}",
+            "{label} exited {}{}",
             exit_code.unwrap_or(-1),
             exit_note(None, &stderr_text)
         ));
+    }
+
+    if let Err(error) = after_turn {
+        if failure.is_none() {
+            failure = Some(error.to_string());
+        }
     }
 
     Ok(TurnOutcome {

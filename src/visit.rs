@@ -15,6 +15,7 @@
 //! corresponds to something this process saw happen; anything unrecognised
 //! becomes `Failed`, not a confident story.
 
+use crate::agent::AgentKind;
 use crate::paths::{write_atomic, Layout};
 use crate::platform::MatchOutcome;
 use crate::stream::TurnUsage;
@@ -28,6 +29,10 @@ use std::time::Duration;
 /// The product default from the original drop-off specification: two
 /// percentage points of the user's rolling weekly Claude allowance.
 pub const DEFAULT_WEEKLY_SHARE: f64 = 0.02;
+
+/// A visit's token budget when its agent has no weekly meter to hold a share
+/// against. Counted as the ledger counts: input, output, and cache tokens.
+pub const DEFAULT_TOKEN_CAP: u64 = 300_000;
 
 /// These are crash/sleep/runaway safeguards, not the visit's ordinary budget.
 /// The weekly meter is the product stop; these make an unattended child finite
@@ -69,6 +74,18 @@ impl Budget {
         filled.wall_clock_secs = filled.wall_clock_secs.or(Some(SAFETY_WALL_CLOCK.as_secs()));
         filled.turns = filled.turns.or(Some(SAFETY_TURNS));
         filled.weekly_share = filled.weekly_share.or(Some(DEFAULT_WEEKLY_SHARE));
+        filled
+    }
+
+    /// The defaults for an agent with no weekly meter: no weekly share (there
+    /// is nothing to read it against) and a token cap in its place, unless
+    /// the person named one.
+    pub fn or_default_without_meter(self) -> Budget {
+        let mut filled = self;
+        filled.wall_clock_secs = filled.wall_clock_secs.or(Some(SAFETY_WALL_CLOCK.as_secs()));
+        filled.turns = filled.turns.or(Some(SAFETY_TURNS));
+        filled.tokens = filled.tokens.or(Some(DEFAULT_TOKEN_CAP));
+        filled.weekly_share = None;
         filled
     }
 
@@ -651,6 +668,11 @@ pub struct VisitRecord {
     /// which callers read as the Sonnet default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The agent that lives this visit. Records from before agents were
+    /// pluggable are Claude visits, and a Claude record is written exactly as
+    /// it was then.
+    #[serde(default, skip_serializing_if = "AgentKind::is_claude_ref")]
+    pub agent: AgentKind,
     pub budget: Budget,
     pub ledger: Ledger,
     /// The identity's own words about its visit, written by a final local turn.
@@ -717,6 +739,8 @@ struct VisitRecordWire {
     instructions: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    agent: AgentKind,
     budget: Budget,
     ledger: Ledger,
     private_account: Option<String>,
@@ -751,6 +775,7 @@ impl From<VisitRecordWire> for VisitRecord {
             canonical_end_reason: wire.canonical_end_reason,
             instructions: wire.instructions,
             model: wire.model,
+            agent: wire.agent,
             budget: wire.budget,
             ledger: wire.ledger,
             private_account: wire.private_account,
@@ -830,6 +855,7 @@ impl VisitRecord {
             canonical_end_reason: None,
             instructions,
             model: None,
+            agent: AgentKind::Claude,
             budget: budget.or_default(),
             ledger: Ledger::default(),
             private_account: None,
@@ -1147,6 +1173,41 @@ mod tests {
         assert_eq!(filled.wall_clock_secs, Some(12 * 60 * 60));
         assert_eq!(filled.turns, Some(200));
         assert_eq!(filled.weekly_share, Some(0.05));
+    }
+
+    #[test]
+    fn a_visit_without_a_meter_gets_a_token_cap_instead_of_a_weekly_share() {
+        let budget = Budget::default().or_default_without_meter();
+        assert_eq!(budget.tokens, Some(DEFAULT_TOKEN_CAP));
+        assert_eq!(budget.weekly_share, None);
+        assert_eq!(budget.wall_clock_secs, Some(12 * 60 * 60));
+        assert_eq!(budget.turns, Some(200));
+
+        // A named token budget stands; a share has nothing to be read against.
+        let named = Budget {
+            tokens: Some(50_000),
+            weekly_share: Some(0.05),
+            ..Budget::default()
+        }
+        .or_default_without_meter();
+        assert_eq!(named.tokens, Some(50_000));
+        assert_eq!(named.weekly_share, None);
+    }
+
+    #[test]
+    fn a_claude_visit_record_is_written_as_before_and_old_records_read_as_claude() {
+        let record = VisitRecord::open(
+            "visit-1",
+            "identity-1",
+            "Pip",
+            Budget::default(),
+            None,
+            "2026-09-01T18:00:00Z",
+        );
+        let value = serde_json::to_value(&record).unwrap();
+        assert!(value.get("agent").is_none(), "{value}");
+        let read: VisitRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(read.agent, AgentKind::Claude);
     }
 
     /// The share is measured against the plan's own meter, so the arithmetic

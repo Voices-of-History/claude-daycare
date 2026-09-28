@@ -2,7 +2,10 @@
 
 mod support;
 
-use daycare_runner::platform::{CompletionReport, CompletionStatus, PlatformClient, TurnResult};
+use daycare_runner::agent::AgentKind;
+use daycare_runner::platform::{
+    AgentSession, CompletionReport, CompletionStatus, PlatformClient, TurnResult,
+};
 use daycare_runner::stream::TurnUsage;
 use support::{MockPlatform, Response};
 
@@ -84,7 +87,10 @@ fn completion_posts_the_receipt_to_the_command_path() {
 
     let report = CompletionReport {
         status: CompletionStatus::Completed,
-        claude_session_id: Some("895535d7-0382-4e98-87e2-f2a3073e69a7".into()),
+        session: Some(AgentSession::new(
+            AgentKind::Claude,
+            "895535d7-0382-4e98-87e2-f2a3073e69a7",
+        )),
         result: TurnResult {
             result_text: Some("Greeted Mira by the fountain.".into()),
             duration_ms: Some(2493),
