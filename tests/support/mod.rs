@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 /// The same fixture-path helper the unit tests use, included rather than copied
@@ -169,7 +169,7 @@ pub fn scratch_dir(label: &str) -> PathBuf {
 }
 
 /// Where the refusing shim records that it was reached.
-pub fn claude_marker(root: &PathBuf) -> PathBuf {
+pub fn claude_marker(root: &Path) -> PathBuf {
     root.join("real-claude-was-launched")
 }
 
@@ -183,7 +183,7 @@ pub fn claude_marker(root: &PathBuf) -> PathBuf {
 ///
 /// The returned PATH keeps `/usr/bin` and `/bin` so ordinary tools still work,
 /// but puts the refusing shim first, where a bare `claude` will find it.
-pub fn no_claude_path(root: &PathBuf) -> String {
+pub fn no_claude_path(root: &Path) -> String {
     let bin = root.join("no-claude-bin");
     std::fs::create_dir_all(&bin).unwrap();
     let shim = bin.join("claude");
@@ -208,7 +208,7 @@ pub fn no_claude_path(root: &PathBuf) -> String {
 /// A stand-in for the `claude` binary. It records the argv, environment, and
 /// stdin it was given, then prints `stream` on stdout. `delay_secs` lets a test
 /// exercise the turn timeout without waiting on a model.
-pub fn fake_claude(dir: &PathBuf, stream: &str, delay_secs: u64, exit_code: i32) -> PathBuf {
+pub fn fake_claude(dir: &Path, stream: &str, delay_secs: u64, exit_code: i32) -> PathBuf {
     let stream_file = dir.join("canned-stream.jsonl");
     std::fs::write(&stream_file, stream).unwrap();
     // The homecoming double keeps the init event as the real capture reports
@@ -335,7 +335,7 @@ exit {exit_code}
 /// A stale-session double: resumed sessions exit before reading input, while a
 /// fresh session accepts the same turn and succeeds. Each launch appends its
 /// argv so the end-to-end test can prove both halves happened in order.
-pub fn fake_claude_stale_resume(dir: &PathBuf, stream: &str) -> PathBuf {
+pub fn fake_claude_stale_resume(dir: &Path, stream: &str) -> PathBuf {
     let stream_file = dir.join("stale-resume-stream.jsonl");
     std::fs::write(&stream_file, stream).unwrap();
     let script = dir.join("fake-claude-stale-resume.sh");
@@ -383,7 +383,7 @@ sed "s/18f44c2e-ff64-4e94-a89d-bdbeaa9ab9f7/$assigned_session/g" "{stream_file}"
     script
 }
 
-pub fn recorded_argv(dir: &PathBuf) -> Vec<String> {
+pub fn recorded_argv(dir: &Path) -> Vec<String> {
     std::fs::read_to_string(dir.join("call.argv"))
         .unwrap_or_default()
         .lines()
@@ -391,7 +391,7 @@ pub fn recorded_argv(dir: &PathBuf) -> Vec<String> {
         .collect()
 }
 
-pub fn recorded_stdin(dir: &PathBuf) -> String {
+pub fn recorded_stdin(dir: &Path) -> String {
     std::fs::read_to_string(dir.join("call.stdin")).unwrap_or_default()
 }
 
@@ -399,11 +399,11 @@ pub fn recorded_stdin(dir: &PathBuf) -> String {
 ///
 /// `recorded_stdin` holds only the last call, which is the wrong one for a
 /// visit: the homecoming turn runs after the world turn and overwrites it.
-pub fn recorded_stdin_all(dir: &PathBuf) -> String {
+pub fn recorded_stdin_all(dir: &Path) -> String {
     std::fs::read_to_string(dir.join("call.stdin.all")).unwrap_or_default()
 }
 
-pub fn recorded_env(dir: &PathBuf) -> HashMap<String, String> {
+pub fn recorded_env(dir: &Path) -> HashMap<String, String> {
     std::fs::read_to_string(dir.join("call.env"))
         .unwrap_or_default()
         .lines()
@@ -412,7 +412,7 @@ pub fn recorded_env(dir: &PathBuf) -> HashMap<String, String> {
         .collect()
 }
 
-pub fn recorded_cwd(dir: &PathBuf) -> String {
+pub fn recorded_cwd(dir: &Path) -> String {
     std::fs::read_to_string(dir.join("call.cwd"))
         .unwrap_or_default()
         .trim()

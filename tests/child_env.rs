@@ -50,15 +50,15 @@ fn the_child_never_inherits_api_credentials_or_the_parent_session() {
 
     let env = support::recorded_env(&dir);
     assert!(
-        env.get("ANTHROPIC_API_KEY").is_none(),
+        !env.contains_key("ANTHROPIC_API_KEY"),
         "API key reached the turn"
     );
-    assert!(env.get("ANTHROPIC_AUTH_TOKEN").is_none());
+    assert!(!env.contains_key("ANTHROPIC_AUTH_TOKEN"));
     assert!(
-        env.get("CLAUDECODE").is_none(),
+        !env.contains_key("CLAUDECODE"),
         "turn ran as a nested session"
     );
-    assert!(env.get("CLAUDE_CODE_ENTRYPOINT").is_none());
+    assert!(!env.contains_key("CLAUDE_CODE_ENTRYPOINT"));
 
     // Everything else is inherited, including PATH and the device token.
     assert_eq!(
@@ -94,6 +94,6 @@ fn the_child_never_inherits_api_credentials_or_the_parent_session() {
         private_env.get("DAYCARE_DEVICE_TOKEN").map(String::as_str),
         Some("dev_token_abc")
     );
-    assert!(private_env.get("ANTHROPIC_API_KEY").is_none());
+    assert!(!private_env.contains_key("ANTHROPIC_API_KEY"));
     assert!(env.contains_key("PATH"));
 }

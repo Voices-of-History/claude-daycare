@@ -884,17 +884,9 @@ impl VisitRecord {
     /// `server_turns_used` is the fallback for the case with no local record at
     /// all — a visit started on a machine that has since been re-paired. It is a
     /// floor, not a total: the server counts turns, not tokens or cost.
-    pub fn adopt(
-        layout: &Layout,
-        visit_id: &str,
-        identity_id: &str,
-        identity_name: &str,
-        budget: Budget,
-        instructions: Option<String>,
-        started_at: impl Into<String>,
-        server_turns_used: Option<u32>,
-    ) -> Self {
-        match VisitRecord::load(layout, visit_id) {
+    /// `fresh` supplies the fallback record when this machine has no copy.
+    pub fn adopt(layout: &Layout, mut fresh: Self, server_turns_used: Option<u32>) -> Self {
+        match VisitRecord::load(layout, &fresh.visit_id) {
             Ok(mut existing) => {
                 // A visit that ended locally but is still open on the server is
                 // being resumed, so it is active again.
@@ -909,14 +901,6 @@ impl VisitRecord {
                 existing
             }
             Err(_) => {
-                let mut fresh = VisitRecord::open(
-                    visit_id,
-                    identity_id,
-                    identity_name,
-                    budget,
-                    instructions,
-                    started_at,
-                );
                 fresh.ledger.turns_used = server_turns_used.unwrap_or(0);
                 // Incomplete only when the server told us about turns this
                 // machine has no record of. A visit that is new to everyone has
@@ -1931,12 +1915,14 @@ mod tests {
         // re-opening here would hand this Claude four more turns.
         let adopted = VisitRecord::adopt(
             &layout,
-            "v-1",
-            "id-1",
-            "Patch",
-            budget,
-            Some("Something else entirely".into()),
-            "2026-08-06T12:30:00Z",
+            VisitRecord::open(
+                "v-1",
+                "id-1",
+                "Patch",
+                budget,
+                Some("Something else entirely".into()),
+                "2026-08-06T12:30:00Z",
+            ),
             None,
         );
         assert_eq!(adopted.ledger.turns_used, 2);
@@ -1956,15 +1942,17 @@ mod tests {
         // Re-paired machine: the visit is open on the server, absent here.
         let adopted = VisitRecord::adopt(
             &layout,
-            "v-9",
-            "id-1",
-            "Patch",
-            Budget {
-                turns: Some(4),
-                ..Budget::default()
-            },
-            None,
-            "2026-08-06T12:30:00Z",
+            VisitRecord::open(
+                "v-9",
+                "id-1",
+                "Patch",
+                Budget {
+                    turns: Some(4),
+                    ..Budget::default()
+                },
+                None,
+                "2026-08-06T12:30:00Z",
+            ),
             Some(3),
         );
         assert_eq!(adopted.ledger.turns_used, 3);
@@ -2044,8 +2032,10 @@ mod tests {
 
     #[test]
     fn budget_check_states_turns_left_for_a_turn_bounded_visit() {
-        let mut ledger = Ledger::default();
-        ledger.turns_used = 5;
+        let mut ledger = Ledger {
+            turns_used: 5,
+            ..Ledger::default()
+        };
         ledger.start_weekly_meter(40.0, "Sep 3, 9am".into(), "seven_day".into());
         ledger
             .record_weekly_meter(40.6, "Sep 3, 9am".into(), "seven_day".into())
@@ -2059,8 +2049,10 @@ mod tests {
 
     #[test]
     fn budget_check_omits_the_safety_turn_cap_for_an_allowance_only_visit() {
-        let mut ledger = Ledger::default();
-        ledger.turns_used = 3;
+        let mut ledger = Ledger {
+            turns_used: 3,
+            ..Ledger::default()
+        };
         ledger.start_weekly_meter(10.0, "Sep 3, 9am".into(), "seven_day".into());
         let text = budget_check(&bounded(None, Some(0.05), None), &ledger, Duration::ZERO);
         assert_eq!(
@@ -2082,8 +2074,10 @@ mod tests {
 
     #[test]
     fn budget_check_names_the_last_turn_and_the_one_before_it() {
-        let mut ledger = Ledger::default();
-        ledger.turns_used = 2;
+        let mut ledger = Ledger {
+            turns_used: 2,
+            ..Ledger::default()
+        };
         let last = budget_check(&bounded(Some(3), None, None), &ledger, Duration::ZERO);
         assert!(
             last.starts_with("Budget check: this is the last turn of this visit;"),

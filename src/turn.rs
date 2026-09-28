@@ -247,13 +247,10 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
     // reader threads get a deadline rather than an unbounded join. Whatever was
     // flushed before the deadline is the archive.
     let drain = Duration::from_secs(2);
-    match archive_result.recv_timeout(drain) {
-        Ok(Err(error)) => {
-            return Err(Error::new(format!(
-                "could not archive turn stream: {error}"
-            )))
-        }
-        Ok(Ok(())) | Err(_) => {}
+    if let Ok(Err(error)) = archive_result.recv_timeout(drain) {
+        return Err(Error::new(format!(
+            "could not archive turn stream: {error}"
+        )));
     }
     let stderr_text = stderr_result.recv_timeout(drain).unwrap_or_default();
     // Whatever the turn did, the agent may have state to settle (Codex hands a

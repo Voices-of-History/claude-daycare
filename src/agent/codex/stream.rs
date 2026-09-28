@@ -97,7 +97,7 @@ pub fn parse(stream: &str) -> Result<StreamReceipt> {
                     Some("mcp_tool_call") => {
                         let server = item.get("server").and_then(Value::as_str).unwrap_or("");
                         let tool = item.get("tool").and_then(Value::as_str).unwrap_or("");
-                        if server != MCP_SERVER {
+                        if server != MCP_SERVER || is_resource_helper(tool) {
                             foreign_reach.push(format!("mcp server {server:?} ({tool})"));
                             continue;
                         }
@@ -132,9 +132,17 @@ pub fn parse(stream: &str) -> Result<StreamReceipt> {
             Some("item.started") | Some("item.updated") => {
                 if let Some(item) = event.get("item") {
                     if item.get("type").and_then(Value::as_str) == Some("mcp_tool_call")
-                        && item.get("server").and_then(Value::as_str) != Some(MCP_SERVER)
+                        && (item.get("server").and_then(Value::as_str) != Some(MCP_SERVER)
+                            || item
+                                .get("tool")
+                                .and_then(Value::as_str)
+                                .is_some_and(is_resource_helper))
                     {
-                        foreign_reach.push(format!("mcp server {:?}", item.get("server")));
+                        foreign_reach.push(format!(
+                            "mcp server {:?} ({:?})",
+                            item.get("server"),
+                            item.get("tool")
+                        ));
                     }
                 }
                 if let Some(kind) = event
@@ -319,6 +327,15 @@ fn mcp_result_text(item: &Value) -> String {
     }
 }
 
+// Codex's built-in resource helpers emit mcp_tool_call with the requested
+// server's name, even though they are not tools advertised by that server.
+fn is_resource_helper(tool: &str) -> bool {
+    matches!(
+        tool,
+        "list_mcp_resources" | "list_mcp_resource_templates" | "read_mcp_resource"
+    )
+}
+
 fn string_at(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
 }
@@ -379,6 +396,9 @@ mod tests {
         for event_type in ["item.started", "item.updated", "item.completed"] {
             for item in [
                 json!({"type":"mcp_tool_call", "server":"foreign", "tool":"read"}),
+                json!({"type":"mcp_tool_call", "server":"daycare", "tool":"read_mcp_resource"}),
+                json!({"type":"mcp_tool_call", "server":"daycare", "tool":"list_mcp_resources"}),
+                json!({"type":"mcp_tool_call", "server":"daycare", "tool":"list_mcp_resource_templates"}),
                 json!({"type":"command_execution", "command":"cat ~/.ssh/id_rsa"}),
                 json!({"type":"collab_tool_call", "tool":"spawn_agent"}),
                 json!({"type":"file_change"}),

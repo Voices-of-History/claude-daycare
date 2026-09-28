@@ -29,15 +29,38 @@ as `codex-prompt-input-multi-agent.json` and must now fail preflight.
 python3 dev/codex-tools-check.py /path/to/codex-0.158
 ```
 
-This runs the installed binary against a temporary local HTTP endpoint,
+This runs the installed binary against temporary local model and MCP endpoints,
 captures the outgoing tool definitions, and returns HTTP 400 before any
-model runs. It uses the bundled gpt-5.5 catalog entry with only
-`multi_agent_version` changed to `v2`, providing a positive control for a
-model that advertises collaboration. With the same disabled feature flags,
-`agents.enabled=true` still exposes the collaboration namespace;
-`agents.enabled=false` removes it. No auth file is read or copied.
+model runs. No auth file is read or copied. The bundled gpt-5.5 entry has
+`multi_agent_version` changed to `v2` for the collaboration positive control.
+The patch control retains `apply_patch_tool_type="freeform"`; sealed cases
+set it to null, exactly as the runner's private catalog does. All other
+bundled model metadata is preserved by the runner.
 
-This proves removal of collaboration tools, not every built-in tool. The
-capture still exposes `apply_patch`; read-only sandboxing and the post-turn
-file-change rejection remain necessary. Request-user-input and update-plan
-tools are explicitly disabled by the current seal settings.
+Results on CLI 0.158.0:
+
+- The patch control exposes `apply_patch`; every sealed case excludes it.
+- The collaboration control exposes `collaboration`; `agents.enabled=false`
+  excludes it even when the model advertises multi-agent support.
+- New, resumed, and homecoming requests expose the Daycare namespace plus
+  `list_mcp_resources`, `list_mcp_resource_templates`, and `read_mcp_resource`.
+  World requests exclude memory save; homecoming exposes only memory list/save.
+- Daycare tools are direct (`omit_tools_from=["deferred"]`), so no tool-search
+  host is needed. The three resource helpers can query only configured MCP
+  servers; the seal configures only Daycare. They cannot directly read local
+  files. Their use still fails the post-turn foreign-tool check.
+- The day-report request has an empty tool catalog.
+- Preflight with the same private catalog renders only persona and user text.
+
+Why the catalog override is necessary: in Codex 0.158, native patch registration
+checks `model_info.apply_patch_tool_type.is_some()`, independently of feature
+flags. The runner exports the bundled catalog locally, keeps only gpt-5.5,
+clears that field, writes a private 0600 catalog, and passes `model_catalog_json`
+to preflight and every exec/resume. Missing or unrecognized metadata fails
+before launch. Source: [tool registration](https://github.com/openai/codex/blob/rust-v0.158.0/codex-rs/core/src/tools/spec_plan.rs)
+and [configuration schema](https://github.com/openai/codex/blob/rust-v0.158.0/codex-rs/core/config.schema.json).
+The same source registers the three resource helpers whenever an MCP server
+exists; they have no individual configuration switch in this version.
+
+This is actual request-catalog evidence, not a new live model visit. Installed
+Mac validation and a full 0.158 visit remain release-manager checks.

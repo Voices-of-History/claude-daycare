@@ -17,6 +17,7 @@
 //!   and no model call (`appserver`).
 
 pub mod appserver;
+pub mod catalog;
 pub mod launch;
 pub mod login;
 pub mod preflight;
@@ -72,6 +73,10 @@ impl SealedHomes {
 
     fn sessions(&self) -> PathBuf {
         self.codex_home.join("sessions")
+    }
+
+    fn model_catalog(&self) -> PathBuf {
+        self.codex_home.join("daycare-models.json")
     }
 }
 
@@ -309,9 +314,10 @@ impl Agent for CodexAgent {
         let persona = launch::developer_instructions(spec.actor_name);
         let codex = codex_command(&self.bin, &self.homes, spec.workspace);
         with_synced_login(self.login.as_ref(), &self.homes.codex_home, || {
+            catalog::prepare(&codex, spec.model, &self.homes.model_catalog())?;
             preflight::prove_sealed_prompt(
                 &codex,
-                &launch::seal_args(spec.model, &persona),
+                &launch::sealed_model_args(spec.model, &persona, &self.homes.model_catalog()),
                 &persona,
             )
         })
@@ -319,7 +325,7 @@ impl Agent for CodexAgent {
 
     fn launch_plan(&self, spec: &TurnSpec<'_>) -> Result<LaunchPlan> {
         self.ensure_version()?;
-        let mut plan = launch::build_exec_plan(&self.bin, spec)?;
+        let mut plan = launch::build_exec_plan(&self.bin, spec, &self.homes.model_catalog())?;
         plan.env_remove = env_remove();
         plan.env = sealed_env(&self.homes);
         Ok(plan)

@@ -20,6 +20,11 @@
 //! flags alone do not suffice. This seal was verified on CLI 0.158.0;
 //! preflight rejects multi-agent instruction blocks and post-turn checks
 //! remain a backstop.
+//! A private model catalog clears `apply_patch_tool_type`, removing native
+//! patch registration. MCP tools are exposed directly, without tool search.
+//! Codex still advertises three MCP resource helpers whenever a server exists;
+//! they can reach only the configured Daycare server. Post-turn checks reject
+//! their use. A day report has no server and an empty tool catalog.
 
 use crate::agent::TurnSpec;
 use crate::launch::{
@@ -49,9 +54,8 @@ pub fn check_verified_model(model: &str) -> Result<()> {
 
 pub fn check_version(output: &str) -> Result<()> {
     let version = output.trim().strip_prefix("codex-cli ");
-    let numbers: Option<Vec<u64>> = version
-        .map(|version| version.split('.').map(|n| n.parse().ok()).collect())
-        .flatten();
+    let numbers: Option<Vec<u64>> =
+        version.and_then(|version| version.split('.').map(|n| n.parse().ok()).collect());
     if let Some(numbers) = numbers {
         if numbers.len() == 3 && (numbers[0], numbers[1], numbers[2]) >= (0, 158, 0) {
             return Ok(());
@@ -66,6 +70,7 @@ pub fn check_version(output: &str) -> Result<()> {
 /// reason).
 pub const MCP_TOOL_TIMEOUT_SECS: u64 = 180;
 pub const MCP_STARTUP_TIMEOUT_SECS: u64 = 30;
+pub const MCP_EXPOSURE: &str = r#"mcp_servers.daycare.omit_tools_from=["deferred"]"#;
 
 /// Compact a visit's thread at 250k tokens, as Claude visits do.
 pub const AUTO_COMPACT_TOKENS: u64 = 250_000;
@@ -148,6 +153,19 @@ pub fn seal_args(model: &str, developer_instructions: &str) -> Vec<String> {
     args
 }
 
+/// The preflight and every exec/resume purpose read the same private catalog.
+pub fn sealed_model_args(model: &str, persona: &str, catalog: &Path) -> Vec<String> {
+    let mut args = seal_args(model, persona);
+    args.extend([
+        "-c".into(),
+        format!(
+            "model_catalog_json={}",
+            toml_string(&catalog.to_string_lossy())
+        ),
+    ]);
+    args
+}
+
 /// The persona and standing rules, delivered as `developer_instructions`.
 /// Codex reads AGENTS.md, not the workspace's CLAUDE.md, and an AGENTS.md in
 /// the workspace would be one more file to guard; this keeps the workspace
@@ -201,7 +219,7 @@ little at a time.
 }
 
 /// The argv and stdin for one Codex turn.
-pub fn build_exec_plan(program: &str, spec: &TurnSpec<'_>) -> Result<LaunchPlan> {
+pub fn build_exec_plan(program: &str, spec: &TurnSpec<'_>, catalog: &Path) -> Result<LaunchPlan> {
     check_verified_model(spec.model)?;
     if spec.message.trim().is_empty() {
         return Err(Error::new("turn message must not be empty"));
@@ -229,9 +247,10 @@ pub fn build_exec_plan(program: &str, spec: &TurnSpec<'_>) -> Result<LaunchPlan>
         "--ignore-rules".into(),
         "--skip-git-repo-check".into(),
     ]);
-    args.extend(seal_args(
+    args.extend(sealed_model_args(
         spec.model,
         &developer_instructions(spec.actor_name),
+        catalog,
     ));
     if spec.purpose != TurnPurpose::DayReport {
         let mcp_config = spec.workspace.join(MCP_CONFIG);
@@ -244,6 +263,11 @@ pub fn build_exec_plan(program: &str, spec: &TurnSpec<'_>) -> Result<LaunchPlan>
         let url = mcp_url(&mcp_config)?;
         let server = format!("mcp_servers.{MCP_SERVER}");
         args.extend([
+            // Keep Daycare tools directly callable. The bundled 0.158 model
+            // otherwise defers them behind tool_search, whose use fails the
+            // foreign-tool receipt check.
+            "-c".into(),
+            MCP_EXPOSURE.into(),
             "-c".into(),
             format!("{server}.url={}", toml_string(&url)),
             "-c".into(),
@@ -357,6 +381,7 @@ mod tests {
                 purpose,
                 model: DEFAULT_CODEX_MODEL,
             },
+            &ws.join("daycare-models.json"),
         )
         .unwrap()
     }
@@ -405,6 +430,7 @@ mod tests {
             r#"mcp_servers.daycare.bearer_token_env_var="DAYCARE_DEVICE_TOKEN""#
         ));
         assert!(has_pair(a, "-c", "mcp_servers.daycare.required=true"));
+        assert!(has_pair(a, "-c", MCP_EXPOSURE));
         assert!(has_pair(
             a,
             "-c",
@@ -469,6 +495,7 @@ mod tests {
                 purpose: TurnPurpose::World,
                 model: DEFAULT_CODEX_MODEL,
             },
+            &ws.join("daycare-models.json"),
         )
         .unwrap_err();
         assert!(error.to_string().contains("fork"), "{error}");
@@ -507,6 +534,31 @@ mod tests {
     fn toml_strings_survive_quotes_and_newlines() {
         assert_eq!(toml_string(r#"a "b""#), r#""a \"b\"""#);
         assert_eq!(toml_string("l1\nl2"), r#""l1\nl2""#);
+    }
+
+    #[test]
+    fn every_turn_uses_the_same_catalog_override_as_preflight() {
+        for purpose in [
+            TurnPurpose::World,
+            TurnPurpose::PrivateHomecoming,
+            TurnPurpose::DayReport,
+        ] {
+            for mode in [
+                new_thread(),
+                SessionMode::Resume {
+                    session_id: ID.into(),
+                },
+            ] {
+                let plan = plan(purpose, mode);
+                let catalog = plan.cwd.join("daycare-models.json");
+                let proof = sealed_model_args(DEFAULT_CODEX_MODEL, "Pip", &catalog);
+                let setting = proof
+                    .iter()
+                    .find(|arg| arg.starts_with("model_catalog_json="))
+                    .unwrap();
+                assert!(has_pair(&plan.args, "-c", setting));
+            }
+        }
     }
 
     #[test]

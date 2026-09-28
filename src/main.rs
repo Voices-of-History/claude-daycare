@@ -1951,12 +1951,14 @@ fn visit_command(
             // should decide whether to read the local file.
             let mut record = VisitRecord::adopt(
                 layout,
-                &started.visit_id,
-                &active.identity.identity_id,
-                &active.identity.name,
-                budget,
-                instructions,
-                now_rfc3339(),
+                VisitRecord::open(
+                    &started.visit_id,
+                    &active.identity.identity_id,
+                    &active.identity.name,
+                    budget,
+                    instructions,
+                    now_rfc3339(),
+                ),
                 started.turns_used,
             );
             // The model is fixed at drop-off. Re-adopting a visit already in
@@ -2364,6 +2366,7 @@ impl VisitStartLock {
             .join(format!(".{}.start.lock", sanitize_segment(identity_id)));
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)?;
@@ -2385,6 +2388,7 @@ impl HomecomingLock {
             .with_extension("homecoming.lock");
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)?;
@@ -2515,9 +2519,11 @@ fn run_visit(
             agent.as_ref(),
             timeout,
             interval,
-            record,
-            must_report_end,
-            recovery_lock,
+            HomecomingDelivery {
+                record,
+                must_report_end,
+                lock: recovery_lock,
+            },
             out,
         );
     }
@@ -2687,9 +2693,11 @@ fn run_visit(
         agent.as_ref(),
         timeout,
         interval,
-        record,
-        true,
-        None,
+        HomecomingDelivery {
+            record,
+            must_report_end: true,
+            lock: None,
+        },
         out,
     )
 }
@@ -2728,17 +2736,26 @@ fn sync_visit_memories(layout: &Layout, client: &PlatformClient, active: &Active
     }
 }
 
+struct HomecomingDelivery {
+    record: VisitRecord,
+    must_report_end: bool,
+    lock: Option<HomecomingLock>,
+}
+
 fn finish_homecoming(
     layout: &Layout,
     active: &Active,
     agent: &dyn Agent,
     timeout: Duration,
     interval: Duration,
-    mut record: VisitRecord,
-    mut must_report_end: bool,
-    lock: Option<HomecomingLock>,
+    delivery: HomecomingDelivery,
     out: Out,
 ) -> Result<()> {
+    let HomecomingDelivery {
+        mut record,
+        mut must_report_end,
+        lock,
+    } = delivery;
     let _lock = match lock {
         Some(lock) => lock,
         None => HomecomingLock::acquire(layout, &record.visit_id)?,
@@ -4053,6 +4070,104 @@ fn status(
     Ok(())
 }
 
+/// The stream parser for an agent's turn archives, without the adapter (and
+/// its login) behind it: status only reads what is already on disk.
+fn archive_parser(kind: AgentKind) -> fn(&str) -> Result<StreamReceipt> {
+    match kind {
+        AgentKind::Claude => daycare_runner::stream::parse_stream,
+        AgentKind::Codex => daycare_runner::agent::codex::stream::parse,
+    }
+}
+
+/// The JSON key a session id is reported under: Claude's keeps its old name.
+fn session_key(kind: AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Claude => "claude_session_id",
+        _ => "agent_session_id",
+    }
+}
+
+fn latest_turn(
+    layout: &Layout,
+    session_id: Option<&str>,
+    parse: fn(&str) -> Result<StreamReceipt>,
+) -> Result<Option<(PathBuf, String)>> {
+    let Some(session_id) = session_id else {
+        return Ok(None);
+    };
+    let dir = layout.turns_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(None);
+    };
+    let mut newest: Option<(std::time::SystemTime, PathBuf, StreamReceipt)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(receipt) = std::fs::read_to_string(&path)
+            .map_err(Error::from)
+            .and_then(|text| parse(&text))
+        else {
+            continue;
+        };
+        if receipt.session_id != session_id {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if newest
+            .as_ref()
+            .map(|(current, _, _)| modified > *current)
+            .unwrap_or(true)
+        {
+            newest = Some((modified, path, receipt));
+        }
+    }
+
+    let Some((_, path, receipt)) = newest else {
+        return Ok(None);
+    };
+    let usage = if receipt.usage.is_empty() {
+        "usage unknown".to_string()
+    } else {
+        format!(
+            "in {} / out {} tokens",
+            describe(receipt.usage.input_tokens),
+            describe(receipt.usage.output_tokens)
+        )
+    };
+    let summary = format!(
+        "{} · {} · {} · {}",
+        if receipt.success { "success" } else { "failed" },
+        receipt.session_id,
+        usage,
+        receipt
+            .result_text
+            .as_deref()
+            .map(first_line)
+            .unwrap_or_else(|| "(no result text)".to_string())
+    );
+    Ok(Some((path, summary)))
+}
+
+fn describe(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn first_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.chars().count() > 120 {
+        format!("{}…", line.chars().take(120).collect::<String>())
+    } else {
+        line.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4679,103 +4794,5 @@ mod tests {
         .unwrap();
         assert!(credentials_in_fallback(&layout, "actor-1", "device-1"));
         let _ = std::fs::remove_dir_all(root);
-    }
-}
-
-/// The stream parser for an agent's turn archives, without the adapter (and
-/// its login) behind it: status only reads what is already on disk.
-fn archive_parser(kind: AgentKind) -> fn(&str) -> Result<StreamReceipt> {
-    match kind {
-        AgentKind::Claude => daycare_runner::stream::parse_stream,
-        AgentKind::Codex => daycare_runner::agent::codex::stream::parse,
-    }
-}
-
-/// The JSON key a session id is reported under: Claude's keeps its old name.
-fn session_key(kind: AgentKind) -> &'static str {
-    match kind {
-        AgentKind::Claude => "claude_session_id",
-        _ => "agent_session_id",
-    }
-}
-
-fn latest_turn(
-    layout: &Layout,
-    session_id: Option<&str>,
-    parse: fn(&str) -> Result<StreamReceipt>,
-) -> Result<Option<(PathBuf, String)>> {
-    let Some(session_id) = session_id else {
-        return Ok(None);
-    };
-    let dir = layout.turns_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(None);
-    };
-    let mut newest: Option<(std::time::SystemTime, PathBuf, StreamReceipt)> = None;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Ok(receipt) = std::fs::read_to_string(&path)
-            .map_err(Error::from)
-            .and_then(|text| parse(&text))
-        else {
-            continue;
-        };
-        if receipt.session_id != session_id {
-            continue;
-        }
-        let modified = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        if newest
-            .as_ref()
-            .map(|(current, _, _)| modified > *current)
-            .unwrap_or(true)
-        {
-            newest = Some((modified, path, receipt));
-        }
-    }
-
-    let Some((_, path, receipt)) = newest else {
-        return Ok(None);
-    };
-    let usage = if receipt.usage.is_empty() {
-        "usage unknown".to_string()
-    } else {
-        format!(
-            "in {} / out {} tokens",
-            describe(receipt.usage.input_tokens),
-            describe(receipt.usage.output_tokens)
-        )
-    };
-    let summary = format!(
-        "{} · {} · {} · {}",
-        if receipt.success { "success" } else { "failed" },
-        receipt.session_id,
-        usage,
-        receipt
-            .result_text
-            .as_deref()
-            .map(first_line)
-            .unwrap_or_else(|| "(no result text)".to_string())
-    );
-    Ok(Some((path, summary)))
-}
-
-fn describe(value: Option<u64>) -> String {
-    value
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn first_line(text: &str) -> String {
-    let line = text.lines().next().unwrap_or("").trim();
-    if line.chars().count() > 120 {
-        format!("{}…", line.chars().take(120).collect::<String>())
-    } else {
-        line.to_string()
     }
 }

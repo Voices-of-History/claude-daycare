@@ -1066,7 +1066,7 @@ fn enroll_then_turn_then_open_is_one_working_install() {
     let sessions: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(install.home.join("sessions.json")).unwrap())
             .unwrap();
-    let argv = support::recorded_argv(&install.claude_bin.parent().unwrap().to_path_buf());
+    let argv = support::recorded_argv(install.claude_bin.parent().unwrap());
     let assigned_session = argv
         .windows(2)
         .find(|pair| pair[0] == "--session-id")
@@ -1153,7 +1153,7 @@ fn a_second_turn_resumes_the_stored_session() {
         String::from_utf8_lossy(&turn.stderr)
     );
 
-    let argv = support::recorded_argv(&install.claude_bin.parent().unwrap().to_path_buf());
+    let argv = support::recorded_argv(install.claude_bin.parent().unwrap());
     assert!(
         argv.windows(2)
             .any(|pair| pair[0] == "--resume" && pair[1] == SESSION),
@@ -1366,7 +1366,7 @@ fn a_match_turn_routes_the_character_to_the_existing_match_tools() {
         String::from_utf8_lossy(&turn.stderr)
     );
 
-    let sent = support::recorded_stdin(&install.claude_bin.parent().unwrap().to_path_buf());
+    let sent = support::recorded_stdin(install.claude_bin.parent().unwrap());
     assert!(sent.contains("daycare_match_snapshot"), "{sent}");
     assert!(
         sent.contains("11111111-2222-4333-8444-555555555555"),
@@ -1401,12 +1401,12 @@ fn a_retired_match_prep_reason_gets_the_ordinary_world_profile() {
         String::from_utf8_lossy(&turn.stderr)
     );
 
-    let sent = support::recorded_stdin(&install.claude_bin.parent().unwrap().to_path_buf());
+    let sent = support::recorded_stdin(install.claude_bin.parent().unwrap());
     assert!(
         !sent.contains("11111111-2222-4333-8444-555555555555"),
         "{sent}"
     );
-    let argv = support::recorded_argv(&install.claude_bin.parent().unwrap().to_path_buf());
+    let argv = support::recorded_argv(install.claude_bin.parent().unwrap());
     assert!(argv
         .windows(2)
         .any(|pair| pair[0] == "--tools" && pair[1] == "ToolSearch"));
@@ -1430,7 +1430,7 @@ fn a_standalone_turn_does_not_join_an_activity_without_a_visit_scheduler() {
         String::from_utf8_lossy(&turn.stderr)
     );
 
-    let sent = support::recorded_stdin(&install.claude_bin.parent().unwrap().to_path_buf());
+    let sent = support::recorded_stdin(install.claude_bin.parent().unwrap());
     assert!(sent.contains("standalone Daycare free-play turn"), "{sent}");
     assert!(sent.contains("daycare_action_propose"), "{sent}");
     assert!(!sent.contains("daycare_match_join"), "{sent}");
@@ -1721,7 +1721,7 @@ fn a_visit_runs_a_turn_comes_home_and_writes_a_private_account() {
     // left cannot pace what it does with it. The remaining count itself is not
     // pasted in: it is stale the moment a turn completes, so the character is
     // pointed at the tool that reports it.
-    let sent = support::recorded_stdin_all(&install.claude_bin.parent().unwrap().to_path_buf());
+    let sent = support::recorded_stdin_all(install.claude_bin.parent().unwrap());
     assert!(sent.contains("Play a round of Tycoon"), "{sent}");
     assert!(sent.contains("daycare_identity_get"), "{sent}");
     assert!(
@@ -1867,7 +1867,7 @@ fn an_adopted_quick_check_opens_once_then_continues_the_same_mind() {
         String::from_utf8_lossy(&ran.stderr)
     );
 
-    let prompts = support::recorded_stdin_all(&install.claude_bin.parent().unwrap().to_path_buf());
+    let prompts = support::recorded_stdin_all(install.claude_bin.parent().unwrap());
     assert_eq!(
         prompts.matches("A new Daycare visit has begun").count(),
         1,
@@ -2432,7 +2432,7 @@ fn a_visit_end_off_the_poll_ends_the_visit_and_runs_no_turn() {
     // The turn budget was 5 and the poll would have served the recall forever:
     // if the loop treated an unrecognised or unhandled kind as "no work", it
     // would spin here instead of stopping. Reaching this line proves it stopped.
-    let launched = support::recorded_argv(&install.claude_bin.parent().unwrap().to_path_buf());
+    let launched = support::recorded_argv(install.claude_bin.parent().unwrap());
     assert!(
         launched.is_empty(),
         "claude was launched for a recall: {launched:?}"
@@ -2481,7 +2481,7 @@ fn a_malformed_visit_end_outcome_is_never_acknowledged_or_run() {
         }),
         "malformed visit_end was acknowledged"
     );
-    assert!(support::recorded_argv(&install.claude_bin.parent().unwrap().to_path_buf()).is_empty());
+    assert!(support::recorded_argv(install.claude_bin.parent().unwrap()).is_empty());
 }
 
 fn assert_canonical_reason_wins(test_name: &str, local: &str, canonical: &str) {

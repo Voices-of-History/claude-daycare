@@ -41,12 +41,7 @@ where
 }
 
 fn harness(label: &str, delay_secs: u64, exit_code: i32) -> Harness {
-    harness_with(
-        label,
-        |workspace| support::fixture_stream_from(workspace),
-        delay_secs,
-        exit_code,
-    )
+    harness_with(label, support::fixture_stream_from, delay_secs, exit_code)
 }
 
 fn run(h: &Harness, mode: SessionMode, timeout_secs: u64) -> daycare_runner::turn::TurnOutcome {
@@ -324,9 +319,7 @@ fn a_day_report_runs_tool_free_and_server_free() {
         .windows(2)
         .any(|pair| { pair[0] == "--mcp-config" && pair[1] == r#"{"mcpServers":{}}"# }));
     assert!(!argv.iter().any(|arg| arg == "--allowedTools"));
-    assert!(support::recorded_env(&h.dir)
-        .get("DAYCARE_DEVICE_TOKEN")
-        .is_none());
+    assert!(!support::recorded_env(&h.dir).contains_key("DAYCARE_DEVICE_TOKEN"));
 }
 
 /// A day-report child that came up with the server connected is the wrong
@@ -587,7 +580,8 @@ fn a_parent_made_shared_after_scaffolding_refuses_the_turn_before_spawn() {
     let h = harness("turn-unsafe-parent", 0, 0);
     std::fs::set_permissions(&h.dir, std::fs::Permissions::from_mode(0o1777)).unwrap();
     let error = run_turn(TurnRequest {
-        claude_bin: h.claude_bin.to_str().unwrap(),
+        agent: &ClaudeAgent::new(h.claude_bin.to_str().unwrap()),
+        actor_name: "Pip",
         workspace: &h.workspace,
         mode: SessionMode::Resume {
             session_id: SESSION.into(),
