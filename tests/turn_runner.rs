@@ -48,7 +48,6 @@ fn run(h: &Harness, mode: SessionMode, timeout_secs: u64) -> daycare_runner::tur
     run_turn(TurnRequest {
         agent: &ClaudeAgent::new(h.claude_bin.to_str().unwrap()),
         actor_name: "Pip",
-        token_ceiling: None,
         workspace: &h.workspace,
         mode,
         message: "A world turn has been requested for your character Pip.",
@@ -67,7 +66,6 @@ fn run_private(h: &Harness, message: &str) -> daycare_runner::turn::TurnOutcome 
     run_turn(TurnRequest {
         agent: &ClaudeAgent::new(h.claude_bin.to_str().unwrap()),
         actor_name: "Pip",
-        token_ceiling: None,
         workspace: &h.workspace,
         mode: SessionMode::Resume {
             session_id: SESSION.into(),
@@ -88,7 +86,6 @@ fn run_day_report(h: &Harness) -> daycare_runner::turn::TurnOutcome {
     run_turn(TurnRequest {
         agent: &ClaudeAgent::new(h.claude_bin.to_str().unwrap()),
         actor_name: "Pip",
-        token_ceiling: None,
         workspace: &h.workspace,
         mode: SessionMode::Resume {
             session_id: SESSION.into(),
@@ -336,7 +333,6 @@ fn a_day_report_rejects_a_child_with_tools_enabled() {
     let outcome = run_turn(TurnRequest {
         agent: &ClaudeAgent::new(h.claude_bin.to_str().unwrap()),
         actor_name: "Pip",
-        token_ceiling: None,
         workspace: &h.workspace,
         mode: SessionMode::Resume {
             session_id: SESSION.into(),
@@ -548,7 +544,6 @@ fn a_turn_uses_the_inspected_physical_workspace_behind_a_parent_symlink() {
     let outcome = run_turn(TurnRequest {
         agent: &ClaudeAgent::new(claude_bin.to_str().unwrap()),
         actor_name: "Pip",
-        token_ceiling: None,
         workspace: &workspace,
         mode: SessionMode::Resume {
             session_id: SESSION.into(),
@@ -839,7 +834,6 @@ fn a_missing_mcp_config_stops_the_turn_before_claude_starts() {
     let error = run_turn(TurnRequest {
         agent: &ClaudeAgent::new(h.claude_bin.to_str().unwrap()),
         actor_name: "Pip",
-        token_ceiling: None,
         workspace: &h.workspace,
         mode: SessionMode::Resume {
             session_id: SESSION.into(),
@@ -868,7 +862,6 @@ fn an_empty_device_token_is_refused_before_launch() {
     let error = run_turn(TurnRequest {
         agent: &ClaudeAgent::new(h.claude_bin.to_str().unwrap()),
         actor_name: "Pip",
-        token_ceiling: None,
         workspace: &h.workspace,
         mode: SessionMode::Resume {
             session_id: SESSION.into(),

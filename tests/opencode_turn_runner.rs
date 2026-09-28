@@ -148,6 +148,24 @@ fn disconnected_mcp_refuses_to_start_the_model() {
 }
 
 #[test]
+fn connected_preflight_does_not_validate_a_world_turn_with_no_tools() {
+    // Preflight says connected, but the actual run has only text and a
+    // successful step_finish, as when OpenCode drops MCP after preflight.
+    let h = Harness::new("world", "world-resume.jsonl");
+    let outcome = h.run(TurnPurpose::World, None).unwrap();
+    let receipt = outcome.receipt.as_ref().unwrap();
+    assert!(receipt.success);
+    assert!(receipt.tool_calls.is_empty());
+    assert!(h.dir.join("prompt").exists());
+    assert!(
+        !outcome.succeeded(),
+        "unproven world access passed as completed"
+    );
+    assert!(!outcome.held);
+    assert!(outcome.failure.unwrap().contains("no daycare tool"));
+}
+
+#[test]
 fn a_bash_call_fails_the_seal() {
     let h = Harness::new("bash", "world.jsonl");
     let outcome = h.run(TurnPurpose::World, None).unwrap();

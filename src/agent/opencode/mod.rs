@@ -42,7 +42,9 @@
 pub mod stream;
 
 use super::{Agent, AgentKind, TranscriptDelivery, TurnSpec};
-use crate::launch::{is_homecoming_tool, LaunchPlan, SessionMode, DEVICE_TOKEN_ENV, MCP_SERVER};
+use crate::launch::{
+    is_homecoming_tool, LaunchPlan, SessionMode, DEVICE_TOKEN_ENV, MCP_SERVER, MCP_TOOL_PREFIX,
+};
 use crate::meter::WeeklyMeter;
 use crate::paths::{
     create_private_dir, sanitize_segment, shell_quote, shell_quote_path, write_atomic, Layout,
@@ -819,6 +821,19 @@ pub fn verify_export_agents(text: &str, session_id: &str) -> Result<()> {
 fn verify_calls(receipt: &StreamReceipt, purpose: TurnPurpose, noun: &str) -> Result<()> {
     match purpose {
         TurnPurpose::World => {
+            // The preflight runs in a different process. OpenCode can lose
+            // MCP at launch and silently offer no tools, and its turn stream
+            // reports no available-tool list. Require an actual daycare call
+            // before accepting this turn, including a purported held turn.
+            if !receipt
+                .permitted_tool_calls
+                .iter()
+                .any(|name| name.starts_with(MCP_TOOL_PREFIX))
+            {
+                return Err(Error::new(format!(
+                    "OpenCode visit turn{noun} called no daycare tool; actual-turn MCP availability was not proven by preflight"
+                )));
+            }
             if let Some(name) = receipt
                 .tool_calls
                 .iter()

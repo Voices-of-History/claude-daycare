@@ -27,6 +27,12 @@ primary daycare agent, and MCP connectivity. The archived stream rejects
 foreign tools; session export must contain messages and identify every one as
 belonging to the daycare agent, catching fallback to `build`.
 
+World turns must also call at least one daycare tool. OpenCode can lose MCP
+between the separate preflight and actual turn, and its stream has no
+available-tool list. A successful text-only reply therefore fails validation
+instead of counting as a completed or held world turn. Homecoming and day
+reports keep their existing purpose-specific rules.
+
 Token usage includes input, output, reasoning, and cache tokens from each
 `step_finish`. The runner kills a running turn after the count exceeds the
 remaining visit cap and records the spend even if the process exits between

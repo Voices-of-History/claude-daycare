@@ -4705,7 +4705,7 @@ mod tests {
         let path = layout.turn_file("world");
         let fixture = include_str!("../tests/fixtures/opencode-1.18.33/world.jsonl");
         std::fs::write(&path, fixture).unwrap();
-        let receipt = adapter.parse_receipt(fixture).unwrap();
+        let receipt = daycare_runner::agent::opencode::stream::parse_stream(fixture).unwrap();
         let last = latest_turn(
             &layout,
             Some(&receipt.session_id),
