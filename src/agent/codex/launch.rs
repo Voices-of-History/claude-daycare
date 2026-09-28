@@ -230,6 +230,11 @@ pub fn build_exec_plan(program: &str, spec: &TurnSpec<'_>) -> Result<LaunchPlan>
             format!("{server}.startup_timeout_sec={MCP_STARTUP_TIMEOUT_SECS}"),
             "-c".into(),
             format!("{server}.required=true"),
+            // The owner authorized this visit's Daycare actions. Explicitly
+            // approve only this server; otherwise Codex's MCP default asks,
+            // and `approval_policy=never` rejects every call.
+            "-c".into(),
+            format!("{server}.default_tools_approval_mode=\"approve\""),
         ]);
         match spec.purpose {
             // Every daycare tool except the homecoming-only memory save.
@@ -372,6 +377,11 @@ mod tests {
             r#"mcp_servers.daycare.bearer_token_env_var="DAYCARE_DEVICE_TOKEN""#
         ));
         assert!(has_pair(a, "-c", "mcp_servers.daycare.required=true"));
+        assert!(has_pair(
+            a,
+            "-c",
+            r#"mcp_servers.daycare.default_tools_approval_mode="approve""#
+        ));
         assert!(has_pair(
             a,
             "-c",

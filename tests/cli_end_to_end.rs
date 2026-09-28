@@ -1668,9 +1668,12 @@ fn a_visit_runs_a_turn_comes_home_and_writes_a_private_account() {
     let opened: serde_json::Value = serde_json::from_str(&opened.body).unwrap();
     assert_eq!(opened["budget_turns"], 1);
     assert_eq!(opened["budget_usage_pct"], 2.0);
+    assert_eq!(opened["agent_kind"], "claude");
+    assert_eq!(opened["agent_model"], "sonnet");
     assert_eq!(opened["instructions"], "Play a round of Tycoon");
-    // Token and cost caps are local: only this process sees usage, and a
-    // server field nobody can check is worse than no field.
+    // No token cap was requested for this weekly-meter visit.
+    assert!(opened.get("budget_tokens").is_none(), "{opened}");
+    assert!(opened.get("budget_basis").is_none(), "{opened}");
     assert!(opened.get("tokens").is_none(), "{opened}");
     assert!(opened.get("budget").is_none(), "{opened}");
 

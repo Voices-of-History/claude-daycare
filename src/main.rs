@@ -1886,8 +1886,13 @@ fn visit_command(
             };
 
             let client = PlatformClient::new(&active.platform_url);
-            let started = match client.start_visit(active.token(), &budget, instructions.as_deref())
-            {
+            let started = match client.start_visit(
+                active.token(),
+                &budget,
+                instructions.as_deref(),
+                agent.kind(),
+                &model,
+            ) {
                 Ok(started) => started,
                 // The platform refuses a new generation while the last visit's
                 // recall sits unanswered. If this machine's record says that
@@ -1895,7 +1900,13 @@ fn visit_command(
                 // is tried once more; otherwise the platform's sentence stands.
                 Err(error) if error.http_status() == Some(409) => {
                     if settle_prior_visit_delivery(layout, &client, &active)? {
-                        client.start_visit(active.token(), &budget, instructions.as_deref())?
+                        client.start_visit(
+                            active.token(),
+                            &budget,
+                            instructions.as_deref(),
+                            agent.kind(),
+                            &model,
+                        )?
                     } else {
                         return Err(error);
                     }

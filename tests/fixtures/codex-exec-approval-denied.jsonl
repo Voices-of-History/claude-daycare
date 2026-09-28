@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01900000-0000-7000-8000-000000000001"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"mcp_tool_call","server":"daycare","tool":"daycare_identity_get","arguments":{},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"mcp_tool_call","server":"daycare","tool":"daycare_identity_get","arguments":{},"result":null,"error":{"message":"MCP tool call requires approval, but approval policy is never"},"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"I tried to check Pip’s identity and budget with the Daycare tool, but the tool call requires approval and this session’s approval policy is `never`, so I can’t access Daycare or record a move.\n\nI’ll stop here rather than inventing an activity outcome."}}
+{"type":"turn.completed","usage":{"input_tokens":19840,"cached_input_tokens":15872,"cache_write_input_tokens":0,"output_tokens":257,"reasoning_output_tokens":140}}

@@ -267,6 +267,44 @@ impl WeeklyMeter for AppServerMeter {
 mod tests {
     use super::*;
 
+    #[test]
+    #[cfg(unix)]
+    fn stdio_requests_include_params_and_follow_initialization() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::testdir::unique_dir("daycare-appserver");
+        let script = root.join("codex");
+        std::fs::write(
+            &script,
+            r#"#!/usr/bin/env python3
+import json, sys
+assert sys.argv[1:] == ['app-server']
+def read():
+    return json.loads(sys.stdin.readline())
+def reply(req, result):
+    print(json.dumps({'id': req['id'], 'result': result}), flush=True)
+init = read()
+assert init['method'] == 'initialize' and init['params']['clientInfo']['name'] == 'daycare-runner'
+reply(init, {})
+assert read()['method'] == 'initialized'
+req = read()
+assert req['method'] == 'account/read' and req['params'] == {}
+print(json.dumps({'method': 'notification'}), flush=True)
+reply(req, {'account': {'type': 'chatgpt', 'planType': 'pro'}})
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let command = CodexCommand {
+            program: script.to_string_lossy().into_owned(),
+            env_remove: vec![],
+            env: vec![],
+            cwd: root,
+        };
+        let mut server = AppServer::start(&command).unwrap();
+        let account = server.request("account/read", None).unwrap();
+        assert_eq!(check_account(&account).unwrap(), "pro");
+    }
+
     fn fixture() -> Value {
         serde_json::from_str(include_str!(
             "../../../tests/fixtures/codex-app-server.json"

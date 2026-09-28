@@ -668,16 +668,21 @@ impl PlatformClient {
 
     /// Open a visit for the identity the token belongs to.
     ///
-    /// Time and turn safeguards plus the user-facing weekly percentage are
-    /// sent so the hub can caption the visit accurately. The runner remains
-    /// the percentage enforcer because only it can read Claude's account meter.
+    /// Send the resolved agent/model and budget so the hub can label the visit
+    /// and enforce a token backstop. Percentage enforcement stays local because
+    /// only the runner can read the account meter.
     pub fn start_visit(
         &self,
         identity_token: &str,
         budget: &crate::visit::Budget,
         instructions: Option<&str>,
+        agent: AgentKind,
+        model: &str,
     ) -> Result<StartedVisit> {
-        let mut body = serde_json::json!({});
+        let mut body = serde_json::json!({
+            "agent_kind": agent.as_str(),
+            "agent_model": model,
+        });
         if let Some(seconds) = budget.wall_clock_secs {
             body["budget_seconds"] = serde_json::json!(seconds);
         }
@@ -686,6 +691,12 @@ impl PlatformClient {
         }
         if let Some(weekly_share) = budget.weekly_share {
             body["budget_usage_pct"] = serde_json::json!(weekly_share * 100.0);
+        }
+        if let Some(tokens) = budget.tokens {
+            body["budget_tokens"] = serde_json::json!(tokens);
+            // This cap is explicit or the no-meter default; it was never
+            // calculated from the subscription's weekly allowance.
+            body["budget_basis"] = serde_json::json!("fixed_fallback");
         }
         if let Some(instructions) = instructions {
             body["instructions"] = serde_json::json!(instructions);

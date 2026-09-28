@@ -50,7 +50,7 @@ echo "==> one-turn visit"
   | tee "$SCRATCH/visit.json"
 
 echo "==> what the platform saw"
-python3 - "$SCRATCH/state.json" "$SCRATCH/visit.json" "$AGENT" <<'PY'
+python3 - "$SCRATCH/state.json" "$SCRATCH/visit.json" "$AGENT" "$SCRATCH/home/turns/cmd-visit-1.jsonl" <<'PY'
 import json, sys
 state = json.load(open(sys.argv[1]))
 visit = json.loads(open(sys.argv[2]).read().strip().splitlines()[-1])
@@ -63,9 +63,17 @@ print("weekly usage:", visit.get("weekly_usage"))
 
 assert visit["ok"] is True, visit
 assert state["visits"] and state["visits"][0].get("budget_usage_pct") == 2.0
+assert state["visits"][0].get("agent_kind") == agent
+assert state["visits"][0].get("agent_model"), "visit model was not recorded"
 assert any(c["report"]["status"] == "completed" for c in state["completions"])
 assert state["visit_ends"], "the visit end was never reported"
 assert "report" in state["visit_reports"], "the day report was never delivered"
+assert state["actions"], "no action actually reached the Daycare referee"
+if agent == "codex":
+    items = [json.loads(line).get("item", {}) for line in open(sys.argv[4])]
+    assert any(i.get("type") == "mcp_tool_call" and i.get("server") == "daycare"
+               and i.get("status") == "completed" and i.get("result") is not None
+               for i in items), "no successful Daycare MCP call in the Codex stream"
 if agent != "claude":
     reports = [c["report"] for c in state["completions"]]
     assert any(r.get("agent_kind") == agent and r.get("agent_session_id") for r in reports), reports

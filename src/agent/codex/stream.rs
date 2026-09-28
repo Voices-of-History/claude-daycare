@@ -104,8 +104,21 @@ pub fn parse(stream: &str) -> Result<StreamReceipt> {
                         }
                         let name = format!("{MCP_TOOL_PREFIX}{tool}");
                         tool_calls.push(name.clone());
-                        if item.get("status").and_then(Value::as_str) == Some("declined") {
+                        let approval_denied = item
+                            .get("error")
+                            .and_then(|error| error.get("message"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|message| {
+                                message.contains("requires approval, but approval policy is never")
+                            });
+                        if item.get("status").and_then(Value::as_str) == Some("declined")
+                            || approval_denied
+                        {
                             denied_tool_calls.push(name);
+                            if approval_denied {
+                                failed = true;
+                                error_message = Some("Daycare MCP call requires approval; check the Codex server approval configuration".into());
+                            }
                         } else {
                             permitted_tool_calls.push(name);
                         }
@@ -117,7 +130,14 @@ pub fn parse(stream: &str) -> Result<StreamReceipt> {
             // `item.started` / `item.updated` carry partial items; the
             // completed form is the record. A started item that never
             // completed still had reach, though, so it counts.
-            Some("item.started") => {
+            Some("item.started") | Some("item.updated") => {
+                if let Some(item) = event.get("item") {
+                    if item.get("type").and_then(Value::as_str) == Some("mcp_tool_call")
+                        && item.get("server").and_then(Value::as_str) != Some(MCP_SERVER)
+                    {
+                        foreign_reach.push(format!("mcp server {:?}", item.get("server")));
+                    }
+                }
                 if let Some(kind) = event
                     .get("item")
                     .and_then(|item| item.get("type"))
@@ -302,4 +322,92 @@ fn mcp_result_text(item: &Value) -> String {
 
 fn string_at(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_captured_world_turn_preserves_tools_results_and_usage() {
+        let receipt = parse(include_str!(
+            "../../../tests/fixtures/codex-exec-world.jsonl"
+        ))
+        .unwrap();
+        assert!(receipt.success);
+        assert!(receipt.foreign_reach.is_empty());
+        assert!(receipt.denied_tool_calls.is_empty());
+        assert_eq!(
+            receipt.tool_calls,
+            [
+                "mcp__daycare__daycare_identity_get",
+                "mcp__daycare__daycare_world_snapshot",
+                "mcp__daycare__daycare_action_propose"
+            ]
+        );
+        assert_eq!(receipt.tool_calls, receipt.permitted_tool_calls);
+        assert_eq!(receipt.events.len(), 7);
+        assert!(
+            matches!(&receipt.events[5], TurnEvent::Returned { text, is_error: false, .. } if text.contains("\"accepted\": true"))
+        );
+        assert!(receipt.result_text.unwrap().contains("Mira looked up"));
+        assert_eq!(receipt.usage.input_tokens, Some(9577));
+        assert_eq!(receipt.usage.cache_read_input_tokens, Some(24576));
+        assert_eq!(receipt.usage.output_tokens, Some(282));
+    }
+
+    #[test]
+    fn a_captured_approval_refusal_is_not_a_successful_visit() {
+        let receipt = parse(include_str!(
+            "../../../tests/fixtures/codex-exec-approval-denied.jsonl"
+        ))
+        .unwrap();
+        assert!(!receipt.success);
+        assert!(receipt.permitted_tool_calls.is_empty());
+        assert_eq!(
+            receipt.denied_tool_calls,
+            ["mcp__daycare__daycare_identity_get"]
+        );
+        assert!(receipt
+            .events
+            .iter()
+            .any(|event| matches!(event, TurnEvent::Returned { is_error: true, .. })));
+    }
+
+    #[test]
+    fn foreign_reach_is_rejected_even_when_the_item_never_completes() {
+        for event_type in ["item.started", "item.updated", "item.completed"] {
+            for item in [
+                json!({"type":"mcp_tool_call", "server":"foreign", "tool":"read"}),
+                json!({"type":"command_execution", "command":"cat ~/.ssh/id_rsa"}),
+                json!({"type":"collab_tool_call", "tool":"spawn_agent"}),
+                json!({"type":"file_change"}),
+                json!({"type":"web_search"}),
+            ] {
+                let stream = format!(
+                    "{}\n{}\n{}",
+                    json!({"type":"thread.started","thread_id":"test"}),
+                    json!({"type":event_type,"item":item}),
+                    json!({"type":"turn.completed","usage":{}})
+                );
+                assert!(
+                    !parse(&stream).unwrap().foreign_reach.is_empty(),
+                    "{stream}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cached_and_reasoning_tokens_are_not_double_counted() {
+        let usage = turn_usage(
+            &json!({"input_tokens":100, "cached_input_tokens":60, "cache_write_input_tokens":10, "output_tokens":20, "reasoning_output_tokens":15}),
+        );
+        assert_eq!(usage.input_tokens, Some(30));
+        assert_eq!(usage.output_tokens, Some(20));
+        assert_eq!(usage.cache_read_input_tokens, Some(60));
+        assert_eq!(usage.cache_creation_input_tokens, Some(10));
+        assert_eq!(usage.reasoning_output_tokens, Some(15));
+    }
 }
