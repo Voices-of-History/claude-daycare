@@ -153,23 +153,165 @@ impl Layout {
     pub fn ensure_root(&self) -> Result<()> {
         create_private_dir(&self.root)?;
         create_private_dir(&self.turns_dir())?;
-        create_private_dir(&self.workspaces)?;
+        ensure_workspace_root(&self.workspaces)?;
         create_private_dir(&self.visits_dir())?;
         create_private_dir(&self.memories_dir())?;
         Ok(())
     }
 }
 
-/// Where workspaces go when nothing overrides them: a private directory in the
-/// OS temp area, which on macOS is already per-user and mode 0700, so no
-/// ancestor of a workspace is writable by another account. Losing it costs
-/// nothing — `Workspace::scaffold` rewrites every file it contains.
-///
-/// The one thing it must not be is a descendant of `$HOME`.
+/// Linux needs a runtime directory outside home, with no shared writable
+/// ancestor. A private child of /tmp still inherits /tmp/CLAUDE.md.
+#[cfg(target_os = "linux")]
 fn default_workspace_root() -> Result<PathBuf> {
-    let base = std::env::temp_dir();
-    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
-    Ok(base.join(format!("claude-daycare-{}", sanitize_segment(&user))))
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() })));
+    linux_workspace_root(&runtime)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_workspace_root(runtime: &Path) -> Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let invalid = || {
+        Error::new(format!(
+            "{} is not a safe runtime directory. Set XDG_RUNTIME_DIR to an existing, \
+         owned, mode 700 directory outside home, or DAYCARE_WORKSPACE_ROOT to a private \
+         directory outside home with no group/world-writable ancestors (not /tmp)",
+            runtime.display()
+        ))
+    };
+    let metadata = fs::symlink_metadata(runtime).map_err(|_| invalid())?;
+    if !runtime.is_absolute()
+        || !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o700
+    {
+        return Err(invalid());
+    }
+    let physical = fs::canonicalize(runtime)?;
+    if let Some(home) = std::env::var_os("HOME") {
+        if physical.starts_with(fs::canonicalize(home)?) {
+            return Err(invalid());
+        }
+    }
+    guard_workspace_ancestry(&physical)?;
+    Ok(physical.join("claude-daycare"))
+}
+
+/// Preserve the existing per-user macOS temporary-directory layout.
+#[cfg(not(target_os = "linux"))]
+fn default_workspace_root() -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let suffix = sanitize_segment(&std::env::var("USER").unwrap_or_else(|_| "user".to_string()));
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let suffix = unsafe { libc::geteuid() }.to_string();
+    #[cfg(not(unix))]
+    let suffix =
+        sanitize_segment(&std::env::var("USERNAME").unwrap_or_else(|_| "user".to_string()));
+    Ok(std::env::temp_dir().join(format!("claude-daycare-{suffix}")))
+}
+
+/// Check the physical ancestors before creating files and again before each
+/// child launch. Sticky directories are unsafe too: they permit new CLAUDE.md
+/// files. Same-user filesystem mutation remains outside the seal boundary.
+#[cfg(target_os = "linux")]
+pub(crate) fn guard_workspace_ancestry(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut existing = absolute.as_path();
+    loop {
+        match fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                existing = existing
+                    .parent()
+                    .ok_or_else(|| Error::new("workspace has no existing ancestor"))?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let physical = fs::canonicalize(existing)?;
+    // Check lexical parents too: a symlink in /tmp must not turn an unsafe
+    // write path into an apparently safe physical destination.
+    for dir in existing.ancestors().chain(physical.ancestors()) {
+        let metadata = fs::metadata(dir)?;
+        if !metadata.is_dir()
+            || metadata.mode() & 0o022 != 0
+            || (metadata.uid() != 0 && metadata.uid() != unsafe { libc::geteuid() })
+        {
+            return Err(Error::new(format!(
+                "refusing workspace ancestor {}: it must be a directory owned by you or root \
+                 and not writable by group or others, even with the sticky bit. \
+                 Use XDG_RUNTIME_DIR or DAYCARE_WORKSPACE_ROOT outside home and shared /tmp",
+                dir.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Create the workspace root if it is missing, then refuse it unless it is a
+/// real directory (not a symlink), owned by this user, with no group or other
+/// permissions. `lstat` comes first and nothing is chmod-ed: a directory that
+/// someone else created, or a symlink pointing into this user's files, must be
+/// refused, not "repaired" through.
+#[cfg(unix)]
+pub fn ensure_workspace_root(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    #[cfg(target_os = "linux")]
+    guard_workspace_ancestry(path.parent().unwrap_or(path))?;
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // Recursive so an explicit DAYCARE_WORKSPACE_ROOT may be nested; an
+            // existing directory is accepted here and judged below.
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path)?;
+        }
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    let refuse = |why: &str| {
+        Error::new(format!(
+            "refusing the workspace root {}: {why}. Daycare workspaces must sit in a directory \
+             only you can reach; remove it (or set DAYCARE_WORKSPACE_ROOT elsewhere) and retry",
+            path.display()
+        ))
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(refuse("it is a symlink"));
+    }
+    if !metadata.is_dir() {
+        return Err(refuse("it is not a directory"));
+    }
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let euid = unsafe { libc::geteuid() };
+    if metadata.uid() != euid {
+        return Err(refuse(&format!(
+            "it is owned by uid {}, not you (uid {euid})",
+            metadata.uid()
+        )));
+    }
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(refuse(&format!(
+            "its mode is {mode:03o}; it must be 700 (chmod 700 it if you made it)"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn ensure_workspace_root(path: &Path) -> Result<()> {
+    create_private_dir(path)
 }
 
 /// An actor id or command id becomes a directory/file name; keep it to
@@ -286,6 +428,123 @@ mod tests {
             );
         }
         assert!(root.is_absolute(), "{} must be absolute", root.display());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_workspace_root_is_created_private_and_refused_when_not_ours_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = crate::testdir::unique_dir("daycare-wsroot");
+        let root = base.join("claude-daycare-test");
+        ensure_workspace_root(&root).unwrap();
+        let mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        // Idempotent on a healthy root.
+        ensure_workspace_root(&root).unwrap();
+
+        // A loose mode is refused, not silently repaired.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = ensure_workspace_root(&root).unwrap_err();
+        assert!(error.to_string().contains("755"), "{error}");
+
+        // A symlink squatting the name is refused before anything follows it.
+        let target = base.join("elsewhere");
+        create_private_dir(&target).unwrap();
+        let link = base.join("claude-daycare-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let error = ensure_workspace_root(&link).unwrap_err();
+        assert!(error.to_string().contains("symlink"), "{error}");
+
+        // So is a file.
+        let file = base.join("claude-daycare-file");
+        fs::write(&file, "").unwrap();
+        assert!(ensure_workspace_root(&file).is_err());
+        fs::remove_dir_all(&base).ok();
+    }
+
+    /// Someone else's directory (root's /, the only one a test can rely on
+    /// existing and not being ours) is refused by owner.
+    #[cfg(unix)]
+    #[test]
+    fn a_workspace_root_owned_by_another_account_is_refused() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let error = ensure_workspace_root(Path::new("/")).unwrap_err();
+        assert!(error.to_string().contains("owned by uid 0"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_default_workspace_root_is_in_the_private_runtime_directory() {
+        let root = default_workspace_root().unwrap();
+        assert!(root.ends_with("claude-daycare"), "{}", root.display());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shared_workspace_ancestor_is_refused_before_creation() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = crate::testdir::unique_dir("daycare-shared-parent");
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o1777)).unwrap();
+        let root = base.join("private").join("workspaces");
+        let result = ensure_workspace_root(&root);
+        assert!(result.is_err(), "sticky shared ancestors must be refused");
+        assert!(!root.exists(), "refuse before creating workspace files");
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_root_rejects_missing_relative_symlinked_and_open_directories() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let runtime = crate::testdir::unique_dir("daycare-runtime");
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            linux_workspace_root(&runtime).unwrap(),
+            runtime.join("claude-daycare")
+        );
+        assert!(linux_workspace_root(&runtime.join("missing")).is_err());
+        assert!(linux_workspace_root(Path::new("relative-runtime")).is_err());
+        let link = runtime.join("link");
+        symlink(&runtime, &link).unwrap();
+        assert!(linux_workspace_root(&link).is_err());
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(linux_workspace_root(&runtime).is_err());
+        fs::remove_dir_all(runtime).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn physical_ancestry_cannot_be_hidden_by_a_safe_symlink_parent() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let base = crate::testdir::unique_dir("daycare-physical-parent");
+        let shared = base.join("shared");
+        let private = shared.join("private");
+        create_private_dir(&private).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777)).unwrap();
+        let link = base.join("link");
+        symlink(&private, &link).unwrap();
+        assert!(ensure_workspace_root(&link.join("workspaces")).is_err());
+        assert!(!private.join("workspaces").exists());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_shared_symlink_parent_cannot_point_writes_into_a_safe_directory() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let base = crate::testdir::unique_dir("daycare-lexical-parent");
+        let shared = base.join("shared");
+        let safe = base.join("safe");
+        create_private_dir(&shared).unwrap();
+        create_private_dir(&safe).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777)).unwrap();
+        let link = shared.join("link");
+        symlink(&safe, &link).unwrap();
+        assert!(ensure_workspace_root(&link.join("workspaces")).is_err());
+        assert!(!safe.join("workspaces").exists());
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

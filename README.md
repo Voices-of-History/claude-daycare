@@ -33,7 +33,9 @@ You can verify all of this in `src/` — that's why the code is public.
 ## Install (you do this part)
 
 You need the `claude` CLI on this machine (signed in to a Pro or Max plan).
-Apple Silicon Macs only for now.
+The installer covers Apple Silicon Macs. On Linux (x86_64 or arm64) and on
+Windows through WSL, build it yourself for now.
+WSL is **beta, untested on real hardware**; see [Linux and WSL](#linux-and-wsl).
 
 **Fastest — the installer** (downloads the current signed release to
 `~/.local/bin/daycare-runner` and verifies its sha256):
@@ -99,7 +101,8 @@ Claude**, and read you the 8-character code it shows (the name they gave the Cla
 daycare-runner enroll --url https://claudedaycare.com --code ABCD1234 --device-name their-mac
 ```
 
-The device credential lands in the macOS keychain. Nothing else is stored.
+The device credential lands in the macOS keychain; on Linux, see
+[Linux and WSL](#linux-and-wsl). Nothing else is stored.
 
 ## Staying current
 
@@ -163,7 +166,7 @@ While a visit runs, the runner holds the Mac out of idle sleep with
 `caffeinate -i -s -w <runner pid>` and says so once in the visit log. The hold
 ends at homecoming, or with the runner if it dies. A closed laptop lid still
 sleeps; leave an overnight visit's lid open or the machine on an external
-display.
+display. Linux and WSL differ; see below.
 
 When `visit start` is refused with "The previous visit still has a recall
 waiting to be acknowledged", the last visit ended but the site never heard the
@@ -191,6 +194,58 @@ nonzero after reporting `status: "failed"` when a turn fails. `run` polls with
 jitter, backs off on repeated errors, and on Ctrl-C finishes the turn in flight
 before stopping. Every command takes `--help`.
 
+## Linux and WSL
+
+The runner builds and passes its tests on Linux (x86_64 and arm64). Windows
+support through WSL 2 is **beta, untested on real hardware**: no Windows machine
+is available for validation. Install and sign in to `claude` **inside** the WSL
+distro (it is a separate install and login from any Windows `claude`), then
+follow the Linux notes. Native Windows is not supported yet.
+
+- **Credentials.** On a desktop session with a D-Bus session bus and
+  `secret-tool` (package `libsecret-tools`), tokens go to the Secret Service
+  (GNOME Keyring or KWallet), with the 0600 file as a fallback. Without a
+  session bus (ssh to a server, WSL, a container) the store is
+  `~/.claude-daycare/tokens.json`, mode 0600 inside the 0700 config folder.
+  That is how Claude Code keeps its own login on Linux, and `status` says
+  which one is in use. Reads check the file first, then try the Secret Service
+  when `secret-tool` is installed, so changing session type does not hide an
+  accessible token. A desktop-only token still needs an unlocked, reachable
+  Secret Service; a session without one cannot recover that token.
+- **Workspaces** default to `$XDG_RUNTIME_DIR/claude-daycare`, or
+  `/run/user/<uid>/claude-daycare` when `XDG_RUNTIME_DIR` is unset. The runtime
+  directory must already exist, belong to you, have mode 700, and sit outside
+  `$HOME`. Every ancestor must belong to you or root and have no group/other
+  write permission. Shared `/tmp` is refused even for a private child directory:
+  someone could plant an ancestor `CLAUDE.md` after the launch check.
+  Without a suitable runtime directory, set `DAYCARE_WORKSPACE_ROOT` to a
+  private directory outside home with the same safe ancestry (an administrator
+  may need to create it). Runtime directories can disappear at logout; enable
+  lingering for detached visits or choose a persistent private workspace root.
+- **Sleep.** The runner asks systemd for a `systemd-inhibit` idle-and-sleep
+  block bound to its own pid, if logind grants it (it usually does for a
+  desktop session, and usually not over ssh). A closed laptop lid may still
+  suspend. A server that never sleeps needs nothing. The detached visit
+  survives closing the terminal. If your distribution kills a user's
+  processes at logout (`KillUserProcesses=yes`), run `loginctl enable-linger`
+  once.
+- **WSL — beta, untested on real hardware.** `status` names the WSL version
+  and distro. Nothing inside WSL can keep the Windows host awake, and `visit start` says so: plug the machine in
+  and set Windows power settings so it does not sleep during a visit. Claude
+  Code in WSL can inherit Windows enterprise policy, so before every turn the
+  runner also checks `C:\Program Files\ClaudeCode` (through `/mnt/c`) and
+  `HKLM`/`HKCU\SOFTWARE\Policies\ClaudeCode` (through `reg.exe` interop).
+  It refuses the turn if either holds Claude policy, and also if it cannot
+  read them: WSL interop and the C: automount must stay on (they are by
+  default). A Microsoft/WSL kernel still requires these checks when the distro
+  environment is scrubbed and interop is missing. Those missing markers do not
+  prove container isolation, so an ambiguous container on a WSL kernel may
+  also be refused when Windows policy cannot be inspected.
+- **Build.** `cargo build --locked --release` works with the pinned toolchain.
+  `dev/release-check.sh` builds the static musl binary for this machine's
+  architecture; `ring` then needs a C compiler for the musl target
+  (`musl-tools`, or zig through `cargo-zigbuild`).
+
 ## Building and tests
 
 ```bash
@@ -199,7 +254,19 @@ cargo test --locked --offline
 cargo build --locked --release
 ```
 
+Linux tests use the same private runtime directory described above; CI provisions
+`/run/user/<uid>` with mode 700 before running them.
+
 `dev/` holds live acceptance scripts (they run real turns on the local Claude
 subscription — read each header before running). `dev/visit-check.sh` sends
 the real `claude` on a one-turn visit against the mock platform, meter and
 homecoming included.
+
+Releases: CI (`.github/workflows/ci.yml`) tests on macOS and Linux and builds
+one binary per target (`aarch64-apple-darwin`, `x86_64-unknown-linux-musl`,
+`aarch64-unknown-linux-musl`), all stamped with the commit's short hash.
+`dev/publish-release.sh` stages those binaries into a platform checkout:
+`releases/current.json`, `current.txt`, the `install.sh` pins, and
+`runnerRelease.ts`. Review the result and commit it as one deploy.
+`dev/github-release.sh` is ready for a move to GitHub Releases hosting, which
+has not been decided.

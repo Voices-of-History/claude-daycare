@@ -246,6 +246,10 @@ fn month_day(unix_secs: u64, utc_offset_secs: i64) -> (u32, u32) {
 
 /// This machine's UTC offset at a given instant, as Claude's screen uses it.
 fn local_utc_offset_secs(unix_secs: u64) -> i64 {
+    // libc marks `time_t` deprecated on musl because it will become 64-bit on
+    // 32-bit musl targets. The shipped musl targets are 64-bit, where it
+    // already is.
+    #[allow(deprecated)]
     let time = unix_secs as libc::time_t;
     // SAFETY: localtime_r only writes the caller-owned `tm`.
     unsafe {
@@ -735,7 +739,7 @@ impl MeterOutage {
 
 /// The meter folder, created empty and owner-only, as Claude will name it.
 fn prepare_meter_dir(layout: &Layout) -> Result<PathBuf> {
-    create_private_dir(layout.workspace_root())?;
+    crate::paths::ensure_workspace_root(layout.workspace_root())?;
     let dir = layout.usage_meter_dir();
     create_private_dir(&dir)?;
     if fs::read_dir(&dir)?.next().is_some() {

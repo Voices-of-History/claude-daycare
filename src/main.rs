@@ -16,7 +16,7 @@ use daycare_runner::identity::{
     project_root, token_account, Identities, Identity, IdentityKind, Selector,
 };
 use daycare_runner::keep_awake::{KeepAwake, HOLD_MESSAGE};
-use daycare_runner::keychain::{default_store, FileTokenStore, TokenStore};
+use daycare_runner::keychain::{default_store, CredentialBackend, FileTokenStore, TokenStore};
 use daycare_runner::launch::{
     is_homecoming_tool, match_turn_prompt, new_session_id, standalone_turn_prompt,
     visit_continuation_prompt, visit_turn_prompt, SessionMode, ALLOWED_TURN_MODELS,
@@ -1014,11 +1014,39 @@ fn enroll(
     Ok(())
 }
 
+/// What `visit start` promises about sleep, per platform. Under WSL the
+/// honest answer is that nothing here can hold the Windows host awake.
+fn visit_sleep_note() -> &'static str {
+    if daycare_runner::wsl::detect().is_some() {
+        return daycare_runner::wsl::HOST_SLEEP_MESSAGE;
+    }
+    if cfg!(target_os = "macos") {
+        "The runner keeps this Mac from idle sleep until the visit comes home. \
+         A closed laptop lid or logging out still ends it."
+    } else {
+        "The runner asks systemd to block idle sleep and suspend until the visit comes home, \
+         where logind allows it (it usually does not over ssh; a server that never sleeps needs \
+         nothing). A closed laptop lid may still suspend it. If logging out ends your \
+         processes here, run `loginctl enable-linger` once."
+    }
+}
+
+/// The machine's hostname, from `gethostname(2)` rather than `/bin/hostname`,
+/// which minimal Linux images do not ship.
 fn default_device_name() -> Option<String> {
-    std::process::Command::new("/bin/hostname")
-        .output()
+    let mut buffer = [0u8; 256];
+    // SAFETY: the buffer is valid for its whole length; gethostname writes at
+    // most that many bytes and the result is cut at the first NUL below.
+    let status = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+    if status != 0 {
+        return None;
+    }
+    let end = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    std::str::from_utf8(&buffer[..end])
         .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
 }
@@ -1985,7 +2013,7 @@ fn visit_command(
             // visit died before it ever polled. `setsid` makes it a session
             // leader with no controlling terminal, so only the machine sleeping
             // or the user logging out ends it, as the message below promises.
-            // The child then holds the Mac out of idle sleep for the visit's
+            // The child then holds the machine out of idle sleep for the visit's
             // lifetime (`KeepAwake` in `run_visit`); a closed lid still sleeps.
             #[cfg(unix)]
             unsafe {
@@ -2002,6 +2030,7 @@ fn visit_command(
                 .spawn()
                 .map_err(|error| Error::new(format!("could not start the visit: {error}")))?;
             let pid = child.id();
+            let sleep_note = visit_sleep_note();
 
             // Do not let a simultaneous `start` observe the parent's temporary
             // reservation and then race the child. The child records its own pid
@@ -2050,6 +2079,7 @@ fn visit_command(
                     "budget": record.budget,
                     "pid": pid,
                     "log": log_path,
+                    "sleep_note": sleep_note,
                 }),
                 || {
                     println!("{} is at daycare.", record.identity_name);
@@ -2061,10 +2091,7 @@ fn visit_command(
                         "  recall: daycare-runner visit recall --visit {}",
                         record.visit_id
                     );
-                    println!(
-                        "\nThe runner keeps this Mac from idle sleep until the visit comes home."
-                    );
-                    println!("A closed laptop lid or logging out still ends it.");
+                    println!("\n{sleep_note}");
                 },
             );
             Ok(())
@@ -3735,6 +3762,77 @@ fn credentials_in_fallback(layout: &Layout, identity_id: &str, device_id: &str) 
     .any(|account| matches!(fallback.read(account), Ok(Some(_))))
 }
 
+/// The `status` credentials line: a short JSON value and the sentence a
+/// person reads.
+fn describe_credentials(
+    backend: CredentialBackend,
+    in_fallback: bool,
+    file: &std::path::Path,
+) -> (String, String) {
+    match (backend, backend.system_store_name()) {
+        (CredentialBackend::FileByOverride, _) => (
+            "plain file".to_string(),
+            format!(
+                "PLAIN FILE (forced by {}) — not the system credential store",
+                daycare_runner::keychain::TOKEN_FILE_ENV
+            ),
+        ),
+        (_, Some(name)) if in_fallback => (
+            "file fallback".to_string(),
+            format!(
+                "FILE FALLBACK ({}) — the {name} refused a write; token at rest on disk (0600)",
+                file.display()
+            ),
+        ),
+        (_, Some(name)) => (name.to_string(), name.to_string()),
+        (_, None) => (
+            "file".to_string(),
+            format!(
+                "file {} (0600, in the 0700 config folder) — no session bus here, so no \
+                 Secret Service; Claude Code keeps its own Linux login the same way",
+                file.display()
+            ),
+        ),
+    }
+}
+
+struct HostDescription {
+    json: serde_json::Value,
+    text: String,
+}
+
+/// What kind of machine this is, for `status`. WSL is worth naming: the
+/// Windows host can sleep under a visit, and Windows-side Claude policy
+/// applies inside the distro.
+fn describe_host() -> HostDescription {
+    let os = std::env::consts::OS;
+    match daycare_runner::wsl::detect() {
+        Some(wsl) => HostDescription {
+            json: json!({
+                "os": os,
+                "wsl": {
+                    "version": wsl.version,
+                    "distro": wsl.distro,
+                    "interop": wsl.interop,
+                },
+            }),
+            text: format!(
+                "{} — the Windows host can still sleep under a visit; keep it plugged in and \
+                 awake",
+                wsl.describe()
+            ),
+        },
+        None => HostDescription {
+            json: json!({ "os": os, "wsl": null }),
+            text: match os {
+                "macos" => "macOS".to_string(),
+                "linux" => "Linux".to_string(),
+                other => other.to_string(),
+            },
+        },
+    }
+}
+
 fn status(layout: &Layout, store: &dyn TokenStore, which: &Which, out: Out) -> Result<()> {
     let config = Config::load(layout)?;
     let mut identities = Identities::load(layout)?;
@@ -3760,21 +3858,18 @@ fn status(layout: &Layout, store: &dyn TokenStore, which: &Which, out: Out) -> R
         .iter()
         .find(|visit| visit.is_active() && visit.identity_id == active.identity.identity_id);
 
-    // Where the credentials actually live, stated plainly: the file store is a
-    // downgrade and a reader should never have to infer it from a path. Three
-    // states, because the resilient store can park a token in the 0600 file
-    // when the keychain refuses a write — a machine in that state must not be
-    // reported as "keychain" (2026-08-28 gate polish).
-    let downgraded = std::env::var_os(daycare_runner::keychain::TOKEN_FILE_ENV).is_some();
-    let in_fallback = !downgraded
+    // Where the credentials actually live, stated plainly. A forced file store
+    // is a downgrade and a reader should never have to infer it from a path.
+    // The resilient store can park a token in the 0600 file when the system
+    // store refuses a write — a machine in that state must not be reported as
+    // "keychain" (2026-08-28 gate polish). A Linux machine with no session bus
+    // uses the file on purpose, which is not a failure and gets no alarm.
+    let backend = CredentialBackend::detect();
+    let in_fallback = backend.system_store_name().is_some()
         && credentials_in_fallback(layout, &active.identity.identity_id, &config.device_id);
-    let credentials_json = if downgraded {
-        "plain file"
-    } else if in_fallback {
-        "file fallback"
-    } else {
-        "macOS keychain"
-    };
+    let (credentials_json, credentials_text) =
+        describe_credentials(backend, in_fallback, &layout.fallback_token_file());
+    let host = describe_host();
 
     out.emit(
         json!({
@@ -3785,6 +3880,7 @@ fn status(layout: &Layout, store: &dyn TokenStore, which: &Which, out: Out) -> R
             "workspace": active.workspace.dir,
             "scaffolded": active.workspace.is_scaffolded(),
             "credentials": credentials_json,
+            "host": host.json,
             "claude_session_id": session,
             "active_visit": live_visit.map(|visit| visit.visit_id.clone()),
             "last_turn": last.as_ref().map(|(path, summary)| json!({
@@ -3807,22 +3903,8 @@ fn status(layout: &Layout, store: &dyn TokenStore, which: &Which, out: Out) -> R
                     "MISSING — run enroll again"
                 }
             );
-            println!(
-                "credentials: {}",
-                if downgraded {
-                    format!(
-                        "PLAIN FILE (downgraded by {}) — not the keychain",
-                        daycare_runner::keychain::TOKEN_FILE_ENV
-                    )
-                } else if in_fallback {
-                    format!(
-                        "FILE FALLBACK ({}) — the keychain refused a write; token at rest on disk (0600)",
-                        layout.fallback_token_file().display()
-                    )
-                } else {
-                    "macOS keychain".to_string()
-                }
-            );
+            println!("credentials: {credentials_text}");
+            println!("host:        {}", host.text);
             println!("session:     {}", session.unwrap_or("none yet"));
             println!(
                 "visit:       {}",
@@ -4336,6 +4418,44 @@ mod tests {
             evaluate_auth_status(r#"{"loggedIn":true,"subscriptionType":null}"#),
             AuthStatusVerdict::Unknown(_)
         ));
+    }
+
+    #[test]
+    fn the_default_device_name_is_this_machines_hostname() {
+        let expected = std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .ok()
+            .map(|name| name.trim().to_string());
+        let name = default_device_name();
+        assert!(name.as_deref().is_some_and(|name| !name.is_empty()));
+        if let Some(expected) = expected {
+            assert_eq!(name.as_deref(), Some(expected.as_str()));
+        }
+    }
+
+    #[test]
+    fn credentials_are_described_without_naming_a_store_the_machine_lacks() {
+        let file = std::path::Path::new("/home/u/.claude-daycare/tokens.json");
+        let (json, text) = describe_credentials(CredentialBackend::File, false, file);
+        assert_eq!(json, "file");
+        assert!(!text.contains("keychain") && !text.contains("!!"), "{text}");
+        assert!(text.contains("0600"), "{text}");
+
+        let (json, text) = describe_credentials(CredentialBackend::SecretService, true, file);
+        assert_eq!(json, "file fallback");
+        assert!(text.contains("Secret Service refused a write"), "{text}");
+
+        let (json, _) = describe_credentials(CredentialBackend::SecretService, false, file);
+        assert_eq!(json, "Secret Service");
+
+        let (json, text) = describe_credentials(CredentialBackend::MacKeychain, false, file);
+        assert_eq!(
+            (json.as_str(), text.as_str()),
+            ("macOS keychain", "macOS keychain")
+        );
+
+        let (json, text) = describe_credentials(CredentialBackend::FileByOverride, false, file);
+        assert_eq!(json, "plain file");
+        assert!(text.contains("DAYCARE_TOKEN_FILE"), "{text}");
     }
 
     #[test]

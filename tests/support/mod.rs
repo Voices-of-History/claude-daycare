@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 /// The same fixture-path helper the unit tests use, included rather than copied
 /// so uniqueness has one implementation on both sides of the test boundary.
 #[path = "../../src/testdir.rs"]
-mod testdir;
+pub mod testdir;
 
 #[derive(Debug, Clone)]
 pub struct RecordedRequest {
@@ -191,9 +191,9 @@ pub fn no_claude_path(root: &PathBuf) -> String {
     // mistake harmless but invisible — the detached poller's exit code is
     // observed by nobody, so the test still passes and the next author learns
     // nothing. `Install`'s Drop reads this marker and fails the test.
-    std::fs::write(
+    testdir::write_executable(
         &shim,
-        format!(
+        &format!(
             "#!/bin/sh\n\
              printf '%s\\n' \"$*\" >> {marker}\n\
              echo 'refusing to run: this test launched the real claude.' >&2\n\
@@ -201,13 +201,7 @@ pub fn no_claude_path(root: &PathBuf) -> String {
              exit 97\n",
             marker = claude_marker(root).display()
         ),
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
+    );
     format!("{}:/usr/bin:/bin", bin.display())
 }
 
@@ -334,12 +328,7 @@ exit {exit_code}
         dayreport_stream_file = dayreport_stream_file.display(),
         exit_code = exit_code
     );
-    std::fs::write(&script, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
+    testdir::write_executable(&script, &body);
     script
 }
 
@@ -390,12 +379,7 @@ sed "s/18f44c2e-ff64-4e94-a89d-bdbeaa9ab9f7/$assigned_session/g" "{stream_file}"
         record = dir.join("call").display(),
         stream_file = stream_file.display(),
     );
-    std::fs::write(&script, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
+    testdir::write_executable(&script, &body);
     script
 }
 

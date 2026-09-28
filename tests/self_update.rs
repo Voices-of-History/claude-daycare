@@ -5,7 +5,13 @@
 
 mod support;
 
-use daycare_runner::self_update::{sha256_hex, update, Outcome, TARGET};
+use daycare_runner::self_update::{release_target, sha256_hex, update, Outcome, TARGET};
+
+/// This binary's key in `current.json` (a Linux `-gnu` test build reads the
+/// musl entry).
+fn key() -> String {
+    release_target(TARGET)
+}
 use std::path::{Path, PathBuf};
 use support::{scratch_dir, MockPlatform, Response};
 
@@ -78,7 +84,7 @@ fn an_old_release_is_replaced_and_the_new_build_installs_the_skill() {
                     serde_json::json!({
                         "release": "new1",
                         "targets": {
-                            TARGET: { "url": build_url(base), "sha256": sha },
+                            (key()): { "url": build_url(base), "sha256": sha },
                             "some-other-target": { "url": "https://x.test/y", "sha256": "0".repeat(64) },
                         },
                     })
@@ -138,7 +144,7 @@ fn the_current_release_downloads_nothing() {
         |_| {
             Some(manifest(
                 "same",
-                TARGET,
+                &key(),
                 "https://x.test/never",
                 &"a".repeat(64),
             ))
@@ -166,7 +172,7 @@ fn a_checksum_mismatch_replaces_nothing() {
     let exe = installed_runner(&dir);
     let binary = fake_release(&dir, "new1");
     let platform = serve(
-        |base| Some(manifest("new1", TARGET, &build_url(base), &"b".repeat(64))),
+        |base| Some(manifest("new1", &key(), &build_url(base), &"b".repeat(64))),
         None,
         binary,
     );
@@ -182,7 +188,7 @@ fn a_build_that_does_not_report_the_promised_release_replaces_nothing() {
     let binary = fake_release(&dir, "something-else");
     let sha = sha256_hex(binary.as_bytes());
     let platform = serve(
-        move |base| Some(manifest("new1", TARGET, &build_url(base), &sha)),
+        move |base| Some(manifest("new1", &key(), &build_url(base), &sha)),
         None,
         binary,
     );
@@ -211,7 +217,7 @@ fn a_release_without_this_target_says_what_it_carries() {
         String::new(),
     );
     let error = update(&platform.base_url, Some("old0"), &exe, &mut |_| {}).unwrap_err();
-    assert!(error.message().contains(TARGET), "{error}");
+    assert!(error.message().contains(&key()), "{error}");
     assert!(error.message().contains("riscv64-unknown-none"), "{error}");
 }
 

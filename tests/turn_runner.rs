@@ -574,6 +574,39 @@ fn a_turn_uses_the_inspected_physical_workspace_behind_a_parent_symlink() {
             .to_string()));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parent_made_shared_after_scaffolding_refuses_the_turn_before_spawn() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = harness("turn-unsafe-parent", 0, 0);
+    std::fs::set_permissions(&h.dir, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    let error = run_turn(TurnRequest {
+        claude_bin: h.claude_bin.to_str().unwrap(),
+        workspace: &h.workspace,
+        mode: SessionMode::Resume {
+            session_id: SESSION.into(),
+        },
+        message: "A world turn has been requested.",
+        device_token: TOKEN,
+        archive_path: &h.archive,
+        timeout: Duration::from_secs(30),
+        purpose: TurnPurpose::World,
+        model: daycare_runner::launch::DEFAULT_TURN_MODEL,
+        mcp_settle: Duration::ZERO,
+    })
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("refusing workspace ancestor"),
+        "{error}"
+    );
+    assert!(!h.archive.exists(), "refuse before creating a turn archive");
+    assert!(
+        !h.dir.join("call.argv").exists(),
+        "refuse before spawning the turn"
+    );
+    std::fs::remove_dir_all(h.dir).unwrap();
+}
+
 #[test]
 fn the_device_token_reaches_the_child_only_through_the_environment() {
     let h = harness("turn-token", 0, 0);

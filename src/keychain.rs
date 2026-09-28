@@ -16,10 +16,29 @@ const SECURITY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Run a child process with a hard deadline, feeding it `stdin_data` if given.
 /// On expiry the child is killed and the call fails with "timed out".
+#[cfg(test)]
 fn run_with_deadline(
+    command: Command,
+    stdin_data: Option<&[u8]>,
+    deadline: Duration,
+) -> Result<std::process::Output> {
+    run_helper_with_deadline(
+        command,
+        stdin_data,
+        deadline,
+        "keychain helper",
+        "the credential store is likely showing an unlock prompt this process cannot answer",
+    )
+}
+
+/// The general form: `what` names the helper in errors, and `timeout_hint`
+/// says why it probably hung. Also used for Windows interop calls under WSL.
+pub(crate) fn run_helper_with_deadline(
     mut command: Command,
     stdin_data: Option<&[u8]>,
     deadline: Duration,
+    what: &str,
+    timeout_hint: &str,
 ) -> Result<std::process::Output> {
     command
         .stdin(if stdin_data.is_some() {
@@ -31,7 +50,7 @@ fn run_with_deadline(
         .stderr(Stdio::piped());
     let mut child = command
         .spawn()
-        .map_err(|error| Error::new(format!("could not run keychain helper: {error}")))?;
+        .map_err(|error| Error::new(format!("could not run {what}: {error}")))?;
     if let Some(data) = stdin_data {
         let mut stdin = child
             .stdin
@@ -49,8 +68,7 @@ fn run_with_deadline(
             let _ = child.kill();
             let _ = child.wait();
             return Err(Error::new(format!(
-                "keychain call timed out after {}s — macOS is likely showing a \
-                 keychain prompt this process cannot answer",
+                "{what} timed out after {}s — {timeout_hint}",
                 deadline.as_secs()
             )));
         }
@@ -61,7 +79,13 @@ fn run_with_deadline(
 fn run_security(args: &[&str], stdin_data: Option<&[u8]>) -> Result<std::process::Output> {
     let mut command = Command::new("/usr/bin/security");
     command.args(args);
-    run_with_deadline(command, stdin_data, SECURITY_TIMEOUT)
+    run_helper_with_deadline(
+        command,
+        stdin_data,
+        SECURITY_TIMEOUT,
+        "keychain call",
+        "macOS is likely showing a keychain prompt this process cannot answer",
+    )
 }
 
 /// Whether the keychain holds any item for `service`. Attribute lookup only —
@@ -161,34 +185,247 @@ fn exit_code(status: &std::process::ExitStatus) -> String {
 }
 
 /// Env var naming a 0600 JSON file to hold device tokens instead of the
-/// keychain. The test harness sets it so no test can write to the real
-/// keychain; it is also the fallback on machines without `security(1)`.
+/// system credential store. The test harness sets it so no test can write to
+/// the real keychain or Secret Service.
 pub const TOKEN_FILE_ENV: &str = "DAYCARE_TOKEN_FILE";
 
-/// The store this machine should use. `fallback_file` is where the resilient
-/// wrapper parks a token the keychain refused (normally
-/// `~/.claude-daycare/tokens.json`, inside the 0700 config root).
-///
-/// Selecting the file store via `DAYCARE_TOKEN_FILE` is a **downgrade**: it
-/// takes the device token out of the keychain and leaves it at rest on disk.
-/// That is a weakening of hard rule 6, so it is never silent — every process
-/// that resolves a store this way says so on stderr, and `status` prints the
-/// active store.
-pub fn default_store(fallback_file: PathBuf) -> Box<dyn TokenStore> {
-    match std::env::var_os(TOKEN_FILE_ENV) {
-        Some(path) => {
-            let store = FileTokenStore::new(PathBuf::from(path));
-            warn_token_file_downgrade(&store.path);
-            Box::new(store)
+/// Which store `default_store` picks on this machine, so `status` and `enroll`
+/// can describe it without guessing from a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialBackend {
+    /// macOS keychain via `security(1)`, with the 0600 file as a fallback.
+    MacKeychain,
+    /// Linux Secret Service via `secret-tool`, with the 0600 file as a fallback.
+    SecretService,
+    /// The 0600 file under the 0700 config root, chosen on purpose: a Linux
+    /// session with no bus writes here, while reads can still try Secret
+    /// Service. This is where Claude Code keeps its own
+    /// login on Linux (`~/.claude/.credentials.json`, 0600), so it adds no new
+    /// kind of exposure.
+    File,
+    /// The 0600 file, forced by `DAYCARE_TOKEN_FILE`. On a machine that has a
+    /// credential store this is a downgrade, and it is said so.
+    FileByOverride,
+}
+
+impl CredentialBackend {
+    /// What this machine will use, with no side effects.
+    pub fn detect() -> CredentialBackend {
+        if std::env::var_os(TOKEN_FILE_ENV).is_some() {
+            return CredentialBackend::FileByOverride;
         }
-        None => Box::new(ResilientStore::new(
-            MacKeychain,
-            FileTokenStore::new(fallback_file),
-        )),
+        if cfg!(target_os = "macos") {
+            return CredentialBackend::MacKeychain;
+        }
+        match secret_tool_binary() {
+            Some(_) if session_bus_available() => CredentialBackend::SecretService,
+            _ => CredentialBackend::File,
+        }
+    }
+
+    /// The name of the system store, when there is one. `None` means the file
+    /// is the store, not a fallback from it.
+    pub fn system_store_name(self) -> Option<&'static str> {
+        match self {
+            CredentialBackend::MacKeychain => Some("macOS keychain"),
+            CredentialBackend::SecretService => Some("Secret Service"),
+            CredentialBackend::File | CredentialBackend::FileByOverride => None,
+        }
     }
 }
 
-/// Keychain-first store that can never lose a token to a keychain failure.
+/// The store this machine should use. `fallback_file` is the 0600 token file
+/// (normally `~/.claude-daycare/tokens.json`, inside the 0700 config root):
+/// the write destination on Linux without a session bus, and elsewhere the
+/// place the resilient wrapper parks a token the system store refused. Linux
+/// reads check both stores when secret-tool is installed.
+///
+/// Selecting the file store via `DAYCARE_TOKEN_FILE` on a machine that has a
+/// system store is a **downgrade** of hard rule 6, so it is never silent —
+/// every process that resolves a store this way says so on stderr, and
+/// `status` prints the active store.
+pub fn default_store(fallback_file: PathBuf) -> Box<dyn TokenStore> {
+    match CredentialBackend::detect() {
+        CredentialBackend::FileByOverride => {
+            let path = PathBuf::from(std::env::var_os(TOKEN_FILE_ENV).unwrap_or_default());
+            let store = FileTokenStore::new(path);
+            warn_token_file_downgrade(&store.path);
+            Box::new(store)
+        }
+        CredentialBackend::MacKeychain => Box::new(ResilientStore::new(
+            MacKeychain,
+            FileTokenStore::new(fallback_file),
+        )),
+        backend @ (CredentialBackend::SecretService | CredentialBackend::File) => linux_store(
+            fallback_file,
+            secret_tool_binary(),
+            backend == CredentialBackend::SecretService,
+        ),
+    }
+}
+
+/// Both Linux session types read both stores. The file wins when present:
+/// an SSH enrollment may have replaced an older desktop credential. A
+/// successful desktop write removes the file through ResilientStore.
+fn linux_store(file: PathBuf, secret_tool: Option<PathBuf>, desktop: bool) -> Box<dyn TokenStore> {
+    match secret_tool {
+        Some(binary) => Box::new(LinuxStore {
+            stores: ResilientStore::new(SecretToolStore::new(binary), FileTokenStore::new(file)),
+            desktop,
+        }),
+        None => Box::new(FileTokenStore::new(file)),
+    }
+}
+
+struct LinuxStore {
+    stores: ResilientStore<SecretToolStore, FileTokenStore>,
+    desktop: bool,
+}
+
+impl TokenStore for LinuxStore {
+    fn store(&self, account: &str, token: &str) -> Result<()> {
+        if self.desktop {
+            self.stores.store(account, token)
+        } else {
+            self.stores.fallback.store(account, token)
+        }
+    }
+
+    fn read(&self, account: &str) -> Result<Option<String>> {
+        if let Some(token) = self.stores.fallback.read(account)? {
+            return Ok(Some(token));
+        }
+        // A missing/unavailable bus is a miss in a headless session. Trying
+        // secret-tool still allows a reachable store to recover an enrollment.
+        self.stores.primary.read(account).or_else(
+            |error| {
+                if self.desktop {
+                    Err(error)
+                } else {
+                    Ok(None)
+                }
+            },
+        )
+    }
+
+    fn delete(&self, account: &str) -> Result<()> {
+        self.stores.delete(account)
+    }
+
+    fn location(&self) -> String {
+        if self.desktop {
+            self.stores.location()
+        } else {
+            format!(
+                "{} (also reads Secret Service when reachable)",
+                self.stores.fallback.location()
+            )
+        }
+    }
+}
+
+/// A session bus is what `secret-tool` talks to. Without one (ssh into a
+/// headless box, cron, WSL, a container), new tokens go to the file. Reads
+/// still try Secret Service when the file has no token.
+fn session_bus_available() -> bool {
+    std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|value| !value.is_empty())
+}
+
+/// `secret-tool` from libsecret-tools, looked up in the usual system
+/// directories only, never a relative or user-writable PATH entry.
+fn secret_tool_binary() -> Option<PathBuf> {
+    [
+        "/usr/bin/secret-tool",
+        "/bin/secret-tool",
+        "/usr/local/bin/secret-tool",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|path| path.is_file())
+}
+
+/// Linux Secret Service (GNOME Keyring, KWallet) through `secret-tool`. The
+/// token goes in on stdin, never argv: `secret-tool store` reads the secret
+/// from a non-tty stdin up to EOF and stores it as-is, so no newline is sent.
+/// A locked collection can raise an unlock prompt nobody can answer from a
+/// detached visit, so every call has the same deadline as the macOS keychain.
+pub struct SecretToolStore {
+    binary: PathBuf,
+}
+
+impl SecretToolStore {
+    pub fn new(binary: impl Into<PathBuf>) -> Self {
+        SecretToolStore {
+            binary: binary.into(),
+        }
+    }
+
+    fn run(&self, args: &[&str], stdin_data: Option<&[u8]>) -> Result<std::process::Output> {
+        let mut command = Command::new(&self.binary);
+        command.args(args);
+        run_helper_with_deadline(
+            command,
+            stdin_data,
+            SECURITY_TIMEOUT,
+            "secret-tool call",
+            "the Secret Service is likely locked and showing an unlock prompt this \
+             process cannot answer",
+        )
+    }
+}
+
+impl TokenStore for SecretToolStore {
+    fn store(&self, account: &str, token: &str) -> Result<()> {
+        let label = format!("Claude Daycare ({account})");
+        let output = self.run(
+            &[
+                "store", "--label", &label, "service", SERVICE, "account", account,
+            ],
+            Some(token.as_bytes()),
+        )?;
+        if !output.status.success() {
+            return Err(Error::new(format!(
+                "Secret Service write failed (secret-tool exit {})",
+                exit_code(&output.status)
+            )));
+        }
+        Ok(())
+    }
+
+    fn read(&self, account: &str) -> Result<Option<String>> {
+        let output = self.run(&["lookup", "service", SERVICE, "account", account], None)?;
+        if !output.status.success() {
+            // `lookup` exits 1 both for "no such item" (silently) and for a
+            // bus or unlock failure (with a message). Only the second is an
+            // error: the resilient wrapper then tries the file.
+            if output.stderr.iter().any(|byte| !byte.is_ascii_whitespace()) {
+                return Err(Error::new(format!(
+                    "Secret Service read failed (secret-tool exit {})",
+                    exit_code(&output.status)
+                )));
+            }
+            return Ok(None);
+        }
+        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if token.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(token))
+    }
+
+    fn delete(&self, account: &str) -> Result<()> {
+        // Best-effort, as on macOS: an absent item is not an error.
+        let _ = self.run(&["clear", "service", SERVICE, "account", account], None);
+        Ok(())
+    }
+
+    fn location(&self) -> String {
+        format!("Secret Service (secret-tool, service {SERVICE})")
+    }
+}
+
+/// System-store-first store (keychain or Secret Service) that can never lose a
+/// token to a failure of that store.
 ///
 /// By the time `store` runs during enroll, the server has already burned the
 /// one-time pairing code — so "the keychain hung or errored" must degrade to
@@ -220,9 +457,10 @@ impl<P: TokenStore, F: TokenStore> TokenStore for ResilientStore<P, F> {
             }
             Err(error) => {
                 eprintln!(
-                    "!! keychain write failed: {error}\n\
+                    "!! {} write failed: {error}\n\
                      !! Storing the token in {} instead so pairing is not lost.\n\
                      !! It is 0600, but it is on disk at rest.",
+                    self.primary.location(),
                     self.fallback.location()
                 );
                 self.fallback.store(account, token)
@@ -264,16 +502,18 @@ fn warn_token_file_downgrade(path: &Path) {
     WARNED.call_once(|| {
         eprintln!(
             "!! {TOKEN_FILE_ENV} is set: the device token is stored in a plain file,\n\
-             !! not the macOS keychain. It is 0600, but it is on disk at rest.\n\
+             !! not the system credential store. It is 0600, but it is on disk at rest.\n\
              !!   file: {}\n\
-             !! Unset {TOKEN_FILE_ENV} to use the keychain.",
+             !! Unset {TOKEN_FILE_ENV} to use the system store.",
             path.display()
         );
     });
 }
 
-/// Owner-only JSON file. Weaker than the keychain — the token is at rest on
-/// disk — so it is used only when explicitly requested.
+/// Owner-only JSON file under the 0700 config root. Weaker than a keychain —
+/// the token is at rest on disk — so on macOS, and on Linux desktops with a
+/// Secret Service, it is only a fallback or an explicit override. On a Linux
+/// machine without a session bus it is the store.
 pub struct FileTokenStore {
     path: PathBuf,
 }
@@ -448,6 +688,141 @@ mod tests {
         let output = run_with_deadline(command, None, Duration::from_secs(5)).unwrap();
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+    }
+
+    /// A stand-in `secret-tool` that keeps each account in a file, records its
+    /// argv, and fails loudly when `broken` exists (a locked or absent bus).
+    fn fake_secret_tool(dir: &Path) -> PathBuf {
+        let script = dir.join("secret-tool");
+        let body = format!(
+            r#"#!/bin/sh
+dir='{dir}'
+echo "$*" >> "$dir/argv"
+if [ -e "$dir/broken" ]; then echo "Cannot autolaunch D-Bus" >&2; exit 1; fi
+cmd="$1"; shift
+# service claude-daycare account <acct> (store has --label <label> first)
+[ "$cmd" = store ] && shift 2
+acct="$4"
+case "$cmd" in
+  store) cat > "$dir/item-$acct" ;;
+  lookup) [ -e "$dir/item-$acct" ] || exit 1; cat "$dir/item-$acct" ;;
+  clear) rm -f "$dir/item-$acct" ;;
+esac
+"#,
+            dir = dir.display()
+        );
+        crate::testdir::write_executable(&script, &body);
+        script
+    }
+
+    #[test]
+    fn secret_tool_store_round_trips_with_the_token_only_on_stdin() {
+        let dir = crate::testdir::unique_dir("daycare-secret-tool");
+        let store = SecretToolStore::new(fake_secret_tool(&dir));
+        assert_eq!(store.read("device:d1").unwrap(), None);
+        store.store("device:d1", "tok-secret-value").unwrap();
+        // Stored byte-for-byte: no trailing newline sneaks into the secret.
+        assert_eq!(
+            std::fs::read(dir.join("item-device:d1")).unwrap(),
+            b"tok-secret-value"
+        );
+        assert_eq!(
+            store.read("device:d1").unwrap().as_deref(),
+            Some("tok-secret-value")
+        );
+        store.delete("device:d1").unwrap();
+        assert_eq!(store.read("device:d1").unwrap(), None);
+        let argv = std::fs::read_to_string(dir.join("argv")).unwrap();
+        assert!(
+            !argv.contains("tok-secret-value"),
+            "token reached argv: {argv}"
+        );
+        assert!(argv.contains("service claude-daycare account device:d1"));
+    }
+
+    #[test]
+    fn a_broken_secret_service_falls_back_to_the_file_without_losing_the_token() {
+        let dir = crate::testdir::unique_dir("daycare-secret-tool-broken");
+        std::fs::write(dir.join("broken"), "").unwrap();
+        let store = ResilientStore::new(
+            SecretToolStore::new(fake_secret_tool(&dir)),
+            FileTokenStore::new(dir.join("tokens.json")),
+        );
+        // A read error is an error, not "no token": the wrapper must try the file.
+        assert!(store.primary.read("device:d1").is_err());
+        store.store("device:d1", "tok-parked").unwrap();
+        assert_eq!(
+            store.read("device:d1").unwrap().as_deref(),
+            Some("tok-parked")
+        );
+        assert!(store.location().starts_with("Secret Service"));
+    }
+
+    #[test]
+    fn linux_tokens_survive_switching_between_desktop_and_headless_sessions() {
+        let dir = crate::testdir::unique_dir("daycare-session-switch");
+        let binary = fake_secret_tool(&dir);
+        let file = dir.join("tokens.json");
+        let desktop = linux_store(file.clone(), Some(binary.clone()), true);
+        let headless = linux_store(file.clone(), Some(binary), false);
+        desktop.store("device:d1", "desktop-token").unwrap();
+        assert!(!file.exists());
+        assert_eq!(
+            headless.read("device:d1").unwrap().as_deref(),
+            Some("desktop-token")
+        );
+        // A headless write must beat an older Secret Service copy in either session.
+        headless.store("device:d1", "headless-token").unwrap();
+        assert_eq!(
+            desktop.read("device:d1").unwrap().as_deref(),
+            Some("headless-token")
+        );
+        assert_eq!(
+            headless.read("device:d1").unwrap().as_deref(),
+            Some("headless-token")
+        );
+        // Desktop reads the file even when Secret Service is unavailable.
+        std::fs::write(dir.join("broken"), "").unwrap();
+        assert_eq!(
+            desktop.read("device:d1").unwrap().as_deref(),
+            Some("headless-token")
+        );
+        assert_eq!(headless.read("absent").unwrap(), None);
+        std::fs::remove_file(dir.join("broken")).unwrap();
+        desktop.store("device:d1", "rotated-token").unwrap();
+        assert_eq!(FileTokenStore::new(file).read("device:d1").unwrap(), None);
+        assert_eq!(
+            headless.read("device:d1").unwrap().as_deref(),
+            Some("rotated-token")
+        );
+        headless.delete("device:d1").unwrap();
+        assert_eq!(desktop.read("device:d1").unwrap(), None);
+    }
+
+    #[test]
+    fn a_desktop_session_can_read_a_headless_only_enrollment() {
+        let dir = crate::testdir::unique_dir("daycare-headless-first");
+        let file = dir.join("tokens.json");
+        linux_store(file.clone(), None, false)
+            .store("device:d1", "file-token")
+            .unwrap();
+        let desktop = linux_store(file, Some(fake_secret_tool(&dir)), true);
+        assert_eq!(
+            desktop.read("device:d1").unwrap().as_deref(),
+            Some("file-token")
+        );
+    }
+
+    #[test]
+    fn the_file_store_is_chosen_when_there_is_no_session_bus() {
+        // The detection itself reads the process environment, which tests share;
+        // assert only the part that does not depend on it.
+        assert_eq!(CredentialBackend::File.system_store_name(), None);
+        assert_eq!(CredentialBackend::FileByOverride.system_store_name(), None);
+        assert!(CredentialBackend::SecretService
+            .system_store_name()
+            .unwrap()
+            .contains("Secret Service"));
     }
 
     #[test]

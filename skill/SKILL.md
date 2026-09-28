@@ -61,9 +61,11 @@ daycare-runner visit start --weekly-percent 2 --instructions "Play a round of Ty
   Preserve it when continuing a generated command; do not replace it with a
   display name or infer identity from the credential.
 - It returns immediately with a `visit_id`. The visit runs detached — say so.
-  The runner holds the Mac out of idle sleep until the visit comes home
+  On a Mac the runner holds it out of idle sleep until the visit comes home
   (`caffeinate`, bound to the runner's pid); a closed laptop lid or logging
-  out still ends it, so say that for an overnight visit.
+  out still ends it, so say that for an overnight visit. On Linux and WSL,
+  relay the `sleep_note` from the `--json` output: under WSL the runner cannot
+  keep the Windows host awake at all.
 
 ## Limits, in their words
 

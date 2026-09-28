@@ -3,7 +3,7 @@
 //! build never updating. These need binaries stamped with a release id, so
 //! the test builds two (`old0`, `new1`) into its own target dir once.
 
-use daycare_runner::self_update::{sha256_hex, TARGET};
+use daycare_runner::self_update::{release_target, sha256_hex, TARGET};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -61,9 +61,12 @@ impl Site {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let binary = std::fs::read(&builds().new).unwrap();
+        // Source-built Linux runners request the published musl target, not
+        // their local gnu build triple.
+        let target = release_target(TARGET);
         let manifest = serde_json::json!({
             "release": "new1",
-            "targets": { TARGET: { "url": format!("{base}/releases/new1"), "sha256": sha256_hex(&binary) } },
+            "targets": { target: { "url": format!("{base}/releases/new1"), "sha256": sha256_hex(&binary) } },
         })
         .to_string();
         let seen = Arc::new(Mutex::new(Vec::new()));

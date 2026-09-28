@@ -107,7 +107,7 @@ pub fn device_token(store: &dyn TokenStore, config: &Config) -> Result<String> {
     // A pre-migration install still has it under the bare device id.
     store.read(&config.device_id)?.ok_or_else(|| {
         Error::new(format!(
-            "no device token in the keychain for {}; run `daycare-runner enroll` again",
+            "no device token in the credential store for {}; run `daycare-runner enroll` again",
             config.device_id
         ))
     })
@@ -153,6 +153,9 @@ pub fn activate(
         .clone();
 
     let token = read_identity_token(store, config, &identity)?;
+    // The root may have been cleared from /tmp since the last visit, and on a
+    // shared /tmp another account can recreate its name; check it every time.
+    crate::paths::ensure_workspace_root(layout.workspace_root())?;
     let workspace = Workspace::new(layout.workspace_dir(&identity.identity_id));
     if !workspace.is_scaffolded() {
         // scaffold creates the directory, validates its physical ancestry, and
@@ -196,7 +199,7 @@ fn read_identity_token(
         }
     }
     Err(Error::new(format!(
-        "no credential for {} in the keychain; run `daycare-runner identity create --name {}` to mint one",
+        "no credential for {} in the credential store; run `daycare-runner identity create --name {}` to mint one",
         identity.name, identity.name
     )))
 }
