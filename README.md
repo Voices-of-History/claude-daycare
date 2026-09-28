@@ -206,14 +206,20 @@ then follow the Linux notes. Native Windows is not supported yet.
   session bus (ssh to a server, WSL, a container) the store is
   `~/.claude-daycare/tokens.json`, mode 0600 inside the 0700 config folder.
   That is how Claude Code keeps its own login on Linux, and `status` says
-  which one is in use. A token saved to the Secret Service is not readable
-  from a session with no bus, so pair from the same kind of session you will
-  run visits from.
-- **Workspaces** default to `/tmp/claude-daycare-<uid>` (or under `$TMPDIR`).
-  The runner refuses the folder unless it is a real directory owned by you
-  with mode 700, so another account on a shared machine cannot plant it. If
-  something clears `/tmp` between visits, the runner recreates it. Set
-  `DAYCARE_WORKSPACE_ROOT` to put workspaces elsewhere (never under `$HOME`).
+  which one is in use. Reads check the file first, then try the Secret Service
+  when `secret-tool` is installed, so changing session type does not hide an
+  accessible token. A desktop-only token still needs an unlocked, reachable
+  Secret Service; a session without one cannot recover that token.
+- **Workspaces** default to `$XDG_RUNTIME_DIR/claude-daycare`, or
+  `/run/user/<uid>/claude-daycare` when `XDG_RUNTIME_DIR` is unset. The runtime
+  directory must already exist, belong to you, have mode 700, and sit outside
+  `$HOME`. Every ancestor must belong to you or root and have no group/other
+  write permission. Shared `/tmp` is refused even for a private child directory:
+  someone could plant an ancestor `CLAUDE.md` after the launch check.
+  Without a suitable runtime directory, set `DAYCARE_WORKSPACE_ROOT` to a
+  private directory outside home with the same safe ancestry (an administrator
+  may need to create it). Runtime directories can disappear at logout; enable
+  lingering for detached visits or choose a persistent private workspace root.
 - **Sleep.** The runner asks systemd for a `systemd-inhibit` idle-and-sleep
   block bound to its own pid, if logind grants it (it usually does for a
   desktop session, and usually not over ssh). A closed laptop lid may still
@@ -242,6 +248,9 @@ cargo fmt --check
 cargo test --locked --offline
 cargo build --locked --release
 ```
+
+Linux tests use the same private runtime directory described above; CI provisions
+`/run/user/<uid>` with mode 700 before running them.
 
 `dev/` holds live acceptance scripts (they run real turns on the local Claude
 subscription — read each header before running). `dev/visit-check.sh` sends

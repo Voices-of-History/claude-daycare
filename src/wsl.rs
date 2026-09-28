@@ -50,11 +50,8 @@ pub const HOST_SLEEP_MESSAGE: &str = "This is WSL: the runner cannot keep the Wi
      If Windows sleeps, the visit stops until it wakes. Plug it in and set Windows power \
      settings so it does not sleep while a visit runs.";
 
-/// `Some` when this process runs inside WSL. Any one signal is enough: the
-/// kernel release names Microsoft, `WSL_DISTRO_NAME` is set, or the interop
-/// binfmt entry exists. Environment variables alone are not trusted to be
-/// present (sudo, cron and systemd units drop them), which is why the kernel
-/// string comes first.
+/// A Microsoft kernel plus a distro marker identifies WSL. Docker Desktop
+/// shares the kernel but does not expose the distro's Windows interop/policy.
 pub fn detect() -> Option<WslInfo> {
     if !cfg!(target_os = "linux") {
         return None;
@@ -78,7 +75,7 @@ fn detect_from(
     let release = osrelease.unwrap_or("").to_ascii_lowercase();
     let kernel_says_wsl = release.contains("microsoft") || release.contains("wsl");
     let distro = distro.filter(|name| !name.trim().is_empty());
-    if !kernel_says_wsl && distro.is_none() && !interop_entry {
+    if !kernel_says_wsl || (distro.is_none() && !interop_entry) {
         return None;
     }
     // WSL2 kernels are "…-microsoft-standard-WSL2"; WSL1 reports a fake
@@ -268,10 +265,24 @@ mod tests {
 
     #[test]
     fn wsl_is_still_detected_when_the_environment_was_scrubbed() {
-        let info = detect_from(Some("5.15.0-microsoft-standard-WSL2"), None, false).unwrap();
+        let info = detect_from(Some("5.15.0-microsoft-standard-WSL2"), None, true).unwrap();
         assert_eq!(info.distro, None);
-        assert!(!info.interop);
-        assert!(info.describe().contains("interop OFF"));
+        assert!(info.interop);
+        let no_interop = detect_from(
+            Some("5.15.0-microsoft-standard-WSL2"),
+            Some("Ubuntu".into()),
+            false,
+        )
+        .unwrap();
+        assert!(no_interop.describe().contains("interop OFF"));
+    }
+
+    #[test]
+    fn docker_on_a_wsl_kernel_is_not_a_wsl_distro() {
+        assert_eq!(
+            detect_from(Some("5.15.0-microsoft-standard-WSL2"), None, false),
+            None
+        );
     }
 
     /// A fake Windows drive: `Program Files`, and a `reg.exe` that prints the

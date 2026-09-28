@@ -198,8 +198,8 @@ pub enum CredentialBackend {
     /// Linux Secret Service via `secret-tool`, with the 0600 file as a fallback.
     SecretService,
     /// The 0600 file under the 0700 config root, chosen on purpose: a Linux
-    /// machine with no session bus (a headless server, WSL, a container) has
-    /// no credential store to use. This is where Claude Code keeps its own
+    /// session with no bus writes here, while reads can still try Secret
+    /// Service. This is where Claude Code keeps its own
     /// login on Linux (`~/.claude/.credentials.json`, 0600), so it adds no new
     /// kind of exposure.
     File,
@@ -236,8 +236,9 @@ impl CredentialBackend {
 
 /// The store this machine should use. `fallback_file` is the 0600 token file
 /// (normally `~/.claude-daycare/tokens.json`, inside the 0700 config root):
-/// the whole store on a Linux machine without a session bus, and elsewhere the
-/// place the resilient wrapper parks a token the system store refused.
+/// the write destination on Linux without a session bus, and elsewhere the
+/// place the resilient wrapper parks a token the system store refused. Linux
+/// reads check both stores when secret-tool is installed.
 ///
 /// Selecting the file store via `DAYCARE_TOKEN_FILE` on a machine that has a
 /// system store is a **downgrade** of hard rule 6, so it is never silent —
@@ -255,20 +256,77 @@ pub fn default_store(fallback_file: PathBuf) -> Box<dyn TokenStore> {
             MacKeychain,
             FileTokenStore::new(fallback_file),
         )),
-        CredentialBackend::SecretService => match secret_tool_binary() {
-            Some(binary) => Box::new(ResilientStore::new(
-                SecretToolStore::new(binary),
-                FileTokenStore::new(fallback_file),
-            )),
-            None => Box::new(FileTokenStore::new(fallback_file)),
-        },
-        CredentialBackend::File => Box::new(FileTokenStore::new(fallback_file)),
+        backend @ (CredentialBackend::SecretService | CredentialBackend::File) => linux_store(
+            fallback_file,
+            secret_tool_binary(),
+            backend == CredentialBackend::SecretService,
+        ),
+    }
+}
+
+/// Both Linux session types read both stores. The file wins when present:
+/// an SSH enrollment may have replaced an older desktop credential. A
+/// successful desktop write removes the file through ResilientStore.
+fn linux_store(file: PathBuf, secret_tool: Option<PathBuf>, desktop: bool) -> Box<dyn TokenStore> {
+    match secret_tool {
+        Some(binary) => Box::new(LinuxStore {
+            stores: ResilientStore::new(SecretToolStore::new(binary), FileTokenStore::new(file)),
+            desktop,
+        }),
+        None => Box::new(FileTokenStore::new(file)),
+    }
+}
+
+struct LinuxStore {
+    stores: ResilientStore<SecretToolStore, FileTokenStore>,
+    desktop: bool,
+}
+
+impl TokenStore for LinuxStore {
+    fn store(&self, account: &str, token: &str) -> Result<()> {
+        if self.desktop {
+            self.stores.store(account, token)
+        } else {
+            self.stores.fallback.store(account, token)
+        }
+    }
+
+    fn read(&self, account: &str) -> Result<Option<String>> {
+        if let Some(token) = self.stores.fallback.read(account)? {
+            return Ok(Some(token));
+        }
+        // A missing/unavailable bus is a miss in a headless session. Trying
+        // secret-tool still allows a reachable store to recover an enrollment.
+        self.stores.primary.read(account).or_else(
+            |error| {
+                if self.desktop {
+                    Err(error)
+                } else {
+                    Ok(None)
+                }
+            },
+        )
+    }
+
+    fn delete(&self, account: &str) -> Result<()> {
+        self.stores.delete(account)
+    }
+
+    fn location(&self) -> String {
+        if self.desktop {
+            self.stores.location()
+        } else {
+            format!(
+                "{} (also reads Secret Service when reachable)",
+                self.stores.fallback.location()
+            )
+        }
     }
 }
 
 /// A session bus is what `secret-tool` talks to. Without one (ssh into a
-/// headless box, cron, WSL, a container) every call would fail, so the file
-/// store is used instead of a store that cannot work.
+/// headless box, cron, WSL, a container), new tokens go to the file. Reads
+/// still try Secret Service when the file has no token.
 fn session_bus_available() -> bool {
     std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|value| !value.is_empty())
 }
@@ -698,6 +756,61 @@ esac
             Some("tok-parked")
         );
         assert!(store.location().starts_with("Secret Service"));
+    }
+
+    #[test]
+    fn linux_tokens_survive_switching_between_desktop_and_headless_sessions() {
+        let dir = crate::testdir::unique_dir("daycare-session-switch");
+        let binary = fake_secret_tool(&dir);
+        let file = dir.join("tokens.json");
+        let desktop = linux_store(file.clone(), Some(binary.clone()), true);
+        let headless = linux_store(file.clone(), Some(binary), false);
+        desktop.store("device:d1", "desktop-token").unwrap();
+        assert!(!file.exists());
+        assert_eq!(
+            headless.read("device:d1").unwrap().as_deref(),
+            Some("desktop-token")
+        );
+        // A headless write must beat an older Secret Service copy in either session.
+        headless.store("device:d1", "headless-token").unwrap();
+        assert_eq!(
+            desktop.read("device:d1").unwrap().as_deref(),
+            Some("headless-token")
+        );
+        assert_eq!(
+            headless.read("device:d1").unwrap().as_deref(),
+            Some("headless-token")
+        );
+        // Desktop reads the file even when Secret Service is unavailable.
+        std::fs::write(dir.join("broken"), "").unwrap();
+        assert_eq!(
+            desktop.read("device:d1").unwrap().as_deref(),
+            Some("headless-token")
+        );
+        assert_eq!(headless.read("absent").unwrap(), None);
+        std::fs::remove_file(dir.join("broken")).unwrap();
+        desktop.store("device:d1", "rotated-token").unwrap();
+        assert_eq!(FileTokenStore::new(file).read("device:d1").unwrap(), None);
+        assert_eq!(
+            headless.read("device:d1").unwrap().as_deref(),
+            Some("rotated-token")
+        );
+        headless.delete("device:d1").unwrap();
+        assert_eq!(desktop.read("device:d1").unwrap(), None);
+    }
+
+    #[test]
+    fn a_desktop_session_can_read_a_headless_only_enrollment() {
+        let dir = crate::testdir::unique_dir("daycare-headless-first");
+        let file = dir.join("tokens.json");
+        linux_store(file.clone(), None, false)
+            .store("device:d1", "file-token")
+            .unwrap();
+        let desktop = linux_store(file, Some(fake_secret_tool(&dir)), true);
+        assert_eq!(
+            desktop.read("device:d1").unwrap().as_deref(),
+            Some("file-token")
+        );
     }
 
     #[test]

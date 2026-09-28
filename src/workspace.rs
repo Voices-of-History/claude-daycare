@@ -430,6 +430,8 @@ impl Workspace {
                 physical_workspace.display()
             )));
         }
+        #[cfg(target_os = "linux")]
+        crate::paths::guard_workspace_ancestry(&physical_workspace)?;
         // The workspace's top-level CLAUDE.md is ours. Every other documented
         // project-memory source in the cwd is external to the companion.
         for candidate in [

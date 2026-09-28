@@ -27,7 +27,15 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 /// killed run at a since-recycled pid cannot leak into a later fixture.
 pub fn unique_path(prefix: &str) -> PathBuf {
     let seq = NEXT.fetch_add(1, Ordering::Relaxed);
-    cleared(std::env::temp_dir().join(format!("{prefix}-{}-{seq}", std::process::id())))
+    // Linux workspace tests must exercise the real ancestry checks, so /tmp
+    // cannot host fixtures. CI provisions this standard runtime directory.
+    #[cfg(target_os = "linux")]
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() })));
+    #[cfg(not(target_os = "linux"))]
+    let base = std::env::temp_dir();
+    cleared(base.join(format!("{prefix}-{}-{seq}", std::process::id())))
 }
 
 /// Removes anything already at `path`, so a fixture never inherits a directory

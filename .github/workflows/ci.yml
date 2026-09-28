@@ -45,6 +45,13 @@ jobs:
           sudo apt-get install -y -q musl-tools
           echo "CC_$(echo '${{ matrix.target }}' | tr '-' '_')=musl-gcc" >> "$GITHUB_ENV"
 
+      - name: Private Linux test runtime directory
+        if: contains(matrix.target, 'linux-musl')
+        run: |
+          runtime="/run/user/$(id -u)"
+          sudo install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$runtime"
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+
       - name: Format
         run: cargo fmt --check
 
