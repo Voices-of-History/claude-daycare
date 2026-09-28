@@ -228,6 +228,7 @@ fn a_rejected_credential_surfaces_the_status_without_echoing_the_token() {
     let error = PlatformClient::new(&platform.base_url)
         .next_command("dev_token_abc")
         .unwrap_err();
+    assert_eq!(error.http_status(), Some(401));
     let message = error.message();
     assert!(message.contains("401"), "{message}");
     assert!(message.contains("unknown device"), "{message}");

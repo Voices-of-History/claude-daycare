@@ -207,6 +207,80 @@ fn opencode_default_and_token_override_reach_the_real_start_request() {
 }
 
 #[test]
+fn codex_model_choice_reaches_the_visit_request_and_invalid_choices_never_start() {
+    let m = Machine::new();
+    m.agent("codex", true);
+    assert!(m.enroll(&[]).status.success());
+    let python = Command::new("python3")
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
+        .unwrap();
+    assert!(python.status.success());
+    let interpreter = String::from_utf8(python.stdout).unwrap();
+    let script = r#"
+import json, sys
+if sys.argv[1:] == ['--version']:
+    print('codex-cli 0.158.0'); sys.exit(0)
+if sys.argv[1:] == ['debug', 'models', '--bundled']:
+    print(json.dumps({'models':[
+        {'slug':'gpt-5.5','apply_patch_tool_type':'freeform','tool_mode':None},
+        {'slug':'gpt-5.4','apply_patch_tool_type':'freeform','tool_mode':None},
+        {'slug':'gpt-6-astra','apply_patch_tool_type':'freeform','tool_mode':'code_mode_only'}]})); sys.exit(0)
+assert sys.argv[1:] == ['app-server'], 'fixture never executes a model'
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    result = {
+        'initialize': {},
+        'account/read': {'account':{'type':'chatgpt','planType':'pro'}},
+        'model/list': {'data':[{'id':'gpt-5.5'},{'id':'gpt-5.4'},{'id':'gpt-6-astra'},{'id':'account-only'}]},
+        'account/rateLimits/read': {'rateLimits':{'primary':{'usedPercent':20,'windowDurationMins':10080,'resetsAt':1791055017}}}
+    }[req['method']]
+    print(json.dumps({'id':req['id'],'result':result}),flush=True)
+"#;
+    support::testdir::write_executable(
+        &m.root.join("bin/codex"),
+        &format!("#!{}\n{script}", interpreter.trim()),
+    );
+    for (extra, model) in [(vec![], "gpt-5.5"), (vec!["--model", "gpt-5.4"], "gpt-5.4")] {
+        let mut args = vec!["visit", "start", "--agent", "codex", "--json"];
+        args.extend(extra);
+        let out = m.run(&args);
+        assert!(!out.status.success()); // mock stops before launching a worker
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("fixture stops"),
+            "{out:?}"
+        );
+        let requests = m.platform.requests();
+        let body = requests
+            .iter()
+            .rev()
+            .find(|r| r.path.ends_with("/visits"))
+            .unwrap()
+            .json();
+        assert_eq!(body["agent_kind"], "codex");
+        assert_eq!(body["agent_model"], model);
+    }
+    for (model, error) in [
+        ("missing-model", "account can use"),
+        ("gpt-6-astra", "tool mode unavailable"),
+        ("account-only", "bundled catalog does not contain"),
+        ("bad model", "must be a Codex model ID"),
+    ] {
+        let before = m.platform.requests().len();
+        let out = m.run(&[
+            "visit", "start", "--agent", "codex", "--model", model, "--json",
+        ]);
+        assert!(!out.status.success());
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains(error),
+            "{out:?}"
+        );
+        assert_eq!(m.platform.requests().len(), before);
+    }
+}
+
+#[test]
 fn unavailable_choice_does_not_claim_or_overwrite_the_saved_default() {
     let m = Machine::new();
     m.agent("codex", true);
@@ -366,7 +440,13 @@ fn a_hung_claude_login_probe_does_not_block_a_ready_codex() {
 
 #[test]
 fn unsupported_codex_versions_cannot_claim_a_pairing_code() {
-    for version in ["0.154.0", "0.157.9", "0.158.0-alpha.1", "unknown"] {
+    for version in [
+        "0.154.0",
+        "0.155.0",
+        "0.157.9",
+        "0.158.0-alpha.1",
+        "unknown",
+    ] {
         let m = Machine::new();
         m.agent("codex", true);
         support::testdir::write_executable(
@@ -380,7 +460,9 @@ fn unsupported_codex_versions_cannot_claim_a_pairing_code() {
         );
         let error = String::from_utf8_lossy(&out.stdout);
         assert!(
-            error.contains("0.158.0") && error.contains("upgrade Codex"),
+            error.contains("0.158.0")
+                && error.contains("npm install -g @openai/codex@latest")
+                && error.contains("brew upgrade --cask codex"),
             "{error}"
         );
         assert!(m.platform.requests().is_empty());
@@ -412,5 +494,103 @@ fn supported_codex_versions_can_enroll() {
         let out = m.enroll(&[]);
         assert!(out.status.success(), "{version}: {out:?}");
         assert_eq!(m.config()["default_agent"], "codex");
+    }
+}
+
+#[test]
+fn visit_help_describes_agent_specific_models_and_neutral_identity_flags() {
+    let m = Machine::new();
+    let out = m.run(&["visit", "start", "--help"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("Claude Code: sonnet")
+            && text.contains("Codex:")
+            && text.contains("OpenCode: provider/model"),
+        "{text}"
+    );
+    assert!(
+        text.contains("general (project-independent) identity"),
+        "{text}"
+    );
+    assert!(text.contains("delivered to the agent"), "{text}");
+    assert!(text.contains("OpenCode can interrupt"), "{text}");
+}
+
+#[test]
+fn skill_explains_version_check_upgrade_and_model_choice() {
+    let m = Machine::new();
+    let out = m.run(&["skill", "show"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    for expected in [
+        "codex --version",
+        "npm install -g @openai/codex@latest",
+        "brew upgrade --cask codex",
+        "--agent codex --model",
+        "gpt-5.5",
+        "account catalog",
+    ] {
+        assert!(text.contains(expected), "skill omitted {expected}");
+    }
+}
+
+#[test]
+fn rejected_identity_lists_local_alternatives_without_trying_their_credentials() {
+    for status in [401, 403] {
+        let mut m = Machine::new();
+        m.agent("opencode", true);
+        assert!(m.enroll(&[]).status.success());
+        let path = m.root.join("daycare/identities.json");
+        let mut identities: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let mut other = identities["actor-1"].clone();
+        other["identity_id"] = json!("actor-2");
+        other["name"] = json!("Other Agent");
+        other["kind"] = json!("workspace");
+        identities["actor-2"] = other;
+        fs::write(&path, identities.to_string()).unwrap();
+        let tokens = fs::read(m.root.join("tokens.json")).unwrap();
+        m.platform =
+            MockPlatform::start(move |_| Response::json(status, r#"{"error":"identity retired"}"#));
+        let mut config = m.config();
+        config["platform_url"] = json!(m.platform.base_url);
+        fs::write(m.root.join("daycare/config.json"), config.to_string()).unwrap();
+        for json_output in [true, false] {
+            let mut args = vec!["visit", "start", "--model", "openai/fixture"];
+            if json_output {
+                args.push("--json");
+            }
+            let out = m.run(&args);
+            assert!(!out.status.success());
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            if status == 401 {
+                assert!(
+                    text.contains("Other Agent")
+                        && text.contains("--identity")
+                        && text.contains("not checked"),
+                    "{text}"
+                );
+            } else {
+                assert!(
+                    !text.contains("Other Agent"),
+                    "unrelated error gained identity advice: {text}"
+                );
+            }
+            assert!(!text.contains("fixture-device"));
+        }
+        assert_eq!(
+            m.platform.requests().len(),
+            2,
+            "must not retry with another identity"
+        );
+        assert_eq!(fs::read(m.root.join("tokens.json")).unwrap(), tokens);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(path).unwrap()).unwrap(),
+            identities
+        );
     }
 }

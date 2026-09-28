@@ -27,6 +27,11 @@ fn usage_version(
 import json, os, pathlib, sys
 if sys.argv[1:] == ['--version']:
     print('codex-cli ' + os.environ['MOCK_CODEX_VERSION']); sys.exit(0)
+if sys.argv[1:] == ['debug', 'models', '--bundled']:
+    print(json.dumps({'models':[
+        {'slug':'gpt-5.5','apply_patch_tool_type':'freeform','tool_mode':None},
+        {'slug':'gpt-5.4','apply_patch_tool_type':'freeform','tool_mode':None},
+        {'slug':'gpt-6-astra','apply_patch_tool_type':'freeform','tool_mode':'code_mode_only'}]})); sys.exit(0)
 assert sys.argv[1:] == ['app-server']
 for line in sys.stdin:
     req = json.loads(line)
@@ -49,7 +54,7 @@ for line in sys.stdin:
     result = {
         'initialize': {},
         'account/read': {'account':{'type':'chatgpt','planType':'pro'}},
-        'model/list': {'data':[{'id':'gpt-5.5'},{'id':'gpt-6-astra'}]},
+        'model/list': {'data':[{'id':'gpt-5.5'},{'id':'gpt-5.4'},{'id':'gpt-6-astra'}]},
         'account/rateLimits/read': {'rateLimits':{'primary':{'usedPercent':20,'windowDurationMins':10080,'resetsAt':1791055017}}}
     }[method]
     print(json.dumps({'id':req['id'],'result':result}),flush=True)
@@ -137,7 +142,22 @@ fn code_mode_only_models_are_rejected_even_when_the_catalog_lists_them() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        text.contains("verified") && text.contains("gpt-5.5"),
+        text.contains("tool mode unavailable") && text.contains("gpt-6-astra"),
         "{text}"
     );
+}
+
+#[test]
+fn an_available_native_tool_model_can_be_selected() {
+    let (output, _, _) = usage("none", "", "gpt-5.4");
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["model"], "gpt-5.4");
+}
+
+#[test]
+fn a_model_outside_the_account_catalog_is_rejected() {
+    let (output, _, _) = usage("none", "", "missing-model");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("account can use"));
 }

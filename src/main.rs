@@ -90,13 +90,13 @@ struct Cli {
 struct Which {
     /// Exact local identity id to use. Generated re-pair commands use this so
     /// duplicate display names and multiple historical General profiles cannot
-    /// select a different Claude.
+    /// select a different identity.
     #[arg(long, global = true, conflicts_with_all = ["identity", "general"])]
     identity_id: Option<String>,
     /// Name of the identity to use.
     #[arg(long, global = true, conflicts_with_all = ["identity_id", "general"])]
     identity: Option<String>,
-    /// Use the machine's general (project-independent) Claude.
+    /// Use the machine's general (project-independent) identity.
     #[arg(long, global = true, conflicts_with_all = ["identity_id", "identity"])]
     general: bool,
 }
@@ -249,7 +249,7 @@ enum IdentityAction {
         /// Bind it to a project directory (defaults to this one).
         #[arg(long)]
         bind: Option<PathBuf>,
-        /// Make it the machine's general Claude instead of binding it.
+        /// Make it the machine's general identity instead of binding it.
         #[arg(long, conflicts_with = "bind")]
         general: bool,
     },
@@ -270,8 +270,8 @@ enum VisitAction {
         /// keeps a 12-hour safety backstop.
         #[arg(long)]
         budget: Option<String>,
-        /// Stop after this many tokens. Checked between turns, so the turn that
-        /// crosses the line still finishes.
+        /// Stop after this many tokens. Claude Code and Codex check between
+        /// turns; OpenCode can interrupt a live turn when it exceeds the cap.
         #[arg(long)]
         tokens: Option<u64>,
         /// Stop after this many US dollars, on the same between-turns basis.
@@ -284,10 +284,12 @@ enum VisitAction {
         /// Defaults to 2. Checked after each completed turn.
         #[arg(long)]
         weekly_percent: Option<f64>,
-        /// What to try while there, delivered to the Claude as the user's words.
+        /// What to try while there, delivered to the agent as the user's words.
         #[arg(long)]
         instructions: Option<String>,
-        /// The model every turn of this visit runs on: sonnet (default) or opus.
+        /// Model for every turn. Claude Code: sonnet (default) or opus.
+        /// Codex: an available account model (default gpt-5.5); models requiring
+        /// code-mode tools are refused. OpenCode: provider/model (required).
         #[arg(long)]
         model: Option<String>,
         /// Run the visit in this process instead of detaching. For debugging.
@@ -521,7 +523,24 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
         }
         Commands::Visit { action } => {
             let store = default_store(layout.fallback_token_file());
-            visit_command(&layout, store.as_ref(), action, out)
+            let selector = match &action {
+                VisitAction::Start { which, .. } => Some(which.selector()),
+                _ => None,
+            };
+            visit_command(&layout, store.as_ref(), action, out).map_err(|error| {
+                let selected = selector.as_ref().and_then(|selector| {
+                    Identities::load(&layout)
+                        .ok()?
+                        .resolve(selector, &project_root(&cwd()))
+                        .ok()
+                });
+                match selected {
+                    Some(daycare_runner::identity::Resolution::Use(id)) => {
+                        identity_error(&layout, &id, error)
+                    }
+                    _ => error,
+                }
+            })
         }
         Commands::RunOnce {
             which,
@@ -756,6 +775,39 @@ fn active_for(layout: &Layout, store: &dyn TokenStore, which: &Which) -> Result<
         &which.selector(),
         &project_root(&cwd()),
     )
+}
+
+/// Help recover from a rejected identity without reading sibling credentials,
+/// contacting the server again, or changing the machine's selected identity.
+fn identity_error(layout: &Layout, selected: &str, error: Error) -> Error {
+    if error.http_status() != Some(401) {
+        return error;
+    }
+    let Ok(identities) = Identities::load(layout) else {
+        return error;
+    };
+    let others: Vec<_> = identities
+        .all()
+        .into_iter()
+        .filter(|identity| identity.identity_id != selected)
+        .collect();
+    let mut message = error.message().to_owned();
+    if others.is_empty() {
+        message.push_str(
+            "\nNo other local identities are recorded. Pair this identity again in the hub.",
+        );
+    } else {
+        message.push_str("\nOther local identities (credentials not checked). Retry with --identity <name> to choose one:");
+        for identity in others {
+            message.push_str(&format!(
+                "\n  --identity {} (ID: {:?}; use --identity-id {} if names repeat)",
+                shell_quote(&identity.name),
+                identity.identity_id,
+                shell_quote(&identity.identity_id)
+            ));
+        }
+    }
+    Error::new(message).with_status(401)
 }
 
 fn cwd() -> PathBuf {
@@ -1465,7 +1517,7 @@ fn run_once(
         if error.is_transport() {
             RunOnceError::PollTransport(error)
         } else {
-            RunOnceError::Turn(error)
+            RunOnceError::Turn(identity_error(layout, &active.identity.identity_id, error))
         }
     })?
     else {

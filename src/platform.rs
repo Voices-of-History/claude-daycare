@@ -989,11 +989,12 @@ fn request_error(what: &str, error: ureq::Error) -> Error {
             Error::new(format!(
                 "{what} failed: HTTP 401 {excerpt}\n\
                  This machine's credential is no longer accepted. The usual cause is \
-                 that this Claude was brought to another computer — re-pairing moves \
+                 that this identity was brought to another computer — re-pairing moves \
                  the identity and rotates its token, which retires this copy. Pair \
-                 again here to bring it back. (It can also mean the Claude or this \
+                 again here to bring it back. (It can also mean the identity or this \
                  device was retired from the hub.)"
             ))
+            .with_status(401)
         }
         ureq::Error::Status(code, response) => {
             let body = response.into_string().unwrap_or_default();
