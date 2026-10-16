@@ -31,7 +31,10 @@ if sys.argv[1:] == ['debug', 'models', '--bundled']:
     print(json.dumps({'models':[
         {'slug':'gpt-5.5','apply_patch_tool_type':'freeform','tool_mode':None},
         {'slug':'gpt-5.4','apply_patch_tool_type':'freeform','tool_mode':None},
-        {'slug':'gpt-6-astra','apply_patch_tool_type':'freeform','tool_mode':'code_mode_only'}]})); sys.exit(0)
+        {'slug':'gpt-6-astra','apply_patch_tool_type':'freeform','tool_mode':'code_mode_only'},
+        {'slug':'gpt-6.1-sol','apply_patch_tool_type':'freeform','tool_mode':'code_mode_only',
+         'experimental_supported_tools':['send_user_message_async','clock']},
+        {'slug':'gpt-mystery','apply_patch_tool_type':'freeform','tool_mode':'mystery_mode'}]})); sys.exit(0)
 assert sys.argv[1:] == ['app-server']
 for line in sys.stdin:
     req = json.loads(line)
@@ -54,7 +57,7 @@ for line in sys.stdin:
     result = {
         'initialize': {},
         'account/read': {'account':{'type':'chatgpt','planType':'pro'}},
-        'model/list': {'data':[{'id':'gpt-5.5'},{'id':'gpt-5.4'},{'id':'gpt-6-astra'}]},
+        'model/list': {'data':[{'id':'gpt-6-astra','isDefault':True},{'id':'gpt-5.4'},{'id':'gpt-6.1-sol'},{'id':'gpt-mystery'}]},
         'account/rateLimits/read': {'rateLimits':{'primary':{'usedPercent':20,'windowDurationMins':10080,'resetsAt':1791055017}}}
     }[method]
     print(json.dumps({'id':req['id'],'result':result}),flush=True)
@@ -63,7 +66,11 @@ for line in sys.stdin:
     let output = Command::new(env!("CARGO_BIN_EXE_daycare-runner"))
         .args(["usage", "--agent", "codex", "--codex-bin"])
         .arg(&script)
-        .args(["--model", model, "--json"])
+        .args(if model.is_empty() {
+            vec!["--json"]
+        } else {
+            vec!["--model", model, "--json"]
+        })
         .env("CODEX_HOME", &owner)
         .env("DAYCARE_HOME", root.join("runner"))
         .env("REFRESH_METHOD", refresh_method)
@@ -89,7 +96,7 @@ fn usage_returns_a_meter_refresh_to_the_owner() {
         "model/list",
         "account/rateLimits/read",
     ] {
-        let (output, owner, sealed) = usage(method, "", "gpt-5.5");
+        let (output, owner, sealed) = usage(method, "", "gpt-6.1-sol");
         assert!(
             output.status.success(),
             "{}",
@@ -102,7 +109,7 @@ fn usage_returns_a_meter_refresh_to_the_owner() {
 
 #[test]
 fn old_codex_is_rejected_before_auth_is_copied_or_app_server_starts() {
-    let (output, owner, sealed) = usage_version("initialize", "", "gpt-5.5", "0.154.0");
+    let (output, owner, sealed) = usage_version("initialize", "", "gpt-6.1-sol", "0.154.0");
     assert!(!output.status.success());
     assert_eq!(owner["tokens"]["refresh_token"], "old-fake");
     assert_eq!(sealed, Value::Null);
@@ -121,7 +128,7 @@ fn failed_app_server_paths_also_return_refreshes() {
             if method == "initialize" && failure == "malformed" {
                 continue;
             }
-            let (output, owner, sealed) = usage(method, failure, "gpt-5.5");
+            let (output, owner, sealed) = usage(method, failure, "gpt-6.1-sol");
             assert!(!output.status.success(), "{method} {failure}");
             assert_eq!(
                 owner["tokens"]["refresh_token"], "refreshed-fake",
@@ -133,8 +140,28 @@ fn failed_app_server_paths_also_return_refreshes() {
 }
 
 #[test]
-fn code_mode_only_models_are_rejected_even_when_the_catalog_lists_them() {
-    let (output, _, _) = usage("none", "", "gpt-6-astra");
+fn code_mode_only_models_can_be_selected() {
+    for model in ["gpt-6-astra", "gpt-6.1-sol"] {
+        let (output, _, _) = usage("none", "", model);
+        assert!(output.status.success(), "{model}: {output:?}");
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["model"], model);
+    }
+}
+
+#[test]
+fn without_a_model_the_preferred_account_model_is_used() {
+    // The account no longer offers gpt-5.5; gpt-6.1-sol wins over the
+    // account's own default.
+    let (output, _, _) = usage("none", "", "");
+    assert!(output.status.success(), "{output:?}");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["model"], "gpt-6.1-sol");
+}
+
+#[test]
+fn unverified_tool_modes_are_rejected_even_when_the_catalog_lists_them() {
+    let (output, _, _) = usage("none", "", "gpt-mystery");
     assert!(!output.status.success());
     let text = format!(
         "{}{}",
@@ -142,7 +169,7 @@ fn code_mode_only_models_are_rejected_even_when_the_catalog_lists_them() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        text.contains("tool mode unavailable") && text.contains("gpt-6-astra"),
+        text.contains("tool mode Daycare has not verified") && text.contains("gpt-mystery"),
         "{text}"
     );
 }

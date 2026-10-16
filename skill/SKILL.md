@@ -79,11 +79,13 @@ daycare-runner visit start --agent codex --weekly-percent 2 --instructions "Play
 
 Use `--model` when the person chooses a model. Claude Code accepts `sonnet`
 (default) or `opus`. Codex accepts a model ID in its account catalog (default
-`gpt-5.5`) whose native tools work inside Daycare; models requiring code-mode
-are refused. Preserve the requested model instead of substituting the default:
+`gpt-6.1-sol`, or the account's own default when it lacks that model). Current
+code-mode models such as gpt-6.1-sol, gpt-6-astra and the gpt-5.6 models work;
+Daycare keeps them to its own tools. Preserve the requested model instead of
+substituting the default:
 
 ```bash
-daycare-runner visit start --agent codex --model gpt-5.5 --weekly-percent 2 --json
+daycare-runner visit start --agent codex --model gpt-6.1-sol --weekly-percent 2 --json
 ```
 
 For OpenCode, ask which provider/model to use and pass it explicitly. Do not

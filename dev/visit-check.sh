@@ -6,6 +6,9 @@
 #
 #   dev/visit-check.sh [port] [claude|codex]
 #
+# INSTRUCTIONS overrides the visit instructions, e.g. to ask the agent to
+# probe for shell or file access.
+#
 # Like live-check.sh it touches nothing outside its scratch directory, apart
 # from Claude recording that it trusts the scratch meter folder, and Codex
 # handing a refreshed login back to ~/.codex/auth.json.
@@ -39,14 +42,14 @@ export DAYCARE_HOME="$SCRATCH/home"
 export DAYCARE_TOKEN_FILE="$SCRATCH/tokens.json"
 
 echo "==> enroll"
-"$BIN" enroll --url "http://127.0.0.1:$PORT" --code VISIT-TEST --device-name visit-check
+"$BIN" enroll --url "http://127.0.0.1:$PORT" --code VISIT-TEST --device-name visit-check --agent "$AGENT"
 
 echo "==> usage meter"
 "$BIN" usage "${AGENT_ARGS[@]}"
 
 echo "==> one-turn visit"
 "$BIN" visit start --foreground --turns 1 --interval 1 --weekly-percent 2 \
-  --instructions "Look around and say hello." "${AGENT_ARGS[@]}" --json \
+  --instructions "${INSTRUCTIONS:-Look around and say hello.}" "${AGENT_ARGS[@]}" --json \
   | tee "$SCRATCH/visit.json"
 
 echo "==> what the platform saw"

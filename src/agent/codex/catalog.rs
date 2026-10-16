@@ -1,7 +1,10 @@
-//! A runner-owned model catalog removes native patch reach before launch.
-//! Codex 0.158 registers apply_patch from model metadata, independently of
-//! shell/feature settings. Preserve the bundled model verbatim except for
-//! that capability, and pass this catalog to both preflight and exec/resume.
+//! A runner-owned model catalog removes native reach that model metadata
+//! grants before launch. Codex 0.158 registers apply_patch from
+//! `apply_patch_tool_type`, and 0.162 registers `request_user_input_async`,
+//! `send_user_message_async` and the clock tools from
+//! `experimental_supported_tools`, independently of shell/feature settings.
+//! Preserve the bundled model verbatim except for those capabilities, and
+//! pass this catalog to both preflight and exec/resume.
 
 use super::appserver::CodexCommand;
 use super::launch::check_model_id;
@@ -9,6 +12,9 @@ use crate::paths::write_atomic;
 use crate::{Error, Result};
 use serde_json::{json, Value};
 use std::path::Path;
+
+/// `ToolMode` values in Codex 0.162 (`openai_models.rs`), besides null.
+const TOOL_MODES: [&str; 3] = ["direct", "code_mode", "code_mode_only"];
 
 pub fn without_patch(catalog: &Value, model: &str) -> Result<Value> {
     check_model_id(model)?;
@@ -26,11 +32,15 @@ pub fn without_patch(catalog: &Value, model: &str) -> Result<Value> {
                 "Codex's bundled catalog does not contain the selected model; cannot seal native tools",
             )
         })?;
-    // The seal disables the code-mode host. Such a model cannot use Daycare
-    // tools here; reject it before opening a visit, rather than dropping tools.
-    if entry.get("tool_mode").is_some_and(|mode| !mode.is_null()) {
+    // Code mode calls the same registered tools from a V8 isolate with no
+    // file, network, or process API (tests/fixtures/codex-exec.md). An
+    // unknown mode fails closed rather than assuming it is the same.
+    if !entry
+        .get("tool_mode")
+        .is_none_or(|mode| mode.is_null() || TOOL_MODES.contains(&mode.as_str().unwrap_or("")))
+    {
         return Err(Error::new(format!(
-            "Codex model {model} requires a tool mode unavailable in Daycare; choose a model with native tools from your account catalog"
+            "Codex model {model} uses a tool mode Daycare has not verified; choose another model from your account catalog"
         )));
     }
     // Null disables registration in Codex's tool planner. An unknown schema
@@ -42,6 +52,14 @@ pub fn without_patch(catalog: &Value, model: &str) -> Result<Value> {
         return Err(Error::new("Codex's model catalog has no recognized patch capability field; cannot seal native tools"));
     }
     entry["apply_patch_tool_type"] = Value::Null;
+    match entry.get("experimental_supported_tools") {
+        None | Some(Value::Array(_)) => {
+            entry["experimental_supported_tools"] = json!([]);
+        }
+        Some(_) => {
+            return Err(Error::new("Codex's model catalog lists experimental tools in an unrecognized shape; cannot seal native tools"));
+        }
+    }
     Ok(json!({"models": [entry]}))
 }
 
@@ -75,6 +93,7 @@ mod tests {
             "base_instructions":"original", "context_window":12345, "extra_metadata":{"preserve":true}});
         let mut expected = model.clone();
         expected["apply_patch_tool_type"] = Value::Null;
+        expected["experimental_supported_tools"] = json!([]);
         let sealed =
             without_patch(&json!({"models":[model, {"slug":"unverified"}]}), "gpt-5.5").unwrap();
         assert_eq!(sealed, json!({"models":[expected]}));
@@ -103,9 +122,32 @@ mod tests {
         assert_eq!(sealed["models"][0]["slug"], "gpt-5.4");
         assert_eq!(sealed["models"][0]["apply_patch_tool_type"], Value::Null);
         assert_eq!(sealed["models"][0]["base_instructions"], "preserved");
-        for mode in [json!("code_mode_only"), json!("unknown"), json!({})] {
+        for mode in [json!("unknown"), json!({}), json!(["code_mode_only"])] {
             assert!(without_patch(&json!({"models":[{"slug":"gpt-5.4","apply_patch_tool_type":"freeform","tool_mode":mode}]}), "gpt-5.4").is_err());
         }
+    }
+
+    #[test]
+    fn code_mode_models_are_sealed_without_metadata_tools() {
+        // The 0.162.1 bundled gpt-6.1-sol entry, trimmed to the fields that
+        // decide its tools.
+        let model = json!({"slug":"gpt-6.1-sol","tool_mode":"code_mode_only",
+            "apply_patch_tool_type":"freeform","shell_type":"unified_exec",
+            "experimental_supported_tools":["send_user_message_async","clock"],
+            "multi_agent_version":"v2","use_responses_lite":true});
+        let sealed = without_patch(&json!({"models":[model]}), "gpt-6.1-sol").unwrap();
+        let entry = &sealed["models"][0];
+        assert_eq!(entry["tool_mode"], "code_mode_only");
+        assert_eq!(entry["apply_patch_tool_type"], Value::Null);
+        assert_eq!(entry["experimental_supported_tools"], json!([]));
+        assert_eq!(entry["use_responses_lite"], true);
+        for mode in ["direct", "code_mode", "code_mode_only"] {
+            let model = json!({"slug":"m","tool_mode":mode,"apply_patch_tool_type":null});
+            without_patch(&json!({"models":[model]}), "m").unwrap();
+        }
+        let odd =
+            json!({"slug":"m","apply_patch_tool_type":null,"experimental_supported_tools":"clock"});
+        assert!(without_patch(&json!({"models":[odd]}), "m").is_err());
     }
 
     #[cfg(unix)]

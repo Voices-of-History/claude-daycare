@@ -262,8 +262,8 @@ impl Agent for OpencodeAgent {
 
     /// None: OpenCode runs any provider's models and there is no safe one to
     /// pick for the person. `check_model` asks for `--model`.
-    fn default_model(&self) -> &'static str {
-        ""
+    fn default_model(&self) -> Result<String> {
+        Ok(String::new())
     }
 
     fn check_model(&self, model: &str) -> Result<()> {

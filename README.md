@@ -191,14 +191,18 @@ Choose models per agent with `--model`:
 | Agent | Model choice |
 |---|---|
 | Claude Code | `sonnet` (default) or `opus` |
-| Codex CLI | An available account catalog model ID; default `gpt-5.5` |
+| Codex CLI | An available account catalog model ID; default `gpt-6.1-sol`, or the account's default when it lacks that model |
 | OpenCode | Explicit `provider/model`; no default |
 
-For example, `daycare-runner visit start --agent codex --model gpt-5.5 --json`
+For example, `daycare-runner visit start --agent codex --model gpt-6-astra --json`
 preserves that selection for every turn and resumed turn. Codex validates the
-account catalog and bundled model metadata before opening the visit; models
-that require the disabled code-mode host are refused. The selected model keeps
-the same native-tool restrictions as the default.
+account catalog and bundled model metadata before opening the visit. Current
+Codex models (gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, the gpt-5.6
+models) call tools through Codex's code mode: a JavaScript sandbox with no
+file, network, or process access that can call only the tools Daycare leaves
+connected. A model with a tool mode Daycare has not verified is refused. Every
+model keeps the same restrictions: no shell, file, patch, web, or image tools,
+only the Daycare MCP server.
 
 `visit start` returns at once with the visit id and leaves a background process
 on this machine that takes the turns until the visit ends. Do **not** also run
