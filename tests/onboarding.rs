@@ -220,7 +220,7 @@ fn codex_model_choice_reaches_the_visit_request_and_invalid_choices_never_start(
     let script = r#"
 import json, sys
 if sys.argv[1:] == ['--version']:
-    print('codex-cli 0.158.0'); sys.exit(0)
+    print('codex-cli 0.162.1'); sys.exit(0)
 if sys.argv[1:] == ['debug', 'models', '--bundled']:
     print(json.dumps({'models':[
         {'slug':'gpt-5.5','apply_patch_tool_type':'freeform','tool_mode':None},

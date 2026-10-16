@@ -103,7 +103,8 @@ with tempfile.TemporaryDirectory(prefix="daycare-tools-check-") as scratch:
             result = subprocess.run([binary, "exec", *resume, "--json", "--ignore-user-config", "--ignore-rules",
                                      "--skip-git-repo-check", *args, "-c", f"agents.enabled={str(agents).lower()}",
                                      *(mcp + ["-c", scope] if use_mcp else []), "Capture tool definitions only."],
-                                    cwd=root / "workspace", env=env, capture_output=True, text=True, timeout=25)
+                                    cwd=root / "workspace", env=env, capture_output=True, text=True, timeout=25,
+                                    stdin=subprocess.DEVNULL)
             assert requests, f"Codex never reached the local capture endpoint: {result.stderr[-1000:]}"
             names[name] = [t.get("name", t["type"]) for t in requests[0]["tools"]]
             assert ("apply_patch" in names[name]) == (patch is not None), names

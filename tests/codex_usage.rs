@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 fn usage(refresh_method: &str, failure: &str, model: &str) -> (std::process::Output, Value, Value) {
-    usage_version(refresh_method, failure, model, "0.158.0")
+    usage_version(refresh_method, failure, model, "0.162.1")
 }
 
 fn usage_version(
@@ -147,6 +147,23 @@ fn code_mode_only_models_can_be_selected() {
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(value["model"], model);
     }
+}
+
+#[test]
+fn code_mode_models_need_a_verified_codex_but_direct_models_do_not() {
+    let (output, _, _) = usage_version("none", "", "gpt-6.1-sol", "0.158.0");
+    assert!(!output.status.success());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("code mode") && text.contains("0.162.1"),
+        "{text}"
+    );
+    let (output, _, _) = usage_version("none", "", "gpt-5.4", "0.158.0");
+    assert!(output.status.success(), "{output:?}");
 }
 
 #[test]

@@ -77,15 +77,39 @@ pub fn check_model_id(model: &str) -> Result<()> {
 pub const CODEX_UPGRADE: &str = "To upgrade Codex, use the method you installed it with: npm install -g @openai/codex@latest; or brew upgrade --cask codex. For a standalone install, rerun the official installer: curl -fsSL https://chatgpt.com/codex/install.sh | sh. Then run codex --version and confirm 0.158.0 or newer on PATH before retrying.";
 
 pub fn check_version(output: &str) -> Result<()> {
-    let version = output.trim().strip_prefix("codex-cli ");
-    let numbers: Option<Vec<u64>> =
-        version.and_then(|version| version.split('.').map(|n| n.parse().ok()).collect());
-    if let Some(numbers) = numbers {
-        if numbers.len() == 3 && (numbers[0], numbers[1], numbers[2]) >= (0, 158, 0) {
-            return Ok(());
-        }
+    if parse_version(output).is_some_and(|version| version >= (0, 158, 0)) {
+        return Ok(());
     }
     Err(Error::new(format!("Daycare requires Codex CLI 0.158.0 or newer to disable multi-agent tools before launch. {CODEX_UPGRADE}")))
+}
+
+/// The first Codex whose code-mode isolate and tool exposure were checked
+/// (tests/fixtures/codex-exec.md). Older releases bundle code-mode models too,
+/// but their runtime was never inspected.
+pub const CODE_MODE_MIN_VERSION: (u64, u64, u64) = (0, 162, 1);
+
+pub fn check_code_mode_version(output: &str, model: &str) -> Result<()> {
+    if parse_version(output).is_some_and(|version| version >= CODE_MODE_MIN_VERSION) {
+        return Ok(());
+    }
+    let (major, minor, patch) = CODE_MODE_MIN_VERSION;
+    Err(Error::new(format!(
+        "Codex model {model} runs tools through code mode, which Daycare supports from Codex CLI {major}.{minor}.{patch}. {CODEX_UPGRADE}"
+    )))
+}
+
+/// `codex-cli 0.162.1` -> (0, 162, 1).
+fn parse_version(output: &str) -> Option<(u64, u64, u64)> {
+    let numbers: Vec<u64> = output
+        .trim()
+        .strip_prefix("codex-cli ")?
+        .split('.')
+        .map(|n| n.parse().ok())
+        .collect::<Option<_>>()?;
+    match numbers[..] {
+        [major, minor, patch] => Some((major, minor, patch)),
+        _ => None,
+    }
 }
 
 /// How long one daycare tool call may run, and how long the server gets to
@@ -142,7 +166,12 @@ pub const ENABLED_FEATURES: [&str; 1] = ["code_mode_host"];
 /// `skills.include_instructions=false` keeps `~/.agents/skills` out even if
 /// the throwaway HOME were bypassed: Codex reads that folder from HOME
 /// whatever `CODEX_HOME` says (Mac check, codex 0.155).
-pub const SEAL_SETTINGS: [&str; 13] = [
+/// The two `features.code_mode_*` keys would change which tools code mode
+/// exposes; `code_mode_only_strict_3p_tools` ignores `MCP_EXPOSURE`. Both are
+/// off by default in 0.162 and 0.163. They are pinned here rather than in
+/// `DISABLED_FEATURES` because `--disable` rejects a name an older Codex does
+/// not know, while a config key it does not know is only logged.
+pub const SEAL_SETTINGS: [&str; 15] = [
     "agents.enabled=false",
     "tools.experimental_request_user_input.enabled=false",
     "tools.update_plan.enabled=false",
@@ -156,6 +185,8 @@ pub const SEAL_SETTINGS: [&str; 13] = [
     "tools.view_image=false",
     r#"approval_policy="never""#,
     r#"sandbox_mode="read-only""#,
+    "features.code_mode_tool_search=false",
+    "features.code_mode_only_strict_3p_tools=false",
 ];
 
 /// The seal flags shared by `codex exec` and `codex debug prompt-input`:
@@ -685,6 +716,37 @@ mod tests {
             "garbage",
         ] {
             assert!(check_version(version).is_err(), "{version}");
+        }
+    }
+
+    #[test]
+    fn code_mode_needs_a_verified_codex() {
+        for version in [
+            "codex-cli 0.162.1\n",
+            "codex-cli 0.163.0",
+            "codex-cli 1.0.0",
+        ] {
+            check_code_mode_version(version, "gpt-6.1-sol").unwrap();
+        }
+        for version in ["codex-cli 0.158.0", "codex-cli 0.162.0", "garbage"] {
+            let error = check_code_mode_version(version, "gpt-6-astra")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("gpt-6-astra") && error.contains("0.162.1"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_mode_exposure_features_are_pinned_off() {
+        let args = seal_args("gpt-6.1-sol", "persona");
+        for setting in [
+            "features.code_mode_tool_search=false",
+            "features.code_mode_only_strict_3p_tools=false",
+        ] {
+            assert!(args.iter().any(|arg| arg == setting), "{setting}");
         }
     }
 }

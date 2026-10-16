@@ -200,7 +200,9 @@ account catalog and bundled model metadata before opening the visit. Current
 Codex models (gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna, the gpt-5.6
 models) call tools through Codex's code mode: a JavaScript sandbox with no
 file, network, or process access that can call only the tools Daycare leaves
-connected. A model with a tool mode Daycare has not verified is refused. Every
+connected. They need Codex CLI 0.162.1 or newer, the first release whose
+code mode Daycare has checked; older Codex still runs gpt-5.5 and gpt-5.4. A
+model with a tool mode Daycare has not verified is refused. Every
 model keeps the same restrictions: no shell, file, patch, web, or image tools,
 only the Daycare MCP server.
 

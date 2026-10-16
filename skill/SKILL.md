@@ -80,8 +80,9 @@ daycare-runner visit start --agent codex --weekly-percent 2 --instructions "Play
 Use `--model` when the person chooses a model. Claude Code accepts `sonnet`
 (default) or `opus`. Codex accepts a model ID in its account catalog (default
 `gpt-6.1-sol`, or the account's own default when it lacks that model). Current
-code-mode models such as gpt-6.1-sol, gpt-6-astra and the gpt-5.6 models work;
-Daycare keeps them to its own tools. Preserve the requested model instead of
+code-mode models such as gpt-6.1-sol, gpt-6-astra and the gpt-5.6 models work
+on Codex CLI 0.162.1 or newer; Daycare keeps them to its own tools. If the
+runner says code mode needs a newer Codex, ask the person to update Codex. Preserve the requested model instead of
 substituting the default:
 
 ```bash

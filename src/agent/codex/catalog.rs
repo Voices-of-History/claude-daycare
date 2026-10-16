@@ -7,7 +7,7 @@
 //! pass this catalog to both preflight and exec/resume.
 
 use super::appserver::CodexCommand;
-use super::launch::check_model_id;
+use super::launch::{check_code_mode_version, check_model_id};
 use crate::paths::write_atomic;
 use crate::{Error, Result};
 use serde_json::{json, Value};
@@ -75,7 +75,20 @@ pub fn inspect(codex: &CodexCommand, model: &str) -> Result<Value> {
     }
     let catalog: Value = serde_json::from_slice(&output.stdout)
         .map_err(|_| Error::new("Codex's bundled model catalog is not JSON"))?;
-    without_patch(&catalog, model)
+    let sealed = without_patch(&catalog, model)?;
+    if uses_code_mode(&sealed) {
+        let output = codex.command().arg("--version").output()?;
+        check_code_mode_version(&String::from_utf8_lossy(&output.stdout), model)?;
+    }
+    Ok(sealed)
+}
+
+/// The sealed catalog's one model runs its tools from a code-mode isolate.
+fn uses_code_mode(sealed: &Value) -> bool {
+    matches!(
+        sealed["models"][0]["tool_mode"].as_str(),
+        Some("code_mode" | "code_mode_only")
+    )
 }
 
 pub fn prepare(codex: &CodexCommand, model: &str, path: &Path) -> Result<()> {

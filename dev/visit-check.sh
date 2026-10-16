@@ -7,7 +7,8 @@
 #   dev/visit-check.sh [port] [claude|codex]
 #
 # INSTRUCTIONS overrides the visit instructions, e.g. to ask the agent to
-# probe for shell or file access.
+# probe for shell or file access. A Codex visit fails if the account no longer
+# offers the runner's default model, so the check notices before users do.
 #
 # Like live-check.sh it touches nothing outside its scratch directory, apart
 # from Claude recording that it trusts the scratch meter folder, and Codex
@@ -53,7 +54,8 @@ echo "==> one-turn visit"
   | tee "$SCRATCH/visit.json"
 
 echo "==> what the platform saw"
-python3 - "$SCRATCH/state.json" "$SCRATCH/visit.json" "$AGENT" "$SCRATCH/home/turns/cmd-visit-1.jsonl" <<'PY'
+DEFAULT_CODEX_MODEL="$(sed -n 's/^pub const DEFAULT_CODEX_MODEL: &str = "\(.*\)";/\1/p' "$CRATE/src/agent/codex/launch.rs")"
+python3 - "$SCRATCH/state.json" "$SCRATCH/visit.json" "$AGENT" "$SCRATCH/home/turns/cmd-visit-1.jsonl" "$DEFAULT_CODEX_MODEL" <<'PY'
 import json, sys
 state = json.load(open(sys.argv[1]))
 visit = json.loads(open(sys.argv[2]).read().strip().splitlines()[-1])
@@ -73,6 +75,10 @@ assert state["visit_ends"], "the visit end was never reported"
 assert "report" in state["visit_reports"], "the day report was never delivered"
 assert state["actions"], "no action actually reached the Daycare referee"
 if agent == "codex":
+    model = state["visits"][0]["agent_model"]
+    assert model == sys.argv[5], (
+        f"this Codex account no longer offers the default model {sys.argv[5]}; the visit fell back to {model}. "
+        "Update DEFAULT_CODEX_MODEL in src/agent/codex/launch.rs")
     items = [json.loads(line).get("item", {}) for line in open(sys.argv[4])]
     assert any(i.get("type") == "mcp_tool_call" and i.get("server") == "daycare"
                and i.get("status") == "completed" and i.get("result") is not None

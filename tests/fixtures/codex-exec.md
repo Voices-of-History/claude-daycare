@@ -151,3 +151,35 @@ probed the isolate. Results returned to the model:
 `experimental_supported_tools` alongside `apply_patch_tool_type`. Shell,
 patch, web, image, memory, agents and the rest stay disabled exactly as
 before, and the code-mode isolate adds no reach of its own.
+
+### Tool exposure and later releases (2026-10-16, second pass)
+
+Same tools as direct mode, no more. In 0.162.1
+`core/src/tools/spec_plan.rs::apply_mcp_tool_exposure_policy` sees only
+registered MCP tools; `disabled_tools`/`enabled_tools` remove a tool before
+that step, so code mode cannot nest a tool the turn hides.
+`omit_tools_from=["deferred"]` leaves a Daycare tool direct and code-mode
+visible; in code-mode-only mode, direct tools are reached through `exec`.
+Two default-off features would change this: `code_mode_tool_search`, and
+`code_mode_only_strict_3p_tools`, which ignores `omit_tools_from` and keeps
+MCP tools deferred inside `exec`. The seal pins both off with
+`-c features.<name>=false`. `--disable` rejects names an older Codex does
+not know (0.158–0.161 lack both), but an unknown config key is only logged.
+
+`dev/codex-sandbox-probe.py` now asserts, for the world and homecoming
+scopes, that `Object.keys(tools)` and `ALL_TOOLS` equal that turn's
+direct-mode tools; that calling the hidden Daycare tool fails and never
+reaches the server; and that the isolate's globals stay within a pinned
+allowlist. A negative control (metadata tools left in the catalog) fails
+with `clock__curr_time` nested and callable.
+
+Codex 0.163.0 (npm, Oct 2026): the npm package ships `codex-code-mode-host`
+beside `codex`. New features `code_mode_host_grpc` (stdio transport) and
+`code_mode_tool_description_first` (description order) are default off and
+add no reach; isolate globals are unchanged; `ToolMessages` gains only
+description text. Both dev checks pass on 0.162.1 and 0.163.0.
+
+0.158–0.161 bundle code-mode models (0.158 has gpt-6-astra) but were not
+inspected, so the runner accepts code-mode models only from Codex 0.162.1.
+`.github/workflows/codex-canary.yml` runs both checks daily on 0.162.1 and
+on the latest npm release.

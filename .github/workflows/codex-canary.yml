@@ -1,0 +1,58 @@
+# Check each Codex release against the seal before users install it.
+#
+# dev/codex-tools-check.py captures the tools Codex would send a model;
+# dev/codex-sandbox-probe.py forces a hostile code-mode script through the
+# isolate. Either fails if Codex gains reach the seal does not remove: a new
+# tool, a new isolate global, a working import, a reachable hidden Daycare
+# tool. The probe also fails if the bundled catalog drops the runner's default
+# model or gives it a tool mode the runner refuses. No credentials, no model
+# calls: a local endpoint plays the model.
+#
+# Daily runs test whatever `latest` is that day. A failed scheduled run means
+# a Codex release changed something; read the failure before shipping.
+name: codex-canary
+
+on:
+  schedule:
+    - cron: "17 13 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/agent/codex/**"
+      - "dev/codex-*.py"
+      - ".github/workflows/codex-canary.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/agent/codex/**"
+      - "dev/codex-*.py"
+      - ".github/workflows/codex-canary.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: codex ${{ matrix.codex }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        codex: ["0.162.1", "latest"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Codex
+        run: |
+          npm install -g "@openai/codex@${{ matrix.codex }}"
+          codex --version
+
+      - name: Tool catalog
+        run: python3 dev/codex-tools-check.py "$(command -v codex)"
+
+      - name: Code-mode sandbox
+        run: python3 dev/codex-sandbox-probe.py "$(command -v codex)"
