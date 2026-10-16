@@ -3,6 +3,9 @@
 Usage: python3 dev/codex-tools-check.py /path/to/codex
 The local endpoint returns HTTP 400 after capturing the model request.
 A synthetic multi-agent capability supplies a collaboration positive control.
+When the bundled catalog has gpt-6.1-sol, a code-mode-only case checks that the
+sealed request offers only `exec` and `wait`, and that `exec` nests only the
+Daycare tools and the three MCP resource helpers.
 """
 import http.server
 import json
@@ -74,6 +77,7 @@ with tempfile.TemporaryDirectory(prefix="daycare-tools-check-") as scratch:
         'model_providers.capture.requires_openai_auth=false',
     ]
     args = [x for feature in array("DISABLED_FEATURES") for x in ["--disable", feature]]
+    args += [x for feature in array("ENABLED_FEATURES") for x in ["--enable", feature]]
     args += [x for setting in settings for x in ["-c", setting]]
     exposure = re.search(r'pub const MCP_EXPOSURE: &str = r#"(.*?)"#;', source).group(1)
     mcp = ["-c", f'mcp_servers.daycare.url="http://127.0.0.1:{server.server_port}/mcp"',
@@ -99,7 +103,8 @@ with tempfile.TemporaryDirectory(prefix="daycare-tools-check-") as scratch:
             result = subprocess.run([binary, "exec", *resume, "--json", "--ignore-user-config", "--ignore-rules",
                                      "--skip-git-repo-check", *args, "-c", f"agents.enabled={str(agents).lower()}",
                                      *(mcp + ["-c", scope] if use_mcp else []), "Capture tool definitions only."],
-                                    cwd=root / "workspace", env=env, capture_output=True, text=True, timeout=25)
+                                    cwd=root / "workspace", env=env, capture_output=True, text=True, timeout=25,
+                                    stdin=subprocess.DEVNULL)
             assert requests, f"Codex never reached the local capture endpoint: {result.stderr[-1000:]}"
             names[name] = [t.get("name", t["type"]) for t in requests[0]["tools"]]
             assert ("apply_patch" in names[name]) == (patch is not None), names
@@ -116,6 +121,34 @@ with tempfile.TemporaryDirectory(prefix="daycare-tools-check-") as scratch:
             if name == "sealed_new":
                 events = [json.loads(line) for line in result.stdout.splitlines()]
                 resume_id = next(e["thread_id"] for e in events if e["type"] == "thread.started")
+        code_mode = next((m for m in catalog["models"] if m["slug"] == "gpt-6.1-sol"), None)
+        if code_mode:
+            # The runner's private catalog: patch and metadata tools cleared.
+            code_mode = {**code_mode, "apply_patch_tool_type": None, "experimental_supported_tools": []}
+            (root / "models.json").write_text(json.dumps({"models": [code_mode]}))
+            requests.clear()
+            cm_args = ['model="gpt-6.1-sol"' if a == 'model="gpt-5.5"' else a for a in args]
+            result = subprocess.run([binary, "exec", "--json", "--ignore-user-config", "--ignore-rules",
+                                     "--skip-git-repo-check", *cm_args, "-c", "agents.enabled=false",
+                                     *mcp, "-c", 'mcp_servers.daycare.disabled_tools=["daycare_memory_save"]',
+                                     "Capture tool definitions only."],
+                                    cwd=root / "workspace", env=env, capture_output=True, text=True, timeout=25,
+                                    stdin=subprocess.DEVNULL)
+            assert requests, f"Codex never reached the local capture endpoint: {result.stderr[-1000:]}"
+            assert "Code Mode is unavailable" not in result.stdout, result.stdout
+            # Responses Lite models carry tools in an `additional_tools` input item.
+            tools = requests[0].get("tools") or [t for item in requests[0]["input"]
+                                                 if item.get("type") == "additional_tools" for t in item["tools"]]
+            flat = [t for ns in tools for t in (ns["tools"] if ns.get("type") == "namespace" else [ns])]
+            top = sorted(t["name"] for t in flat)
+            assert top == ["exec", "wait"], top
+            described = next(t["description"] for t in flat if t["name"] == "exec")
+            nested = sorted(re.findall(r"### `([^`]+)`", described))
+            assert nested == sorted(["list_mcp_resource_templates", "list_mcp_resources", "read_mcp_resource",
+                                     "mcp__daycare__daycare_memory_list", "mcp__daycare__daycare_probe"]), nested
+            assert "no file system, no network access" in described, described[:400]
+            names["sealed_code_mode_top"] = top
+            names["sealed_code_mode_nested"] = nested
         prompt = subprocess.check_output([binary, "debug", "prompt-input", *args,
                                           "-c", "agents.enabled=false", "-c", 'developer_instructions="Daycare test persona"',
                                           "DAYCARE-SEAL-PROBE"], cwd=root / "workspace", env=env, text=True)

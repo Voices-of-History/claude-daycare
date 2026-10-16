@@ -21,6 +21,9 @@ use crate::visit::WEEKLY_WINDOW;
 use crate::{Error, Result};
 use serde_json::Value;
 
+/// Codex 0.162's warning when a code-mode model's tool host cannot start.
+const CODE_MODE_UNAVAILABLE: &str = "Code Mode is unavailable";
+
 pub fn parse(stream: &str) -> Result<StreamReceipt> {
     let mut thread_id: Option<String> = None;
     let mut completed = false;
@@ -93,7 +96,21 @@ pub fn parse(stream: &str) -> Result<StreamReceipt> {
                     }
                     // Thinking and warnings ("Skill descriptions were
                     // shortened…") reach nothing.
-                    Some("reasoning") | Some("error") => {}
+                    Some("reasoning") => {}
+                    Some("error") => {
+                        // A code-mode-only model without its host gets no
+                        // tools at all; the turn would run blind.
+                        if let Some(message) = item
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .filter(|message| message.contains(CODE_MODE_UNAVAILABLE))
+                        {
+                            failed = true;
+                            error_message = Some(format!(
+                                "{message} Reinstall Codex so codex-code-mode-host sits next to the codex binary."
+                            ));
+                        }
+                    }
                     Some("mcp_tool_call") => {
                         let server = item.get("server").and_then(Value::as_str).unwrap_or("");
                         let tool = item.get("tool").and_then(Value::as_str).unwrap_or("");
@@ -416,6 +433,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_code_mode_model_without_its_host_fails_the_turn() {
+        // Captured from Codex 0.162.1 with `code_mode_host` disabled.
+        let warning = "Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.";
+        let stream = format!(
+            "{}\n{}\n{}",
+            json!({"type":"thread.started","thread_id":"test"}),
+            json!({"type":"item.completed","item":{"id":"item_2","type":"error","message":warning}}),
+            json!({"type":"turn.completed","usage":{}})
+        );
+        let receipt = parse(&stream).unwrap();
+        assert!(!receipt.success);
+        assert!(receipt
+            .error_subtype
+            .unwrap()
+            .contains("codex-code-mode-host sits next to"));
+        // Other warnings still reach nothing and fail nothing.
+        let benign = stream.replace(warning, "`tools.view_image` is ignored.");
+        assert!(parse(&benign).unwrap().success);
     }
 
     #[test]

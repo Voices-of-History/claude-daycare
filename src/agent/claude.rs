@@ -63,8 +63,8 @@ impl Agent for ClaudeAgent {
         "Claude Code"
     }
 
-    fn default_model(&self) -> &'static str {
-        DEFAULT_TURN_MODEL
+    fn default_model(&self) -> Result<String> {
+        Ok(DEFAULT_TURN_MODEL.into())
     }
 
     fn check_model(&self, model: &str) -> Result<()> {

@@ -288,8 +288,8 @@ enum VisitAction {
         #[arg(long)]
         instructions: Option<String>,
         /// Model for every turn. Claude Code: sonnet (default) or opus.
-        /// Codex: an available account model (default gpt-5.5); models requiring
-        /// code-mode tools are refused. OpenCode: provider/model (required).
+        /// Codex: an available account model (default gpt-6.1-sol, else the
+        /// account's default). OpenCode: provider/model (required).
         #[arg(long)]
         model: Option<String>,
         /// Run the visit in this process instead of detaching. For debugging.
@@ -621,7 +621,10 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
         Commands::Memory { action } => memory_command(&layout, action, out),
         Commands::Usage { model, agents } => {
             let agent = agents.build(agents.selected(&layout)?, &layout)?;
-            let model = model.unwrap_or_else(|| agent.default_model().to_string());
+            let model = match model {
+                Some(model) => model,
+                None => agent.default_model()?,
+            };
             agent.check_model(&model)?;
             let sample = sample_weekly(agent.as_ref(), &model, &layout)?;
             out.emit(
@@ -1874,9 +1877,14 @@ that authoritative value.",
             .tokens
             .map(|cap| cap.saturating_sub(visit.ledger.tokens_used))
     });
-    let model = visit
-        .map(VisitRecord::turn_model)
-        .unwrap_or(agent.default_model());
+    let default_model;
+    let model = match visit {
+        Some(visit) => visit.turn_model(),
+        None => {
+            default_model = agent.default_model()?;
+            default_model.as_str()
+        }
+    };
     let first = run_turn(TurnRequest {
         agent,
         actor_name: &active.identity.name,
@@ -2054,7 +2062,10 @@ fn visit_command(
             agents,
         } => {
             let agent = agents.build(agents.selected(layout)?, layout)?;
-            let model = model.unwrap_or_else(|| agent.default_model().to_string());
+            let model = match model {
+                Some(model) => model,
+                None => agent.default_model()?,
+            };
             agent.check_model(&model)?;
             if weekly_percent.is_some() && agent.meter().is_none() {
                 return Err(Error::new(format!(

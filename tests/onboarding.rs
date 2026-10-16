@@ -220,12 +220,13 @@ fn codex_model_choice_reaches_the_visit_request_and_invalid_choices_never_start(
     let script = r#"
 import json, sys
 if sys.argv[1:] == ['--version']:
-    print('codex-cli 0.158.0'); sys.exit(0)
+    print('codex-cli 0.162.1'); sys.exit(0)
 if sys.argv[1:] == ['debug', 'models', '--bundled']:
     print(json.dumps({'models':[
         {'slug':'gpt-5.5','apply_patch_tool_type':'freeform','tool_mode':None},
         {'slug':'gpt-5.4','apply_patch_tool_type':'freeform','tool_mode':None},
-        {'slug':'gpt-6-astra','apply_patch_tool_type':'freeform','tool_mode':'code_mode_only'}]})); sys.exit(0)
+        {'slug':'gpt-6-astra','apply_patch_tool_type':'freeform','tool_mode':'code_mode_only'},
+        {'slug':'gpt-6.1-sol','apply_patch_tool_type':'freeform','tool_mode':'code_mode_only'}]})); sys.exit(0)
 assert sys.argv[1:] == ['app-server'], 'fixture never executes a model'
 for line in sys.stdin:
     req = json.loads(line)
@@ -233,7 +234,7 @@ for line in sys.stdin:
     result = {
         'initialize': {},
         'account/read': {'account':{'type':'chatgpt','planType':'pro'}},
-        'model/list': {'data':[{'id':'gpt-5.5'},{'id':'gpt-5.4'},{'id':'gpt-6-astra'},{'id':'account-only'}]},
+        'model/list': {'data':[{'id':'gpt-6-astra','isDefault':True},{'id':'gpt-6.1-sol'},{'id':'gpt-5.4'},{'id':'account-only'}]},
         'account/rateLimits/read': {'rateLimits':{'primary':{'usedPercent':20,'windowDurationMins':10080,'resetsAt':1791055017}}}
     }[req['method']]
     print(json.dumps({'id':req['id'],'result':result}),flush=True)
@@ -242,7 +243,11 @@ for line in sys.stdin:
         &m.root.join("bin/codex"),
         &format!("#!{}\n{script}", interpreter.trim()),
     );
-    for (extra, model) in [(vec![], "gpt-5.5"), (vec!["--model", "gpt-5.4"], "gpt-5.4")] {
+    for (extra, model) in [
+        (vec![], "gpt-6.1-sol"),
+        (vec!["--model", "gpt-6-astra"], "gpt-6-astra"),
+        (vec!["--model", "gpt-5.4"], "gpt-5.4"),
+    ] {
         let mut args = vec!["visit", "start", "--agent", "codex", "--json"];
         args.extend(extra);
         let out = m.run(&args);
@@ -263,7 +268,7 @@ for line in sys.stdin:
     }
     for (model, error) in [
         ("missing-model", "account can use"),
-        ("gpt-6-astra", "tool mode unavailable"),
+        ("gpt-5.5", "account can use"),
         ("account-only", "bundled catalog does not contain"),
         ("bad model", "must be a Codex model ID"),
     ] {
@@ -528,7 +533,7 @@ fn skill_explains_version_check_upgrade_and_model_choice() {
         "npm install -g @openai/codex@latest",
         "brew upgrade --cask codex",
         "--agent codex --model",
-        "gpt-5.5",
+        "gpt-6.1-sol",
         "account catalog",
     ] {
         assert!(text.contains(expected), "skill omitted {expected}");

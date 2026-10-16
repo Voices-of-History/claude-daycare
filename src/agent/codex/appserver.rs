@@ -208,6 +208,18 @@ pub fn model_ids(result: &Value) -> Vec<String> {
         .collect()
 }
 
+/// The visible model a `model/list` answer marks `isDefault`, if any.
+pub fn default_model_id(result: &Value) -> Option<String> {
+    result
+        .get("data")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter(|model| model.get("hidden").and_then(Value::as_bool) != Some(true))
+        .find(|model| model.get("isDefault").and_then(Value::as_bool) == Some(true))
+        .and_then(|model| model.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
 /// The weekly window out of an `account/rateLimits/read` answer.
 pub fn weekly_snapshot(result: &Value) -> Result<WeeklyUsageSnapshot> {
     let mut limits: Vec<&Value> = Vec::new();
@@ -370,6 +382,10 @@ reply(req, {'account': {'type': 'chatgpt', 'planType': 'pro'}})
 
     #[test]
     fn the_catalog_lists_visible_models() {
+        assert_eq!(
+            default_model_id(&fixture()["model/list"]["result"]).as_deref(),
+            Some("gpt-6-astra")
+        );
         let ids = model_ids(&fixture()["model/list"]["result"]);
         assert!(ids.contains(&"gpt-5.6-sol".to_string()), "{ids:?}");
         assert!(ids.contains(&"gpt-6-astra".to_string()), "{ids:?}");

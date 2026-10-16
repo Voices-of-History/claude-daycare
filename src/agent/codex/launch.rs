@@ -10,6 +10,10 @@
 //!   here): the owner's global AGENTS.md and `~/.agents/skills` never load.
 //! - `DISABLED_FEATURES` and `SEAL_SETTINGS`: no shell, file, web, image,
 //!   memory, plugin, or app reach, and no instruction blocks about them.
+//! - `ENABLED_FEATURES`: the code-mode host. Code-mode-only models (every
+//!   0.162 catalog model but gpt-5.5) reach tools only through it; it runs
+//!   their scripts in a V8 isolate with no file, network, or process API,
+//!   and those scripts can call only the tools registered here.
 //! - `sandbox_mode="read-only"`, `approval_policy="never"` as `-c` keys:
 //!   `codex exec resume` rejects `--sandbox`, `--cd`, and `-a`.
 //! - Exactly one MCP server, `daycare`, `required` so a server that is down
@@ -20,8 +24,10 @@
 //! flags alone do not suffice. This seal was verified on CLI 0.158.0;
 //! preflight rejects multi-agent instruction blocks and post-turn checks
 //! remain a backstop.
-//! A private model catalog clears `apply_patch_tool_type`, removing native
-//! patch registration. MCP tools are exposed directly, without tool search.
+//! A private model catalog clears `apply_patch_tool_type` and
+//! `experimental_supported_tools`, removing native patch registration and the
+//! user-message and clock tools. MCP tools are exposed without tool search:
+//! directly, or as nested tools of a code-mode script.
 //! Codex still advertises three MCP resource helpers whenever a server exists;
 //! they can reach only the configured Daycare server. Post-turn checks reject
 //! their use. A day report has no server and an empty tool catalog.
@@ -37,9 +43,22 @@ use crate::{Error, Result};
 use serde_json::Value;
 use std::path::Path;
 
-/// Default when the person does not select a Codex model. An explicit model
-/// is checked against the account catalog and sealed bundled metadata.
-pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
+/// Preferred when the person does not select a Codex model and the account
+/// offers it; otherwise the account's own default is used. Every model is
+/// checked against the account catalog and sealed bundled metadata.
+pub const DEFAULT_CODEX_MODEL: &str = "gpt-6.1-sol";
+
+/// The model for a visit that names none: Daycare's preference when the
+/// account offers it, else the account's own default, else its first model.
+pub fn choose_default_model(offered: &[String], account_default: Option<&str>) -> Option<String> {
+    offered
+        .iter()
+        .find(|model| *model == DEFAULT_CODEX_MODEL)
+        .map(String::as_str)
+        .or_else(|| account_default.filter(|model| offered.iter().any(|known| known == model)))
+        .or_else(|| offered.first().map(String::as_str))
+        .map(str::to_string)
+}
 
 /// Syntax only; the adapter also checks availability and tool compatibility.
 pub fn check_model_id(model: &str) -> Result<()> {
@@ -58,15 +77,39 @@ pub fn check_model_id(model: &str) -> Result<()> {
 pub const CODEX_UPGRADE: &str = "To upgrade Codex, use the method you installed it with: npm install -g @openai/codex@latest; or brew upgrade --cask codex. For a standalone install, rerun the official installer: curl -fsSL https://chatgpt.com/codex/install.sh | sh. Then run codex --version and confirm 0.158.0 or newer on PATH before retrying.";
 
 pub fn check_version(output: &str) -> Result<()> {
-    let version = output.trim().strip_prefix("codex-cli ");
-    let numbers: Option<Vec<u64>> =
-        version.and_then(|version| version.split('.').map(|n| n.parse().ok()).collect());
-    if let Some(numbers) = numbers {
-        if numbers.len() == 3 && (numbers[0], numbers[1], numbers[2]) >= (0, 158, 0) {
-            return Ok(());
-        }
+    if parse_version(output).is_some_and(|version| version >= (0, 158, 0)) {
+        return Ok(());
     }
     Err(Error::new(format!("Daycare requires Codex CLI 0.158.0 or newer to disable multi-agent tools before launch. {CODEX_UPGRADE}")))
+}
+
+/// The first Codex whose code-mode isolate and tool exposure were checked
+/// (tests/fixtures/codex-exec.md). Older releases bundle code-mode models too,
+/// but their runtime was never inspected.
+pub const CODE_MODE_MIN_VERSION: (u64, u64, u64) = (0, 162, 1);
+
+pub fn check_code_mode_version(output: &str, model: &str) -> Result<()> {
+    if parse_version(output).is_some_and(|version| version >= CODE_MODE_MIN_VERSION) {
+        return Ok(());
+    }
+    let (major, minor, patch) = CODE_MODE_MIN_VERSION;
+    Err(Error::new(format!(
+        "Codex model {model} runs tools through code mode, which Daycare supports from Codex CLI {major}.{minor}.{patch}. {CODEX_UPGRADE}"
+    )))
+}
+
+/// `codex-cli 0.162.1` -> (0, 162, 1).
+fn parse_version(output: &str) -> Option<(u64, u64, u64)> {
+    let numbers: Vec<u64> = output
+        .trim()
+        .strip_prefix("codex-cli ")?
+        .split('.')
+        .map(|n| n.parse().ok())
+        .collect::<Option<_>>()?;
+    match numbers[..] {
+        [major, minor, patch] => Some((major, minor, patch)),
+        _ => None,
+    }
 }
 
 /// How long one daycare tool call may run, and how long the server gets to
@@ -83,11 +126,11 @@ pub const AUTO_COMPACT_TOKENS: u64 = 250_000;
 /// Features that give Codex reach, or instructions about reach, beyond the
 /// daycare server. Taken from the feature names in the 0.154 binary; each is
 /// switched off by name so a default flipping on in a later release does not
-/// reopen it.
-pub const DISABLED_FEATURES: [&str; 27] = [
+/// reopen it. `code_mode` and `code_mode_only` keep a model without its own
+/// `tool_mode` on direct tools; a model's `tool_mode` overrides them.
+pub const DISABLED_FEATURES: [&str; 26] = [
     "code_mode",
     "code_mode_only",
-    "code_mode_host",
     "context_management",
     "current_time_reminder",
     "deferred_executor",
@@ -114,11 +157,21 @@ pub const DISABLED_FEATURES: [&str; 27] = [
     "sleep_tool",
 ];
 
+/// Switched on by name so a default flipping off does not strand
+/// code-mode-only models without tools. Without the host, Codex 0.162 sends
+/// such a model no tools at all ("Code mode will fail closed").
+pub const ENABLED_FEATURES: [&str; 1] = ["code_mode_host"];
+
 /// `-c` settings every Codex child gets, the preflight included.
 /// `skills.include_instructions=false` keeps `~/.agents/skills` out even if
 /// the throwaway HOME were bypassed: Codex reads that folder from HOME
 /// whatever `CODEX_HOME` says (Mac check, codex 0.155).
-pub const SEAL_SETTINGS: [&str; 13] = [
+/// The two `features.code_mode_*` keys would change which tools code mode
+/// exposes; `code_mode_only_strict_3p_tools` ignores `MCP_EXPOSURE`. Both are
+/// off by default in 0.162 and 0.163. They are pinned here rather than in
+/// `DISABLED_FEATURES` because `--disable` rejects a name an older Codex does
+/// not know, while a config key it does not know is only logged.
+pub const SEAL_SETTINGS: [&str; 15] = [
     "agents.enabled=false",
     "tools.experimental_request_user_input.enabled=false",
     "tools.update_plan.enabled=false",
@@ -132,6 +185,8 @@ pub const SEAL_SETTINGS: [&str; 13] = [
     "tools.view_image=false",
     r#"approval_policy="never""#,
     r#"sandbox_mode="read-only""#,
+    "features.code_mode_tool_search=false",
+    "features.code_mode_only_strict_3p_tools=false",
 ];
 
 /// The seal flags shared by `codex exec` and `codex debug prompt-input`:
@@ -140,6 +195,9 @@ pub fn seal_args(model: &str, developer_instructions: &str) -> Vec<String> {
     let mut args = Vec::new();
     for feature in DISABLED_FEATURES {
         args.extend(["--disable".to_string(), feature.to_string()]);
+    }
+    for feature in ENABLED_FEATURES {
+        args.extend(["--enable".to_string(), feature.to_string()]);
     }
     for setting in SEAL_SETTINGS {
         args.extend(["-c".to_string(), setting.to_string()]);
@@ -459,7 +517,9 @@ mod tests {
         assert!(has_pair(a, "-c", "skills.include_instructions=false"));
         assert!(has_pair(a, "-c", "agents.enabled=false"));
         assert!(has_pair(a, "-c", r#"web_search="disabled""#));
-        assert!(has_pair(a, "-c", r#"model="gpt-5.5""#));
+        assert!(has_pair(a, "-c", r#"model="gpt-6.1-sol""#));
+        assert!(has_pair(a, "--enable", "code_mode_host"));
+        assert!(!has_pair(a, "--disable", "code_mode_host"));
         assert!(has_pair(
             a,
             "-c",
@@ -494,7 +554,13 @@ mod tests {
         assert!(persona.contains("You are **Pip**"), "{persona}");
         assert!(!persona.contains("Claude"), "{persona}");
         assert!(!a.iter().any(|arg| arg.contains("dangerously")));
-        assert!(!a.iter().any(|arg| arg == "--enable"));
+        // The code-mode host is the only feature switched on.
+        let enabled: Vec<_> = a
+            .windows(2)
+            .filter(|pair| pair[0] == "--enable")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(enabled, ENABLED_FEATURES);
         assert!(
             !a.iter().any(|arg| arg.contains("dck_")),
             "no token on argv"
@@ -552,7 +618,7 @@ mod tests {
             r#"mcp_servers.daycare.enabled_tools=["daycare_memory_save", "daycare_memory_list"]"#
         ));
         assert!(has_pair(&home.args, "--disable", "shell_tool"));
-        assert!(!home.args.iter().any(|arg| arg == "--enable"));
+        assert!(has_pair(&home.args, "--disable", "unified_exec"));
     }
 
     #[test]
@@ -604,6 +670,30 @@ mod tests {
     }
 
     #[test]
+    fn the_default_model_follows_what_the_account_offers() {
+        let ids = |list: &[&str]| list.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let current = ids(&["gpt-6-astra", "gpt-6.1-sol", "gpt-5.6-sol"]);
+        assert_eq!(
+            choose_default_model(&current, Some("gpt-6-astra")).as_deref(),
+            Some(DEFAULT_CODEX_MODEL)
+        );
+        let without = ids(&["gpt-5.6-sol", "gpt-6-astra"]);
+        assert_eq!(
+            choose_default_model(&without, Some("gpt-6-astra")).as_deref(),
+            Some("gpt-6-astra")
+        );
+        assert_eq!(
+            choose_default_model(&without, Some("not-offered")).as_deref(),
+            Some("gpt-5.6-sol")
+        );
+        assert_eq!(
+            choose_default_model(&without, None).as_deref(),
+            Some("gpt-5.6-sol")
+        );
+        assert_eq!(choose_default_model(&[], Some("gpt-6-astra")), None);
+    }
+
+    #[test]
     fn model_ids_and_supported_versions_are_checked() {
         for model in ["gpt-5.5", "gpt-5.4", "gpt-6-astra", "gpt-5.6-sol"] {
             check_model_id(model).unwrap();
@@ -626,6 +716,37 @@ mod tests {
             "garbage",
         ] {
             assert!(check_version(version).is_err(), "{version}");
+        }
+    }
+
+    #[test]
+    fn code_mode_needs_a_verified_codex() {
+        for version in [
+            "codex-cli 0.162.1\n",
+            "codex-cli 0.163.0",
+            "codex-cli 1.0.0",
+        ] {
+            check_code_mode_version(version, "gpt-6.1-sol").unwrap();
+        }
+        for version in ["codex-cli 0.158.0", "codex-cli 0.162.0", "garbage"] {
+            let error = check_code_mode_version(version, "gpt-6-astra")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("gpt-6-astra") && error.contains("0.162.1"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_mode_exposure_features_are_pinned_off() {
+        let args = seal_args("gpt-6.1-sol", "persona");
+        for setting in [
+            "features.code_mode_tool_search=false",
+            "features.code_mode_only_strict_3p_tools=false",
+        ] {
+            assert!(args.iter().any(|arg| arg == setting), "{setting}");
         }
     }
 }

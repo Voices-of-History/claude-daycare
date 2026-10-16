@@ -115,8 +115,9 @@ pub trait Agent {
     /// The product name for people (`Claude Code`, `Codex`).
     fn product_name(&self) -> &'static str;
 
-    /// The model a visit runs on when the person names none.
-    fn default_model(&self) -> &'static str;
+    /// The model a visit runs on when the person names none. Codex asks the
+    /// account which models it offers.
+    fn default_model(&self) -> Result<String>;
 
     /// Refuse a model this agent will not run a visit on.
     fn check_model(&self, model: &str) -> Result<()>;

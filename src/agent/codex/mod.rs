@@ -87,8 +87,8 @@ pub struct CodexAgent {
     meter: AppServerMeter,
     /// The plan type, once `account/read` accepted the login.
     account: OnceLock<String>,
-    /// The visible catalog, once read.
-    models: OnceLock<Vec<String>>,
+    /// The visible catalog and the account's default, once read.
+    models: OnceLock<(Vec<String>, Option<String>)>,
     version_checked: OnceLock<()>,
 }
 
@@ -135,15 +135,17 @@ impl CodexAgent {
         Ok(())
     }
 
-    fn catalog(&self) -> Result<&[String]> {
+    fn catalog(&self) -> Result<&(Vec<String>, Option<String>)> {
         if let Some(models) = self.models.get() {
             return Ok(models);
         }
         self.ensure_login()?;
-        let models = appserver::model_ids(
-            &self
-                .meter
-                .request("model/list", Some(serde_json::json!({})))?,
+        let list = self
+            .meter
+            .request("model/list", Some(serde_json::json!({})))?;
+        let models = (
+            appserver::model_ids(&list),
+            appserver::default_model_id(&list),
         );
         Ok(self.models.get_or_init(|| models))
     }
@@ -286,13 +288,16 @@ impl Agent for CodexAgent {
         "Codex"
     }
 
-    fn default_model(&self) -> &'static str {
-        launch::DEFAULT_CODEX_MODEL
+    fn default_model(&self) -> Result<String> {
+        let (offered, account_default) = self.catalog()?;
+        launch::choose_default_model(offered, account_default.as_deref()).ok_or_else(|| {
+            Error::new("this Codex account offers no models; check `codex` and your ChatGPT plan")
+        })
     }
 
     fn check_model(&self, model: &str) -> Result<()> {
         launch::check_model_id(model)?;
-        let catalog = self.catalog()?;
+        let (catalog, _) = self.catalog()?;
         if catalog.iter().any(|known| known == model) {
             with_synced_login(self.login.as_ref(), &self.homes.codex_home, || {
                 catalog::inspect(&self.meter.codex, model).map(|_| ())
