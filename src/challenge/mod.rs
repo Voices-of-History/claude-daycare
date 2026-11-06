@@ -32,8 +32,9 @@ use std::path::{Path, PathBuf};
 
 /// The entry id when this process runs inside a challenge session.
 pub fn inside_session() -> Option<String> {
-    std::env::var(SESSION_MARKER_ENV)
-        .ok()
+    // `var_os`: a value that is not UTF-8 still marks a session.
+    std::env::var_os(SESSION_MARKER_ENV)
+        .map(|value| value.to_string_lossy().into_owned())
         .filter(|value| !value.trim().is_empty())
 }
 
