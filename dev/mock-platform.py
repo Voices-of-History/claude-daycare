@@ -23,8 +23,14 @@ on every MCP request including `initialize`.
 With DAYCARE_MOCK_VISIT=1 it also serves the visit routes (open, status, end,
 report, transcript) and queues one world turn tied to that visit, for
 `dev/visit-check.sh`.
+
+With DAYCARE_MOCK_CHALLENGE=1 it also serves the runner's challenge routes
+(list, show, attempts) and one input file behind a signed-looking URL, for a
+`challenge start --print` rehearsal. The shapes follow the stream B contract
+in the build brief; check them against the platform's routes once they land.
 """
 
+import hashlib
 import http.server
 import json
 import os
@@ -41,6 +47,9 @@ TOKEN = "dck_dev_" + uuid.uuid4().hex[:24]
 TURN_PROMPT = os.environ.get("DAYCARE_MOCK_TURN_PROMPT")
 VISIT_MODE = os.environ.get("DAYCARE_MOCK_VISIT") == "1"
 VISIT_ID = "visit-live"
+CHALLENGE_MODE = os.environ.get("DAYCARE_MOCK_CHALLENGE") == "1"
+CHALLENGE_ID = "challenge-live"
+CHALLENGE_INPUT = b"name,email\nAda,ada@example.test\n"
 
 # constants.ts
 MCP_PATH = "/api/daycare/mcp/mcp"
@@ -72,6 +81,7 @@ STATE = {
     "visits": [],
     "visit_ends": [],
     "visit_reports": [],
+    "challenge_attempts": [],
     # The adjudicator scopes its memory cap to the current turn command.
     "window": None,
 }
@@ -411,7 +421,49 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not self._authorized():
                 return self._json(401, {"error": "Unauthorized"})
             return self._json(200, self._visit())
+        if CHALLENGE_MODE and self.path.startswith("/storage/inputs/"):
+            # A signed URL carries its own grant; no Authorization expected.
+            body = CHALLENGE_INPUT
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return None
+        if CHALLENGE_MODE and self.path == "/api/daycare/challenges":
+            if not self._authorized():
+                return self._json(401, {"error": "Unauthorized"})
+            return self._json(200, {"challenges": [self._challenge()]})
+        if CHALLENGE_MODE and self.path == f"/api/daycare/challenges/{CHALLENGE_ID}":
+            if not self._authorized():
+                return self._json(401, {"error": "Unauthorized"})
+            return self._json(
+                200,
+                {
+                    "challenge": self._challenge(),
+                    "inputs": [
+                        {
+                            "path": "form.csv",
+                            "bytes": len(CHALLENGE_INPUT),
+                            "sha256": hashlib.sha256(CHALLENGE_INPUT).hexdigest(),
+                            "url": f"http://127.0.0.1:{PORT}/storage/inputs/{CHALLENGE_ID}/form.csv?token=mock",
+                        }
+                    ],
+                },
+            )
         return self._json(404, {"error": "Not found"})
+
+    def _challenge(self):
+        return {
+            "id": CHALLENGE_ID,
+            "slug": "practice-signup",
+            "title": "Practice: Signup Rescue",
+            "state": "open",
+            "brief_md": "Make the signup form in inputs/ work. Put the result in output/.",
+            "weights": {"vote": 40, "goal": 40, "third": 20},
+            "third_label": "Accessibility",
+            "closes_at": "2099-01-01T00:00:00Z",
+        }
 
     def _visit(self):
         return {
@@ -459,6 +511,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not self._authorized():
                 return self._json(401, {"error": "Unauthorized"})
             return self._mcp(json.loads(raw or "{}"))
+
+        if CHALLENGE_MODE and self.path == f"/api/daycare/challenges/{CHALLENGE_ID}/attempts":
+            if not self._authorized():
+                return self._json(401, {"error": "Unauthorized"})
+            body = json.loads(raw or "{}")
+            # Strict, as the platform's routes are: actor_id and nothing else.
+            if set(body) != {"actor_id"}:
+                return self._json(400, {"error": "unexpected fields"})
+            with LOCK:
+                STATE["challenge_attempts"].append(body)
+                dump_state()
+            return self._json(200, {"entry_id": "entry-live"})
 
         if VISIT_MODE and self.path.startswith("/api/daycare/visits"):
             if not self._authorized():

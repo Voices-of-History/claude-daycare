@@ -859,6 +859,88 @@ impl PlatformClient {
         let text = read_body(response, "memory list")?;
         parse_memory_page(&text)
     }
+
+    /// Open challenges (`GET /api/daycare/challenges`). The shape is read
+    /// leniently by `challenge`: a bare array or `{ "challenges": [...] }`.
+    pub fn list_challenges(&self, identity_token: &str) -> Result<serde_json::Value> {
+        let response = self
+            .get(&self.url(paths::CHALLENGES))
+            .set("Authorization", &format!("Bearer {identity_token}"))
+            .call();
+        let text = read_body(response, "challenge list")?;
+        serde_json::from_str(&text).map_err(|_| Error::new("challenge list response was not JSON"))
+    }
+
+    /// One challenge: brief, weights, limits, and its input files with signed
+    /// read URLs (`GET /api/daycare/challenges/{id}`).
+    pub fn get_challenge(
+        &self,
+        identity_token: &str,
+        challenge_id: &str,
+    ) -> Result<serde_json::Value> {
+        let response = self
+            .get(&self.url(&paths::challenge(challenge_id)))
+            .set("Authorization", &format!("Bearer {identity_token}"))
+            .call();
+        let text = read_body(response, "challenge show")?;
+        serde_json::from_str(&text).map_err(|_| Error::new("challenge response was not JSON"))
+    }
+
+    /// Enroll this identity's owner in a challenge with this identity as the
+    /// entry's agent (`POST /api/daycare/challenges/{id}/attempts`). The body
+    /// carries the actor id and nothing else: the identity token already says
+    /// who is asking, and these routes are strict about extra fields.
+    pub fn start_attempt(
+        &self,
+        identity_token: &str,
+        challenge_id: &str,
+        actor_id: &str,
+    ) -> Result<serde_json::Value> {
+        let body = serde_json::json!({ "actor_id": actor_id });
+        let response = self
+            .post(&self.url(&paths::challenge_attempts(challenge_id)))
+            .set("Authorization", &format!("Bearer {identity_token}"))
+            .set("Content-Type", "application/json")
+            .send_string(&body.to_string());
+        let text = read_body(response, "challenge start")?;
+        serde_json::from_str(&text).map_err(|_| Error::new("challenge start response was not JSON"))
+    }
+}
+
+/// Fetch one signed download URL (a challenge input file). No Daycare header
+/// or credential is sent: the URL carries its own short-lived grant, and the
+/// host may not be the platform at all. HTTPS only, or loopback for tests and
+/// a local platform. At most `max_bytes` are read.
+pub fn download_signed(url: &str, max_bytes: u64) -> Result<Vec<u8>> {
+    use std::io::Read;
+    if !crate::self_update::https_or_loopback(url) {
+        return Err(Error::new(
+            "an input file's download link is not HTTPS; refusing it",
+        ));
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout(Duration::from_secs(600))
+        .user_agent(concat!("daycare-runner/", env!("CARGO_PKG_VERSION")))
+        .build();
+    // The URL is a bearer grant: errors name the status, never the URL.
+    let response = agent.get(url).call().map_err(|error| match error {
+        ureq::Error::Status(code, _) => {
+            Error::new(format!("an input file download failed: HTTP {code}")).with_status(code)
+        }
+        ureq::Error::Transport(_) => Error::transport("an input file download failed to connect"),
+    })?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(Error::new(format!(
+            "an input file is larger than the {max_bytes} bytes the challenge declared"
+        )));
+    }
+    Ok(bytes)
 }
 
 fn collect_memory_pages(

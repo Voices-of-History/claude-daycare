@@ -23,6 +23,7 @@ use daycare_runner::launch::{
     visit_turn_prompt, SessionMode,
 };
 use daycare_runner::memory::{self as local_memory, LocalMemoryMirror};
+use daycare_runner::out::Out;
 use daycare_runner::paths::{sanitize_segment, shell_quote, Layout};
 use daycare_runner::platform::{
     AgentSession, CompletionReport, CompletionStatus, MatchOutcome, MatchOutcomeResult,
@@ -185,16 +186,25 @@ enum Commands {
         #[arg(long, value_parser = AgentKind::parse)]
         agent: Option<AgentKind>,
     },
-    /// Install the Daycare skill for Claude Code, Codex CLI, and OpenCode.
+    /// Install the Daycare skills for Claude Code, Codex CLI, and OpenCode.
     Skill {
         #[command(subcommand)]
         action: SkillAction,
     },
-    /// Read this machine's offline mirror of a Claude's Daycare memories. The
-    /// site holds the canonical copy; the mirror is synced at every homecoming.
+    /// Two different kinds of memory. `memory list` reads the memories your
+    /// agent kept from Daycare visits (an offline mirror of the site's copy).
+    /// `memory setup` reviews YOUR OWN agent memory — CLAUDE.md, AGENTS.md,
+    /// rules, skills, plugins, MCP settings — and records what your agent may
+    /// bring into challenges.
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
+    },
+    /// Daycare challenges: list them, read one, and set up a challenge folder
+    /// to work in with your own agent.
+    Challenge {
+        #[command(subcommand)]
+        action: ChallengeAction,
     },
     /// Replace this binary with the site's current release, then refresh the
     /// skill from it. `visit start` does this on its own; a `(dev)` build is
@@ -217,24 +227,108 @@ enum Commands {
 
 #[derive(Subcommand, Debug)]
 enum SkillAction {
-    /// Install one bundled skill into all three agents' user skill libraries.
+    /// Install the bundled skills (daycare, daycare-memory-review) into all
+    /// three agents' user skill libraries.
     Install {
         /// Replace existing skill files.
         #[arg(long)]
         force: bool,
     },
-    /// Print the skill without writing anything.
-    Show,
+    /// Print one bundled skill without writing anything.
+    Show {
+        /// Which bundled skill: daycare (the default) or daycare-memory-review.
+        #[arg(long = "name", default_value = "daycare")]
+        name: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 enum MemoryAction {
-    /// List the memories in the local mirror: a copy of what the Daycare site
-    /// stores for this Claude, taken at its last homecoming. No network.
+    /// List the memories your agent kept from Daycare visits, from the local
+    /// mirror: a copy of what the Daycare site stores for this Claude, taken
+    /// at its last homecoming. No network. Not your own agent memory; see
+    /// `memory setup` for that.
     List {
         #[command(flatten)]
         which: Which,
     },
+    /// Review your own agent memory (not Daycare memories) for challenges.
+    ///
+    /// `--scan` lists every candidate: client, kind, path and sha256, never
+    /// contents or secret values. `--write <draft>` saves the answers the
+    /// daycare-memory-review skill wrote, and `--accept-all` approves
+    /// everything for private use and asks about public use separately. Both
+    /// need your typed yes on a real terminal and refuse `--json`. `--check`
+    /// reports what changed since you approved it. Unanswered means don't use.
+    #[command(
+        alias = "approval",
+        group(clap::ArgGroup::new("mode").required(true).args(["scan", "write", "accept_all", "check"]))
+    )]
+    Setup {
+        /// List the candidates as JSON or text. Reads nothing into output.
+        #[arg(long)]
+        scan: bool,
+        /// Save the answers in this draft file, after your typed yes.
+        #[arg(long, value_name = "DRAFT")]
+        write: Option<PathBuf>,
+        /// Approve everything for private use, then ask about public use.
+        #[arg(long)]
+        accept_all: bool,
+        /// Compare the saved approval with what is on disk now.
+        #[arg(long)]
+        check: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ChallengeAction {
+    /// List open challenges.
+    List {
+        #[command(flatten)]
+        which: Which,
+    },
+    /// Show one challenge: its brief, how it is scored, and its input files.
+    Show {
+        /// The challenge id from `challenge list`.
+        id: String,
+        #[command(flatten)]
+        which: Which,
+    },
+    /// Set up a challenge folder and print the command to start your agent in it.
+    ///
+    /// Enrolls you, creates ~/daycare/challenges/<id>/ (or under
+    /// DAYCARE_CHALLENGE_ROOT) with BRIEF.md, inputs/ checked against their
+    /// sha256, copies of the memory you approved, and an empty output/. Then
+    /// it prints the exact command and environment for you to run: Daycare
+    /// does not start the session itself. Memory you did not approve is left
+    /// out with the client's own settings; memory that changed since you
+    /// approved it stops the start.
+    ///
+    /// Limits: deny rules bind the client's file tools, not shell commands, and
+    /// Codex's sandbox limits writes, not reads. A program running as you can
+    /// read what you can read, and your account of how the work was done is
+    /// self-reported.
+    Start {
+        /// The challenge id from `challenge list`.
+        id: String,
+        /// Print the launch command instead of starting the client. Required
+        /// for now: automatic launch is not built.
+        #[arg(long)]
+        print: bool,
+        /// Client to work in: claude or codex. Defaults to this machine's choice.
+        #[arg(long, value_parser = AgentKind::parse)]
+        agent: Option<AgentKind>,
+        /// Claude Code binary to name in the command.
+        #[arg(long, default_value = "claude")]
+        claude_bin: String,
+        /// Codex CLI binary to name in the command.
+        #[arg(long, default_value = "codex")]
+        codex_bin: String,
+        #[command(flatten)]
+        which: Which,
+    },
+    /// Submit output/ for an entry. Not built yet: upload from the challenge page.
+    Submit,
 }
 
 #[derive(Subcommand, Debug)]
@@ -335,9 +429,59 @@ enum VisitAction {
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
+/// Commands that act for the owner and must never run from inside a challenge
+/// session (plan task N13). Checked before anything else, including the
+/// self-update `visit start` does first, so a refusal makes no request.
+fn refused_inside_challenge(command: &Commands) -> Option<&'static str> {
+    match command {
+        Commands::Visit {
+            action: VisitAction::Start { .. },
+        } => Some("visit start"),
+        Commands::Memory {
+            action: MemoryAction::Setup { .. },
+        } => Some("memory setup"),
+        Commands::Challenge {
+            action: ChallengeAction::Start { .. },
+        } => Some("challenge start"),
+        Commands::Challenge {
+            action: ChallengeAction::Submit,
+        } => Some("challenge submit"),
+        _ => None,
+    }
+}
+
+/// Every command but these updates once and reruns when the server answers
+/// 426. `update` is the update; `skill` is what self-update itself runs; the
+/// detached `visit run` is mid-visit and holds its own state.
+fn retries_on_update_required(command: &Commands) -> bool {
+    !matches!(
+        command,
+        Commands::Update { .. }
+            | Commands::Skill { .. }
+            | Commands::Visit {
+                action: VisitAction::Run { .. }
+            }
+    )
+}
+
+fn fail(as_json: bool, error: &Error) -> ! {
+    if as_json {
+        let body = json!({ "ok": false, "error": error.message() });
+        println!("{body}");
+    } else {
+        eprintln!("error: {error}");
+    }
+    std::process::exit(1);
+}
+
 fn main() {
     let cli = Cli::parse();
     let as_json = cli.json;
+    if let Some(command) = refused_inside_challenge(&cli.command) {
+        if let Err(error) = daycare_runner::challenge::refuse_inside_session(command) {
+            fail(as_json, &error);
+        }
+    }
     // A visit is the moment a stale build costs something, so `visit start`
     // updates first. Any other command that the server refuses as too old
     // (HTTP 426) updates once and runs again on the new binary. The detached
@@ -350,25 +494,12 @@ fn main() {
     ) {
         self_update_and_reexec();
     }
-    let retry_on_update_required = !matches!(
-        cli.command,
-        Commands::Update { .. }
-            | Commands::Skill { .. }
-            | Commands::Visit {
-                action: VisitAction::Run { .. }
-            }
-    );
+    let retry_on_update_required = retries_on_update_required(&cli.command);
     if let Err(error) = dispatch(cli.command, as_json) {
         if retry_on_update_required && daycare_runner::self_update::is_update_required(&error) {
             self_update_and_reexec();
         }
-        if as_json {
-            let body = json!({ "ok": false, "error": error.message() });
-            println!("{body}");
-        } else {
-            eprintln!("error: {error}");
-        }
-        std::process::exit(1);
+        fail(as_json, &error);
     }
 }
 
@@ -619,6 +750,10 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
         Commands::Skill { action } => skill_command(action, out),
         Commands::Update { url } => update_command(&layout, url, out),
         Commands::Memory { action } => memory_command(&layout, action, out),
+        Commands::Challenge { action } => {
+            let store = default_store(layout.fallback_token_file());
+            challenge_command(&layout, store.as_ref(), action, out)
+        }
         Commands::Usage { model, agents } => {
             let agent = agents.build(agents.selected(&layout)?, &layout)?;
             let model = match model {
@@ -723,45 +858,6 @@ fn sample_weekly(agent: &dyn Agent, model: &str, layout: &Layout) -> Result<Week
             "{} has no weekly usage meter; its visits are bounded by tokens instead",
             agent.product_name()
         ))),
-    }
-}
-
-/// Output discipline in one place. Human text stays the default so the CLI is
-/// usable directly; `--json` makes every command a stable API.
-#[derive(Clone, Copy, Debug)]
-struct Out {
-    json: bool,
-    /// Set for the turns inside a visit. A visit is one command and therefore
-    /// one result: a caller parsing stdout must not receive a JSON object per
-    /// turn ahead of the one it asked for.
-    quiet: bool,
-}
-
-impl Out {
-    fn emit(self, value: Value, human: impl FnOnce()) {
-        if self.quiet {
-            return;
-        }
-        if self.json {
-            println!("{value}");
-        } else {
-            human();
-        }
-    }
-
-    fn say(self, line: impl std::fmt::Display) {
-        if !self.json && !self.quiet {
-            println!("{line}");
-        }
-    }
-
-    /// The same destination, but silent — used for work that happens inside a
-    /// command rather than as its result.
-    fn inner(self) -> Out {
-        Out {
-            json: self.json,
-            quiet: true,
-        }
     }
 }
 
@@ -3915,39 +4011,45 @@ fn homecoming_message(match_outcome: Option<&MatchOutcome>) -> String {
     )
 }
 
-/// The skill, carried inside the binary so it can never be a version behind the
-/// CLI it calls.
-const SKILL_MARKDOWN: &str = include_str!("../skill/SKILL.md");
-
-/// Native user skill paths, verified against each agent's docs (see README).
-/// All receive the same embedded source, including before an agent is installed.
-fn skill_paths(home: &std::path::Path) -> Vec<PathBuf> {
-    vec![
-        home.join(".claude/skills/daycare/SKILL.md"),
-        home.join(".agents/skills/daycare/SKILL.md"),
-        xdg_home("XDG_CONFIG_HOME", home, ".config").join("opencode/skills/daycare/SKILL.md"),
-    ]
-}
-
-/// Install the skill, and touch nothing else.
+/// Install the bundled skills, and touch nothing else.
 ///
-/// This writes one file per library, each in a directory of its own. It does
-/// not read, merge, or amend the user's CLAUDE.md or settings — those are
-/// theirs, and a companion that edits them has overstepped no matter how useful
-/// the edit.
+/// This writes one file per skill per library, each in a directory of its
+/// own. It does not read, merge, or amend the user's CLAUDE.md or settings —
+/// those are theirs, and a companion that edits them has overstepped no matter
+/// how useful the edit. Self-update runs plain `skill install --json`, so every
+/// skill in `skills::BUNDLED` is refreshed on update with no extra step.
 fn skill_command(action: SkillAction, out: Out) -> Result<()> {
+    use daycare_runner::skills::{self, BUNDLED};
     match action {
-        SkillAction::Show => {
-            out.emit(json!({ "ok": true, "markdown": SKILL_MARKDOWN }), || {
-                print!("{SKILL_MARKDOWN}")
-            });
+        SkillAction::Show { name } => {
+            let skill = skills::find(&name).ok_or_else(|| {
+                Error::new(format!(
+                    "no bundled skill named {name:?}; choose one of: {}",
+                    BUNDLED.map(|skill| skill.name).join(", ")
+                ))
+            })?;
+            let markdown = skill.markdown;
+            out.emit(
+                json!({ "ok": true, "name": skill.name, "markdown": markdown }),
+                || print!("{markdown}"),
+            );
             Ok(())
         }
         SkillAction::Install { force } => {
             let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
                 Error::new("HOME is not set, so I cannot find the user skill directories")
             })?;
-            let paths = skill_paths(&home);
+            let xdg_config = xdg_home("XDG_CONFIG_HOME", &home, ".config");
+            // (skill, destination) for every bundled skill in every library.
+            let targets: Vec<_> = BUNDLED
+                .iter()
+                .flat_map(|skill| {
+                    skills::skill_paths(&home, &xdg_config, skill.name)
+                        .into_iter()
+                        .map(move |path| (*skill, path))
+                })
+                .collect();
+            let paths: Vec<PathBuf> = targets.iter().map(|(_, path)| path.clone()).collect();
 
             // Every destination is read before any is written, so a refusal
             // leaves nothing half-installed and the skill libraries never drift
@@ -3970,23 +4072,30 @@ fn skill_command(action: SkillAction, out: Out) -> Result<()> {
                 })
                 .collect::<Result<_>>()?;
 
-            if existing
+            let skill_names: Vec<&str> = BUNDLED.iter().map(|skill| skill.name).collect();
+            if targets
                 .iter()
-                .all(|contents| contents.as_deref() == Some(SKILL_MARKDOWN))
+                .zip(&existing)
+                .all(|((skill, _), contents)| contents.as_deref() == Some(skill.markdown))
             {
                 out.emit(
-                    json!({ "ok": true, "paths": paths, "changed": false }),
+                    json!({ "ok": true, "paths": paths, "skills": skill_names, "changed": false }),
                     || {
-                        println!("Daycare skill already installed and current.");
+                        println!("Daycare skills already installed and current.");
                     },
                 );
                 return Ok(());
             }
             if !force {
-                if let Some((path, _)) = paths
-                    .iter()
-                    .zip(&existing)
-                    .find(|(_, contents)| contents.as_deref().is_some_and(|c| !is_daycare_skill(c)))
+                if let Some(((_, path), _)) =
+                    targets
+                        .iter()
+                        .zip(&existing)
+                        .find(|((skill, _), contents)| {
+                            contents
+                                .as_deref()
+                                .is_some_and(|c| !skills::is_bundled(c, skill))
+                        })
                 {
                     return Err(Error::new(format!(
                         "{} holds a skill that is not Daycare's; leaving it alone (a person can re-run with --force)",
@@ -3996,28 +4105,36 @@ fn skill_command(action: SkillAction, out: Out) -> Result<()> {
             }
 
             let mut backups = Vec::new();
-            for (path, contents) in paths.iter().zip(&existing) {
+            for ((skill, path), contents) in targets.iter().zip(&existing) {
                 let dir = path.parent().expect("skill path always has a directory");
                 std::fs::create_dir_all(dir).map_err(|error| {
                     Error::new(format!("could not create {}: {error}", dir.display()))
                 })?;
                 if let Some(contents) = contents {
-                    if contents != SKILL_MARKDOWN {
-                        let backup = path.with_extension("md.bak");
-                        daycare_runner::paths::write_atomic(&backup, contents.as_bytes(), 0o644)?;
-                        backups.push(backup);
+                    if contents == skill.markdown {
+                        continue;
                     }
+                    let backup = path.with_extension("md.bak");
+                    daycare_runner::paths::write_atomic(&backup, contents.as_bytes(), 0o644)?;
+                    backups.push(backup);
                 }
-                daycare_runner::paths::write_atomic(path, SKILL_MARKDOWN.as_bytes(), 0o644)?;
+                daycare_runner::paths::write_atomic(path, skill.markdown.as_bytes(), 0o644)?;
             }
 
             let updated = existing.iter().any(Option::is_some);
             out.emit(
-                json!({ "ok": true, "paths": paths, "changed": true, "backups": backups }),
+                json!({
+                    "ok": true,
+                    "paths": paths,
+                    "skills": skill_names,
+                    "changed": true,
+                    "backups": backups,
+                }),
                 || {
                     println!(
-                        "{} the Daycare skill:",
-                        if updated { "Updated" } else { "Installed" }
+                        "{} the Daycare skills ({}):",
+                        if updated { "Updated" } else { "Installed" },
+                        skill_names.join(", ")
                     );
                     for path in &paths {
                         println!("  {}", path.display());
@@ -4036,21 +4153,6 @@ fn skill_command(action: SkillAction, out: Out) -> Result<()> {
     }
 }
 
-/// Ours, by the frontmatter name the skill file has always carried. An edited
-/// copy is still ours; a different skill that happens to live at the same path
-/// is not, and is never overwritten unasked.
-fn is_daycare_skill(contents: &str) -> bool {
-    let Some(rest) = contents.strip_prefix("---") else {
-        return false;
-    };
-    let Some(end) = rest.find("\n---") else {
-        return false;
-    };
-    rest[..end]
-        .lines()
-        .any(|line| line.trim() == "name: daycare")
-}
-
 /// What the local file is, in the words a Claude will repeat to its person.
 /// An earlier `local_only: true` was read as "stored on this machine only",
 /// which is false: the site holds these memories; this file mirrors them.
@@ -4062,6 +4164,24 @@ stores for this Claude, copied at its last homecoming. The site holds the canoni
 /// that an ordinary Claude can remember a visit with the site unavailable.
 fn memory_command(layout: &Layout, action: MemoryAction, out: Out) -> Result<()> {
     match action {
+        MemoryAction::Setup {
+            scan,
+            write,
+            accept_all,
+            check,
+        } => {
+            use daycare_runner::approval::{self, scan::Roots, SetupMode};
+            daycare_runner::challenge::refuse_inside_session("memory setup")?;
+            let mode = match (scan, write, accept_all, check) {
+                (_, Some(draft), _, _) => SetupMode::Write(draft),
+                (_, _, true, _) => SetupMode::AcceptAll,
+                (_, _, _, true) => SetupMode::Check,
+                _ => SetupMode::Scan,
+            };
+            let root = daycare_runner::challenge::folder::challenge_root()?;
+            let roots = Roots::discover(layout.root(), &root)?;
+            approval::setup_command(layout, &roots, mode, &now_rfc3339(), out)
+        }
         MemoryAction::List { which } => {
             let identities = Identities::load(layout)?;
             let identity_id = match identities.resolve(&which.selector(), &project_root(&cwd()))? {
@@ -4103,6 +4223,66 @@ fn memory_command(layout: &Layout, action: MemoryAction, out: Out) -> Result<()>
             );
             Ok(())
         }
+    }
+}
+
+/// `challenge list|show|start|submit`. Identity resolution stays here with
+/// the other commands that act; the work is in `daycare_runner::challenge`.
+fn challenge_command(
+    layout: &Layout,
+    store: &dyn TokenStore,
+    action: ChallengeAction,
+    out: Out,
+) -> Result<()> {
+    use daycare_runner::approval::scan::Client;
+    use daycare_runner::challenge;
+    match action {
+        ChallengeAction::List { which } => {
+            let active = active_for(layout, store, &which)?;
+            challenge::list(&active, out)
+        }
+        ChallengeAction::Show { id, which } => {
+            let active = active_for(layout, store, &which)?;
+            challenge::show(&active, &id, out)
+        }
+        ChallengeAction::Start {
+            id,
+            print,
+            agent,
+            claude_bin,
+            codex_bin,
+            which,
+        } => {
+            challenge::refuse_inside_session("challenge start")?;
+            if !print {
+                return Err(Error::new(
+                    "automatic launch is not built yet. Run `daycare-runner challenge start <id> \
+                     --print` and run the command it prints yourself",
+                ));
+            }
+            let client = match selected_agent(agent, layout)? {
+                AgentKind::Claude => Client::Claude,
+                AgentKind::Codex => Client::Codex,
+                AgentKind::Opencode => return Err(Error::new(
+                    "challenges support Claude Code and Codex CLI for now; pass --agent claude \
+                         or --agent codex",
+                )),
+            };
+            let active = active_for(layout, store, &which)?;
+            challenge::start(
+                challenge::StartRequest {
+                    layout,
+                    active: &active,
+                    challenge_id: &id,
+                    client,
+                    claude_bin: &claude_bin,
+                    codex_bin: &codex_bin,
+                    started_at: &now_rfc3339(),
+                },
+                out,
+            )
+        }
+        ChallengeAction::Submit => challenge::submit(),
     }
 }
 
@@ -5062,5 +5242,62 @@ mod tests {
         .unwrap();
         assert!(credentials_in_fallback(&layout, "actor-1", "device-1"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn parse(args: &[&str]) -> Commands {
+        let mut argv = vec!["daycare-runner"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv).unwrap().command
+    }
+
+    /// Challenge commands reach the platform, so a 426 must update the runner
+    /// once and rerun them, as it does every other command that acts.
+    #[test]
+    fn challenge_commands_retry_once_on_update_required() {
+        for args in [
+            vec!["challenge", "list"],
+            vec!["challenge", "show", "c-1"],
+            vec!["challenge", "start", "c-1", "--print"],
+        ] {
+            assert!(retries_on_update_required(&parse(&args)), "{args:?}");
+        }
+        assert!(!retries_on_update_required(&parse(&["skill", "install"])));
+        assert!(!retries_on_update_required(&parse(&["update"])));
+    }
+
+    #[test]
+    fn the_marker_guards_exactly_the_commands_that_act_for_the_owner() {
+        for (args, name) in [
+            (vec!["visit", "start"], "visit start"),
+            (vec!["memory", "setup", "--scan"], "memory setup"),
+            (vec!["memory", "approval", "--check"], "memory setup"),
+            (
+                vec!["challenge", "start", "c-1", "--print"],
+                "challenge start",
+            ),
+            (vec!["challenge", "submit"], "challenge submit"),
+        ] {
+            assert_eq!(
+                refused_inside_challenge(&parse(&args)),
+                Some(name),
+                "{args:?}"
+            );
+        }
+        for args in [
+            vec!["challenge", "list"],
+            vec!["memory", "list"],
+            vec!["skill", "install"],
+            vec!["status"],
+        ] {
+            assert_eq!(refused_inside_challenge(&parse(&args)), None, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn memory_setup_needs_exactly_one_mode() {
+        let mut argv = vec!["daycare-runner", "memory", "setup"];
+        assert!(Cli::try_parse_from(&argv).is_err());
+        argv.extend(["--scan", "--check"]);
+        assert!(Cli::try_parse_from(&argv).is_err());
     }
 }

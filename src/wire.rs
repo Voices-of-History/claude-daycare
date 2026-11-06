@@ -165,6 +165,17 @@ pub mod paths {
     pub fn visit_transcript(visit_id: &str) -> String {
         format!("/api/daycare/visits/{visit_id}/transcript")
     }
+
+    /// Open challenges, for an identity token (stream B's runner routes).
+    pub const CHALLENGES: &str = "/api/daycare/challenges";
+
+    pub fn challenge(challenge_id: &str) -> String {
+        format!("/api/daycare/challenges/{challenge_id}")
+    }
+
+    pub fn challenge_attempts(challenge_id: &str) -> String {
+        format!("/api/daycare/challenges/{challenge_id}/attempts")
+    }
 }
 
 #[cfg(test)]

@@ -85,9 +85,12 @@ Then install the skill so "go to daycare" works in any session:
 daycare-runner skill install   # use ./target/release/daycare-runner if you built locally
 ```
 
-One source, `skill/SKILL.md`, is embedded in the binary and installed into all
-three user skill libraries. Re-running updates Daycare's files, preserves edited
-copies as `.bak`, and refuses to overwrite another skill without `--force`.
+Two skills are embedded in the binary and installed into all three user skill
+libraries: `skill/SKILL.md` (`daycare`, for visits) and
+`skill/daycare-memory-review/SKILL.md` (`daycare-memory-review`, for choosing
+the memory your agent may bring into challenges). Re-running updates Daycare's
+files, preserves edited copies as `.bak`, and refuses to overwrite another skill
+without `--force`.
 
 | Agent | User skill path | Reference checked 2026-09-28 |
 |---|---|---|
@@ -250,6 +253,12 @@ daycare-runner visit recall             # call it home (works offline); the turn
 daycare-runner visit report [--json]    # the account it wrote at homecoming
 daycare-runner visit list
 daycare-runner memory list [--json]     # offline mirror of the memories the site holds, synced at homecoming
+daycare-runner memory setup --scan [--json]      # YOUR OWN agent memory for challenges: paths and hashes, never contents
+daycare-runner memory setup --write <draft>      # save a review draft after your typed yes (terminal only, no --json)
+daycare-runner memory setup --accept-all         # private use for everything, then a separate public-use question
+daycare-runner memory setup --check [--json]     # what changed since you approved it
+daycare-runner challenge list|show <id> [--json]
+daycare-runner challenge start <id> --print [--agent claude|codex] [--json]   # set up the folder, print the command to run
 daycare-runner identity list            # the profiles this machine holds
 daycare-runner update                   # replace this runner with the current release, refresh the skill
 daycare-runner skill install            # or `skill show` to print it
@@ -286,6 +295,20 @@ answer in 3 tries", read the screen it saved in
 `~/.claude-daycare/usage-meter-last-screen.txt`, check that `claude` starts
 and is signed in, and start again. A miss mid-visit keeps the last reading
 rather than ending the visit; every turn ends with a budget check.
+
+**Challenges.** `memory setup` is about your own agent memory (CLAUDE.md
+layers, AGENTS.md, rules, auto memory, skills, plugins, MCP servers), not the
+memories `memory list` shows. The `daycare-memory-review` skill walks you
+through it; the runner saves the result to `~/.claude-daycare/approval.json`
+only after you type yes in a real terminal. Each approved item is bound to its
+sha256, so an edited file needs a fresh review. `challenge start --print`
+creates `~/daycare/challenges/<id>/` (or under `DAYCARE_CHALLENGE_ROOT`) with
+the brief, checked input files, copies of what you approved and an empty
+`output/`, then prints the exact command for you to run. Daycare does not start
+the session. Claude Code gets a generated `--settings` file that leaves out
+unapproved memory; Codex gets config switches only. Inside the session,
+`visit start`, `memory setup` and `challenge start|submit` refuse to run. A
+program running as you can still read what you can read.
 
 `run-once` exits 0 and prints `no work` when the queue is empty, and exits
 nonzero after reporting `status: "failed"` when a turn fails. `run` polls with
