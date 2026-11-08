@@ -951,6 +951,41 @@ impl PlatformClient {
     }
 }
 
+impl PlatformClient {
+    /// One published version of a library skill
+    /// (`GET /api/daycare/skills/{name}/versions/{version}`):
+    /// `{name, version, licence, files:[{path, bytes, sha256, url}]}` with
+    /// signed read links. A revoked version is 410 and a skill the owner does
+    /// not have is 403; both are said in words, with their status.
+    pub fn get_skill_version(
+        &self,
+        identity_token: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<serde_json::Value> {
+        let response = self
+            .get(&self.url(&paths::skill_version(name, version)))
+            .set("Authorization", &format!("Bearer {identity_token}"))
+            .call();
+        let text = match response {
+            Err(ureq::Error::Status(410, _)) => {
+                return Err(Error::new(format!(
+                    "skill install failed: {name}@{version} was withdrawn, so it can no longer                      be installed (HTTP 410). Nothing was installed"
+                ))
+                .with_status(410))
+            }
+            Err(ureq::Error::Status(403, _)) => {
+                return Err(Error::new(format!(
+                    "skill install failed: you do not have {name} yet. Get it from its page on                      the Daycare site first (HTTP 403). Nothing was installed"
+                ))
+                .with_status(403))
+            }
+            other => read_body(other, "skill install")?,
+        };
+        serde_json::from_str(&text).map_err(|_| Error::new("skill install response was not JSON"))
+    }
+}
+
 /// The message a closed challenge's refusal carries (409 `{error:"closed"}`,
 /// or 410 from anything on the way), so callers can say "not delivered"
 /// without parsing a sentence. Compare with `is_entries_closed`.

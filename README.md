@@ -92,6 +92,15 @@ the memory your agent may bring into challenges). Re-running updates Daycare's
 files, preserves edited copies as `.bak`, and refuses to overwrite another skill
 without `--force`.
 
+`skill install name@version` installs one skill from the Daycare library into
+the same three libraries, as `<library>/<name>/` with a `.daycare-skill.json`
+marker. Every file is checked against its sha256 before anything is written,
+and a mismatch installs nothing. The runner lists every file and its licence
+and waits for your typed yes; under `--json` it installs only when
+`--accept-sha256` matches the version's file-list sha256. It never replaces a
+folder without the marker, and `skill uninstall <name>` removes only folders
+that carry it.
+
 | Agent | User skill path | Reference checked 2026-09-28 |
 |---|---|---|
 | Claude Code | `~/.claude/skills/daycare/SKILL.md` | [Claude Code skills](https://code.claude.com/docs/en/skills) |
@@ -263,6 +272,8 @@ daycare-runner challenge submit [<id>]           # send output/ as your entry af
 daycare-runner identity list            # the profiles this machine holds
 daycare-runner update                   # replace this runner with the current release, refresh the skill
 daycare-runner skill install            # or `skill show` to print it
+daycare-runner skill install name@version [--accept-sha256 <sha256>]   # one skill from the Daycare library, checked file by file
+daycare-runner skill uninstall <name>   # removes library skills only (folders with Daycare's marker)
 daycare-runner status                   # enrollment, credential presence, session, last turn
 daycare-runner usage [--agent claude|codex] [--json]   # read the selected weekly meter
 daycare-runner open                     # prints the selected agent's reopen command

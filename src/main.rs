@@ -228,11 +228,33 @@ enum Commands {
 #[derive(Subcommand, Debug)]
 enum SkillAction {
     /// Install the bundled skills (daycare, daycare-memory-review) into all
-    /// three agents' user skill libraries.
+    /// three agents' user skill libraries. With name@version, install one
+    /// skill from the Daycare library instead.
+    ///
+    /// A library skill is checked file by file against its sha256 before
+    /// anything is written, listed, and installed only after your typed yes
+    /// (or, under --json, only when --accept-sha256 matches its file list).
+    /// It goes into <library>/<name>/ with a .daycare-skill.json marker, and
+    /// never replaces a folder without one.
     Install {
-        /// Replace existing skill files.
+        /// A library skill as name@version, from the skill's page. Leave it
+        /// out to install the bundled skills.
+        skill: Option<String>,
+        /// Replace existing skill files (bundled skills only).
         #[arg(long)]
         force: bool,
+        /// Install the library skill only if its file list hashes to this
+        /// sha256. Required under --json, where there is no typed yes.
+        #[arg(long, value_name = "SHA256")]
+        accept_sha256: Option<String>,
+        #[command(flatten)]
+        which: Which,
+    },
+    /// Remove a library skill installed with `skill install name@version`.
+    /// Only folders that carry Daycare's marker are removed.
+    Uninstall {
+        /// The skill's name, without @version.
+        name: String,
     },
     /// Print one bundled skill without writing anything.
     Show {
@@ -473,7 +495,13 @@ fn retries_on_update_required(command: &Commands) -> bool {
     !matches!(
         command,
         Commands::Update { .. }
-            | Commands::Skill { .. }
+            // Plain `skill install` is what self-update runs. A library
+            // install reaches the platform, so it updates and retries.
+            | Commands::Skill {
+                action: SkillAction::Install { skill: None, .. }
+                    | SkillAction::Show { .. }
+                    | SkillAction::Uninstall { .. }
+            }
             | Commands::Visit {
                 action: VisitAction::Run { .. }
             }
@@ -763,7 +791,7 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
                 out,
             )
         }
-        Commands::Skill { action } => skill_command(action, out),
+        Commands::Skill { action } => skill_command(&layout, action, out),
         Commands::Update { url } => update_command(&layout, url, out),
         Commands::Memory { action } => memory_command(&layout, action, out),
         Commands::Challenge { action } => {
@@ -4034,9 +4062,16 @@ fn homecoming_message(match_outcome: Option<&MatchOutcome>) -> String {
 /// those are theirs, and a companion that edits them has overstepped no matter
 /// how useful the edit. Self-update runs plain `skill install --json`, so every
 /// skill in `skills::BUNDLED` is refreshed on update with no extra step.
-fn skill_command(action: SkillAction, out: Out) -> Result<()> {
+fn skill_command(layout: &Layout, action: SkillAction, out: Out) -> Result<()> {
     use daycare_runner::skills::{self, BUNDLED};
     match action {
+        SkillAction::Install {
+            skill: Some(skill),
+            force,
+            accept_sha256,
+            which,
+        } => library_skill_install(layout, &skill, force, accept_sha256.as_deref(), &which, out),
+        SkillAction::Uninstall { name } => library_skill_uninstall(&name, out),
         SkillAction::Show { name } => {
             let skill = skills::find(&name).ok_or_else(|| {
                 Error::new(format!(
@@ -4051,7 +4086,17 @@ fn skill_command(action: SkillAction, out: Out) -> Result<()> {
             );
             Ok(())
         }
-        SkillAction::Install { force } => {
+        SkillAction::Install {
+            skill: None,
+            force,
+            accept_sha256,
+            ..
+        } => {
+            if accept_sha256.is_some() {
+                return Err(Error::new(
+                    "--accept-sha256 goes with a library skill: skill install name@version",
+                ));
+            }
             let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
                 Error::new("HOME is not set, so I cannot find the user skill directories")
             })?;
@@ -4167,6 +4212,148 @@ fn skill_command(action: SkillAction, out: Out) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// The three skill libraries a library skill goes into.
+fn library_skill_dirs() -> Result<Vec<PathBuf>> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        Error::new("HOME is not set, so I cannot find the user skill directories")
+    })?;
+    let xdg_config = xdg_home("XDG_CONFIG_HOME", &home, ".config");
+    Ok(daycare_runner::skills::library_dirs(&home, &xdg_config))
+}
+
+/// `skill install name@version` (plan task N17): fetch, verify every file,
+/// list, typed yes (or a matching --accept-sha256), then write.
+fn library_skill_install(
+    layout: &Layout,
+    skill: &str,
+    force: bool,
+    accept_sha256: Option<&str>,
+    which: &Which,
+    out: Out,
+) -> Result<()> {
+    use daycare_runner::approval::{require_terminal, Prompt, TerminalPrompt};
+    use daycare_runner::skills::{self, SkillRef};
+    daycare_runner::challenge::refuse_inside_session("skill install")?;
+    // Everything that can be refused without the network is refused first.
+    let want = SkillRef::parse(skill)?;
+    if force {
+        return Err(Error::new(
+            "--force applies to the bundled skills only; a library skill never replaces a folder \
+             it does not own",
+        ));
+    }
+    if let Some(sha) = accept_sha256 {
+        if !daycare_runner::challenge::folder::is_sha256(sha) {
+            return Err(Error::new(
+                "--accept-sha256 takes 64 lowercase hex characters: the file-list sha256 of the \
+                 version you reviewed",
+            ));
+        }
+    } else if out.json {
+        return Err(Error::new(format!(
+            "skill install {} under --json needs --accept-sha256 <file-list sha256>, because \
+             there is no typed yes. Run it in your own terminal to review the files, or pass the \
+             file-list sha256 of the version you reviewed. Nothing was installed",
+            want.display()
+        )));
+    } else {
+        require_terminal(false, "skill install")?;
+    }
+    let libraries = library_skill_dirs()?;
+
+    let store = default_store(layout.fallback_token_file());
+    let active = active_for(layout, store.as_ref(), which)?;
+    let client = PlatformClient::new(&active.platform_url);
+    let record = client.get_skill_version(active.token(), &want.name, &want.version)?;
+    let version =
+        skills::verify_version(&record, &want, &daycare_runner::platform::download_signed)?;
+    let list_sha256 = version.file_list_sha256();
+    let targets: Vec<PathBuf> = libraries.iter().map(|lib| lib.join(&want.name)).collect();
+
+    match accept_sha256 {
+        Some(sha) if sha != list_sha256 => {
+            return Err(Error::new(format!(
+                "the file list of {} does not hash to the --accept-sha256 you gave, so it is not \
+                 the version you reviewed. Nothing was installed",
+                want.display()
+            )))
+        }
+        Some(_) => {}
+        None => {
+            println!(
+                "{} ({}) has {} file(s), {} bytes in all. Each was checked against its sha256. \
+                 Each line is path, bytes, sha256:",
+                want.display(),
+                match &version.licence {
+                    Some(licence) => format!("licence: {licence}"),
+                    None => "no licence given".to_string(),
+                },
+                version.files.len(),
+                version.total_bytes()
+            );
+            print!("{}", version.listing());
+            println!("File list sha256: {list_sha256}");
+            println!("It will be installed into:");
+            for target in &targets {
+                println!("  {}", target.display());
+            }
+            let answer = TerminalPrompt.ask("Type yes to install it: ");
+            if !answer
+                .as_deref()
+                .is_some_and(|text| text.trim().eq_ignore_ascii_case("yes"))
+            {
+                return Err(Error::new("you did not type yes, so nothing was installed"));
+            }
+        }
+    }
+
+    let paths =
+        skills::install_library_skill(&version, &libraries, &active.platform_url, &now_rfc3339())?;
+    out.emit(
+        json!({
+            "ok": true,
+            "name": version.name,
+            "version": version.version,
+            "licence": version.licence,
+            "file_list_sha256": list_sha256,
+            "files": version.files.len(),
+            "paths": paths,
+        }),
+        || {
+            println!("Installed {} into:", want.display());
+            for path in &paths {
+                println!("  {}", path.display());
+            }
+            println!("Start a new agent session to use it. Remove it with `daycare-runner skill uninstall {}`.", want.name);
+        },
+    );
+    Ok(())
+}
+
+/// `skill uninstall <name>`: marker-owned library folders only.
+fn library_skill_uninstall(name: &str, out: Out) -> Result<()> {
+    daycare_runner::challenge::refuse_inside_session("skill uninstall")?;
+    let done = daycare_runner::skills::uninstall_library_skill(name, &library_skill_dirs()?)?;
+    out.emit(
+        json!({ "ok": true, "name": name, "removed": done.removed, "left": done.left }),
+        || {
+            if done.removed.is_empty() {
+                println!("No library skill named {name} is installed.");
+            }
+            for path in &done.removed {
+                println!("Removed {}", path.display());
+            }
+            for path in &done.left {
+                println!(
+                    "Left alone: {} is not from the Daycare library.",
+                    path.display()
+                );
+            }
+        },
+    );
+    Ok(())
 }
 
 /// What the local file is, in the words a Claude will repeat to its person.
@@ -5315,6 +5502,26 @@ mod tests {
         }
         assert!(!retries_on_update_required(&parse(&["skill", "install"])));
         assert!(!retries_on_update_required(&parse(&["update"])));
+    }
+
+    /// Plain `skill install` is self-update's own step and must not retry; a
+    /// library install reaches the platform and must.
+    #[test]
+    fn a_library_skill_install_retries_on_update_required() {
+        assert!(retries_on_update_required(&parse(&[
+            "skill",
+            "install",
+            "tidy-csv@3"
+        ])));
+        assert!(!retries_on_update_required(&parse(&[
+            "skill", "install", "--force"
+        ])));
+        assert!(!retries_on_update_required(&parse(&[
+            "skill",
+            "uninstall",
+            "tidy-csv"
+        ])));
+        assert!(!retries_on_update_required(&parse(&["skill", "show"])));
     }
 
     #[test]

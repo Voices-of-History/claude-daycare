@@ -81,8 +81,23 @@ fn handle(world: &mut World, request: &RecordedRequest) -> Response {
             Response::json(403, r#"{"error":"bad grant"}"#)
         };
     }
+    if request.method == "GET" && path.starts_with("/storage/v1/object/sign/skills/") {
+        // A signed read link: its own grant, no Daycare credential.
+        let file = path.split('?').next().unwrap().rsplit('/').next().unwrap();
+        let version = path.split('/').nth(7).unwrap_or_default();
+        return match (file, version) {
+            ("SKILL.md", _) => Response::json(200, SKILL_MD),
+            // Version 4 serves a file that does not match its declared hash.
+            ("a.md", "4") => Response::json(200, "tampered"),
+            ("a.md", _) => Response::json(200, REF_MD),
+            _ => Response::json(404, "{}"),
+        };
+    }
     if !authorized {
         return Response::json(401, r#"{"error":"Unauthorized"}"#);
+    }
+    if request.method == "GET" && path.starts_with("/api/daycare/skills/") {
+        return skill_version(world, path);
     }
     if request.method == "GET" && path == "/api/daycare/challenges/c-1" {
         return Response::json(
@@ -152,6 +167,59 @@ fn handle(world: &mut World, request: &RecordedRequest) -> Response {
         );
     }
     Response::json(404, r#"{"error":"not here"}"#)
+}
+
+const SKILL_MD: &str = "---\nname: tidy-csv\ndescription: Tidy a CSV\n---\nTidy it.\n";
+const REF_MD: &str = "# Reference\n";
+
+/// Stream K's install API: version 3 is good, 4 is tampered in storage, 2 was
+/// withdrawn (410), and `paid-skill` is not the owner's (403).
+fn skill_version(world: &World, path: &str) -> Response {
+    let parts: Vec<&str> = path
+        .trim_start_matches("/api/daycare/skills/")
+        .split('/')
+        .collect();
+    match parts.as_slice() {
+        ["tidy-csv", "versions", "2"] => Response::json(410, r#"{"error":"revoked"}"#),
+        ["paid-skill", "versions", _] => Response::json(403, r#"{"error":"no entitlement"}"#),
+        ["tidy-csv", "versions", version @ ("3" | "4")] => {
+            let file = |name: &str, body: &str| {
+                serde_json::json!({
+                    "path": if name == "a.md" { "ref/a.md" } else { name },
+                    "bytes": body.len(),
+                    "sha256": sha256(body.as_bytes()),
+                    "url": format!(
+                        "{}/storage/v1/object/sign/skills/tidy-csv/{version}/{name}?token=read-grant",
+                        world.base
+                    ),
+                })
+            };
+            Response::json(
+                200,
+                &serde_json::json!({
+                    "name": "tidy-csv", "version": version, "licence": "CC-BY-4.0",
+                    "files": [file("SKILL.md", SKILL_MD), file("a.md", REF_MD)],
+                })
+                .to_string(),
+            )
+        }
+        _ => Response::json(404, r#"{"error":"not here"}"#),
+    }
+}
+
+/// The file-list sha256 of version 3, computed here from the canonical form
+/// rather than by the runner's own function.
+fn tidy_csv_list_sha256() -> String {
+    sha256(
+        format!(
+            r#"[{{"path":"SKILL.md","bytes":{},"sha256":"{}"}},{{"path":"ref/a.md","bytes":{},"sha256":"{}"}}]"#,
+            SKILL_MD.len(),
+            sha256(SKILL_MD.as_bytes()),
+            REF_MD.len(),
+            sha256(REF_MD.as_bytes())
+        )
+        .as_bytes(),
+    )
 }
 
 /// A scratch machine: Daycare state, a fake HOME, and a challenge root with
@@ -799,4 +867,288 @@ fn a_typed_yes_on_a_real_terminal_delivers_the_entry() {
         .iter()
         .filter(|r| r.method != "PUT")
         .all(|r| r.authorization() == Some(format!("Bearer {TOKEN}").as_str())));
+}
+
+impl Machine {
+    fn skill_libraries(&self) -> Vec<PathBuf> {
+        [
+            ".claude/skills",
+            ".agents/skills",
+            ".config/opencode/skills",
+        ]
+        .iter()
+        .map(|library| self.fake_home.join(library).join("tidy-csv"))
+        .collect()
+    }
+}
+
+fn stdout_json(output: &Output) -> serde_json::Value {
+    serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
+        .unwrap_or_else(|_| panic!("not JSON: {}", String::from_utf8_lossy(&output.stdout)))
+}
+
+#[test]
+fn skill_install_name_at_version_verifies_then_installs_with_a_marker() {
+    let machine = Machine::new("skill-install");
+    let (platform, _world) = mock_platform();
+    machine.enroll(&platform);
+    let accept = tidy_csv_list_sha256();
+    assert_eq!(
+        accept,
+        daycare_runner::skills::file_list_sha256([
+            (
+                "ref/a.md",
+                REF_MD.len() as u64,
+                sha256(REF_MD.as_bytes()).as_str()
+            ),
+            (
+                "SKILL.md",
+                SKILL_MD.len() as u64,
+                sha256(SKILL_MD.as_bytes()).as_str()
+            ),
+        ])
+    );
+
+    let out = machine.run(&[
+        "skill",
+        "install",
+        "tidy-csv@3",
+        "--json",
+        "--accept-sha256",
+        &accept,
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let result = stdout_json(&out);
+    assert_eq!(result["file_list_sha256"], accept);
+    assert_eq!(result["licence"], "CC-BY-4.0");
+    for dir in machine.skill_libraries() {
+        assert_eq!(
+            std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+            SKILL_MD
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ref/a.md")).unwrap(),
+            REF_MD
+        );
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(".daycare-skill.json")).unwrap())
+                .unwrap();
+        assert_eq!(marker["name"], "tidy-csv");
+        assert_eq!(marker["version"], "3");
+    }
+    let requests = requests_of(&platform);
+    let api = requests
+        .iter()
+        .find(|request| request.path == "/api/daycare/skills/tidy-csv/versions/3")
+        .unwrap();
+    assert_eq!(
+        api.authorization(),
+        Some(format!("Bearer {TOKEN}").as_str())
+    );
+    assert!(requests
+        .iter()
+        .filter(|request| request.path.starts_with("/storage/"))
+        .all(|request| request.authorization().is_none()));
+
+    // The memory review sees it as a library skill, not the owner's own.
+    let scan = stdout_json(&machine.run(&["memory", "setup", "--scan", "--json"]));
+    assert!(scan["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["name"] == "tidy-csv" && item["origin"] == "daycare-library"));
+
+    let removed = stdout_json(&machine.run(&["skill", "uninstall", "tidy-csv", "--json"]));
+    assert_eq!(removed["removed"].as_array().unwrap().len(), 3);
+    assert!(machine.skill_libraries().iter().all(|dir| !dir.exists()));
+}
+
+#[test]
+fn a_sha_mismatch_installs_nothing() {
+    let machine = Machine::new("skill-mismatch");
+    let (platform, _world) = mock_platform();
+    machine.enroll(&platform);
+    let out = machine.run(&[
+        "skill",
+        "install",
+        "tidy-csv@4",
+        "--json",
+        "--accept-sha256",
+        &tidy_csv_list_sha256(),
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    let error = stdout_json(&out);
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("ref/a.md does not match its sha256"),
+        "{error}"
+    );
+    for dir in machine.skill_libraries() {
+        assert!(!dir.exists(), "{} was written", dir.display());
+        assert!(
+            !dir.parent().unwrap().exists()
+                || std::fs::read_dir(dir.parent().unwrap())
+                    .unwrap()
+                    .next()
+                    .is_none()
+        );
+    }
+}
+
+#[test]
+fn unsafe_or_unreviewed_library_installs_are_refused_before_any_request() {
+    let machine = Machine::new("skill-refusals");
+    let (platform, _world) = mock_platform();
+    machine.enroll(&platform);
+    let before = platform.requests().len();
+    let accept = tidy_csv_list_sha256();
+    for args in [
+        vec![
+            "skill",
+            "install",
+            "../x@1",
+            "--json",
+            "--accept-sha256",
+            accept.as_str(),
+        ],
+        vec![
+            "skill",
+            "install",
+            "x@../1",
+            "--json",
+            "--accept-sha256",
+            accept.as_str(),
+        ],
+        vec![
+            "skill",
+            "install",
+            "x@1.0",
+            "--json",
+            "--accept-sha256",
+            accept.as_str(),
+        ],
+        vec!["skill", "install", "tidy-csv@3", "--json"],
+        vec![
+            "skill",
+            "install",
+            "tidy-csv@3",
+            "--json",
+            "--accept-sha256",
+            "not-a-hash",
+        ],
+        vec![
+            "skill",
+            "install",
+            "tidy-csv@3",
+            "--force",
+            "--json",
+            "--accept-sha256",
+            accept.as_str(),
+        ],
+        vec![
+            "skill",
+            "install",
+            "--json",
+            "--accept-sha256",
+            accept.as_str(),
+        ],
+        vec!["skill", "uninstall", "../x", "--json"],
+    ] {
+        let out = machine.run(&args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert_eq!(stdout_json(&out)["ok"], false, "{args:?}");
+    }
+    // No terminal and no --accept-sha256: there is nobody to type yes.
+    let out = machine.run(&["skill", "install", "tidy-csv@3"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("real terminal"));
+    assert_eq!(
+        platform.requests().len(),
+        before,
+        "a refused install made a request"
+    );
+    assert!(machine.skill_libraries().iter().all(|dir| !dir.exists()));
+}
+
+#[test]
+fn a_withdrawn_unowned_or_unreviewed_version_installs_nothing() {
+    let machine = Machine::new("skill-410");
+    let (platform, _world) = mock_platform();
+    machine.enroll(&platform);
+    let accept = tidy_csv_list_sha256();
+    let withdrawn = machine.run(&[
+        "skill",
+        "install",
+        "tidy-csv@2",
+        "--json",
+        "--accept-sha256",
+        &accept,
+    ]);
+    assert!(stdout_json(&withdrawn)["error"]
+        .as_str()
+        .unwrap()
+        .contains("withdrawn"));
+    let unowned = machine.run(&[
+        "skill",
+        "install",
+        "paid-skill@1",
+        "--json",
+        "--accept-sha256",
+        &accept,
+    ]);
+    assert!(stdout_json(&unowned)["error"]
+        .as_str()
+        .unwrap()
+        .contains("do not have paid-skill"));
+    let other = "0".repeat(64);
+    let mismatch = machine.run(&[
+        "skill",
+        "install",
+        "tidy-csv@3",
+        "--json",
+        "--accept-sha256",
+        &other,
+    ]);
+    assert!(stdout_json(&mismatch)["error"]
+        .as_str()
+        .unwrap()
+        .contains("not the version you reviewed"));
+    assert!(machine.skill_libraries().iter().all(|dir| !dir.exists()));
+}
+
+#[test]
+fn a_folder_without_the_marker_is_never_replaced_or_removed() {
+    let machine = Machine::new("skill-own");
+    let (platform, _world) = mock_platform();
+    machine.enroll(&platform);
+    let own = machine.fake_home.join(".agents/skills/tidy-csv");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(own.join("SKILL.md"), "my own tidy-csv\n").unwrap();
+    let out = machine.run(&[
+        "skill",
+        "install",
+        "tidy-csv@3",
+        "--json",
+        "--accept-sha256",
+        &tidy_csv_list_sha256(),
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stdout_json(&out)["error"]
+        .as_str()
+        .unwrap()
+        .contains("not from the Daycare library"));
+    assert!(!machine.fake_home.join(".claude/skills/tidy-csv").exists());
+    let kept = stdout_json(&machine.run(&["skill", "uninstall", "tidy-csv", "--json"]));
+    assert_eq!(kept["removed"].as_array().unwrap().len(), 0);
+    assert_eq!(kept["left"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(own.join("SKILL.md")).unwrap(),
+        "my own tidy-csv\n"
+    );
 }

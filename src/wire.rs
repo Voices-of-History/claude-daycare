@@ -187,6 +187,12 @@ pub mod paths {
     pub fn challenge_submission_confirm(challenge_id: &str, submission_id: &str) -> String {
         format!("/api/daycare/challenges/{challenge_id}/submissions/{submission_id}/confirm")
     }
+
+    /// One published version of a Daycare library skill, with signed file
+    /// links (stream K's install API).
+    pub fn skill_version(name: &str, version: &str) -> String {
+        format!("/api/daycare/skills/{name}/versions/{version}")
+    }
 }
 
 #[cfg(test)]
@@ -274,6 +280,10 @@ mod tests {
         assert_eq!(
             paths::challenge_submission_confirm("c-1", "s-1"),
             "/api/daycare/challenges/c-1/submissions/s-1/confirm"
+        );
+        assert_eq!(
+            paths::skill_version("tidy-csv", "3"),
+            "/api/daycare/skills/tidy-csv/versions/3"
         );
     }
 }
