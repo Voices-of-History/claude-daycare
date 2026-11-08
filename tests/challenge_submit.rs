@@ -42,6 +42,8 @@ struct World {
     submit_refusal: Option<(u16, &'static str)>,
     /// Answer the confirm with this status and body instead.
     confirm_refusal: Option<(u16, &'static str)>,
+    /// Drop the confirm's connection without an answer.
+    confirm_lost: bool,
 }
 
 fn mock_platform() -> (MockPlatform, Arc<Mutex<World>>) {
@@ -157,6 +159,9 @@ fn handle(world: &mut World, request: &RecordedRequest) -> Response {
     {
         if let Some((status, body)) = world.confirm_refusal {
             return Response::json(status, body);
+        }
+        if world.confirm_lost {
+            return Response::disconnect();
         }
         return Response::json(
             200,
@@ -684,6 +689,24 @@ fn another_refusal_on_confirm_is_not_delivered_either() {
     let error = result.unwrap_err();
     assert!(error.message().starts_with("Not delivered"), "{error}");
     assert!(error.message().contains("does not match"), "{error}");
+}
+
+#[test]
+fn a_lost_confirm_answer_is_reported_as_unknown_not_as_success() {
+    let machine = Machine::new("submit-lost");
+    let (platform, world) = mock_platform();
+    machine.put_entry();
+    world.lock().unwrap().confirm_lost = true;
+    let (result, screen) = submit_with(&machine, &platform, &SecretSet::new(), &mut answers());
+    let error = result.unwrap_err();
+    assert!(
+        error
+            .message()
+            .starts_with("Not confirmed as far as this runner knows"),
+        "{error}"
+    );
+    assert!(!screen.contains("Delivered:"));
+    assert!(machine.entry_json().get("submissions").is_none());
 }
 
 #[test]

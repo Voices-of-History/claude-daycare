@@ -74,9 +74,15 @@ pub fn not_delivered(step: &str, error: Error) -> Error {
             status.unwrap_or(409)
         )
     } else {
+        // Platform and storage errors already name what failed.
+        let what = if error.message().contains("failed") {
+            error.message().to_string()
+        } else {
+            format!("{step} failed: {error}")
+        };
         format!(
-            "Not delivered: {step} failed: {error}. Nothing was confirmed, so your entry is as it \
-             was; run `daycare-runner challenge submit` again to send a new version"
+            "Not delivered: {what}. Nothing was confirmed, so your entry is as it was; run \
+             `daycare-runner challenge submit` again to send a new version"
         )
     };
     let wrapped = if error.is_transport() {
@@ -232,7 +238,18 @@ pub fn deliver(delivery: Delivery<'_>, progress: &mut dyn FnMut(&str)) -> Result
 
     let confirmed = platform
         .confirm_submission(token, challenge_id, &submission_id)
-        .map_err(|error| not_delivered("confirming the upload", error))?;
+        .map_err(|error| {
+            if error.is_transport() {
+                // The yes may have landed and only the answer was lost.
+                Error::transport(format!(
+                    "Not confirmed as far as this runner knows: {error}. The platform may or may \
+                     not have recorded your yes; check your entry on the challenge's page, or run \
+                     `daycare-runner challenge submit` again to send a new version"
+                ))
+            } else {
+                not_delivered("confirming the upload", error)
+            }
+        })?;
     if confirmed.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err(not_delivered(
             "confirming the upload",
