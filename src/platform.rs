@@ -905,6 +905,182 @@ impl PlatformClient {
         let text = read_body(response, "challenge start")?;
         serde_json::from_str(&text).map_err(|_| Error::new("challenge start response was not JSON"))
     }
+
+    /// Start a submission for this identity's owner
+    /// (`POST /api/daycare/challenges/{id}/submissions`): the file list and
+    /// the declaration, no agent id (the identity token is the agent). Returns
+    /// `{submission_id, version, entry_id, uploads:[{path, signed_url, ...}]}`.
+    /// A closed challenge is `ENTRIES_CLOSED`, never a success.
+    pub fn submit_entry(
+        &self,
+        identity_token: &str,
+        challenge_id: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let response = self
+            .post(&self.url(&paths::challenge_submissions(challenge_id)))
+            .set("Authorization", &format!("Bearer {identity_token}"))
+            .set("Content-Type", "application/json")
+            .send_string(&body.to_string());
+        let text = read_challenge_body(response, "challenge submit")?;
+        serde_json::from_str(&text)
+            .map_err(|_| Error::new("challenge submit response was not JSON"))
+    }
+
+    /// The owner's typed yes, sent after every upload
+    /// (`POST .../submissions/{sid}/confirm`). The platform re-hashes the
+    /// stored files before it records it.
+    pub fn confirm_submission(
+        &self,
+        identity_token: &str,
+        challenge_id: &str,
+        submission_id: &str,
+    ) -> Result<serde_json::Value> {
+        let body = serde_json::json!({ "confirm": "yes" });
+        let response = self
+            .post(&self.url(&paths::challenge_submission_confirm(
+                challenge_id,
+                submission_id,
+            )))
+            .set("Authorization", &format!("Bearer {identity_token}"))
+            .set("Content-Type", "application/json")
+            .send_string(&body.to_string());
+        let text = read_challenge_body(response, "challenge confirm")?;
+        serde_json::from_str(&text)
+            .map_err(|_| Error::new("challenge confirm response was not JSON"))
+    }
+}
+
+impl PlatformClient {
+    /// One published version of a library skill
+    /// (`GET /api/daycare/skills/{name}/versions/{version}`):
+    /// `{name, version, licence, files:[{path, bytes, sha256, url}]}` with
+    /// signed read links. A revoked version is 410 and a skill the owner does
+    /// not have is 403; both are said in words, with their status.
+    pub fn get_skill_version(
+        &self,
+        identity_token: &str,
+        name: &str,
+        version: &str,
+    ) -> Result<serde_json::Value> {
+        let response = self
+            .get(&self.url(&paths::skill_version(name, version)))
+            .set("Authorization", &format!("Bearer {identity_token}"))
+            .call();
+        let text = match response {
+            Err(ureq::Error::Status(410, _)) => {
+                return Err(Error::new(format!(
+                    "skill install failed: {name}@{version} was withdrawn, so it can no longer                      be installed (HTTP 410). Nothing was installed"
+                ))
+                .with_status(410))
+            }
+            Err(ureq::Error::Status(403, _)) => {
+                return Err(Error::new(format!(
+                    "skill install failed: you do not have {name} yet. Get it from its page on                      the Daycare site first (HTTP 403). Nothing was installed"
+                ))
+                .with_status(403))
+            }
+            other => read_body(other, "skill install")?,
+        };
+        serde_json::from_str(&text).map_err(|_| Error::new("skill install response was not JSON"))
+    }
+}
+
+/// The message a closed challenge's refusal carries (409 `{error:"closed"}`,
+/// or 410 from anything on the way), so callers can say "not delivered"
+/// without parsing a sentence. Compare with `is_entries_closed`.
+pub const ENTRIES_CLOSED: &str = "this challenge is no longer taking entries";
+
+/// Whether an error is the platform saying entries have closed.
+pub fn is_entries_closed(error: &Error) -> bool {
+    matches!(error.http_status(), Some(409 | 410)) && error.message() == ENTRIES_CLOSED
+}
+
+/// `read_body` for the submit and confirm routes: a 410, or a 409 whose
+/// `error` is the bare word `closed`, becomes `ENTRIES_CLOSED` with its
+/// status. Unlike the day report, a 409 here is never treated as delivered.
+fn read_challenge_body(
+    response: std::result::Result<ureq::Response, ureq::Error>,
+    what: &str,
+) -> Result<String> {
+    match response {
+        Ok(response) => Ok(response.into_string()?),
+        Err(ureq::Error::Status(code @ (409 | 410), response)) => {
+            let body = response.into_string().unwrap_or_default();
+            let error = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| value.get("error")?.as_str().map(str::to_owned));
+            if code == 410 || error.as_deref() == Some("closed") {
+                return Err(Error::new(ENTRIES_CLOSED).with_status(code));
+            }
+            let sentence = error.unwrap_or_else(|| body.chars().take(200).collect());
+            Err(Error::new(format!("{what} failed: {sentence} (HTTP {code})")).with_status(code))
+        }
+        Err(error) => Err(request_error(what, error)),
+    }
+}
+
+/// PUTs files to signed upload URLs. Its own `ureq::Agent`, because one
+/// upload may be a 25 MB file on a slow line: the platform client's 30-second
+/// timeout is right for JSON and wrong for that. No Daycare header or
+/// credential is sent: the URL carries its own short-lived grant, and the host
+/// is storage, not the platform. HTTPS only, or loopback for tests and a local
+/// platform.
+pub struct SignedUploader {
+    agent: ureq::Agent,
+}
+
+impl fmt::Debug for SignedUploader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SignedUploader").finish()
+    }
+}
+
+/// How long one signed upload may take, end to end.
+pub const SIGNED_UPLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+impl Default for SignedUploader {
+    fn default() -> Self {
+        SignedUploader::new()
+    }
+}
+
+impl SignedUploader {
+    pub fn new() -> Self {
+        SignedUploader {
+            agent: ureq::AgentBuilder::new()
+                .timeout_connect(Duration::from_secs(10))
+                .timeout(SIGNED_UPLOAD_TIMEOUT)
+                .user_agent(concat!("daycare-runner/", env!("CARGO_PKG_VERSION")))
+                .build(),
+        }
+    }
+
+    /// PUT one file's bytes. Errors name the file and the status, never the
+    /// URL, which is a bearer grant.
+    pub fn put(&self, url: &str, bytes: &[u8], content_type: &str, path: &str) -> Result<()> {
+        if !crate::self_update::https_or_loopback(url) {
+            return Err(Error::new(format!(
+                "the upload link for {path} is not HTTPS; refusing it"
+            )));
+        }
+        match self
+            .agent
+            .put(url)
+            .set("Content-Type", content_type)
+            .send_bytes(bytes)
+        {
+            Ok(_) => Ok(()),
+            // Storage, not the platform: a refusal here (an expired link, a
+            // file already there) says nothing about whether entries closed.
+            Err(ureq::Error::Status(code, _)) => {
+                Err(Error::new(format!("uploading {path} failed: HTTP {code}")).with_status(code))
+            }
+            Err(ureq::Error::Transport(_)) => Err(Error::transport(format!(
+                "uploading {path} failed to connect"
+            ))),
+        }
+    }
 }
 
 /// Fetch one signed download URL (a challenge input file). No Daycare header

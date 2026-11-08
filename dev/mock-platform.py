@@ -28,6 +28,16 @@ With DAYCARE_MOCK_CHALLENGE=1 it also serves the runner's challenge routes
 (list, show, attempts) and one input file behind a signed-looking URL, for a
 `challenge start --print` rehearsal. The shapes follow the stream B contract
 in the build brief; check them against the platform's routes once they land.
+
+In the same mode it serves the Round 2 submit path, for a `challenge submit`
+rehearsal: POST .../submissions (identity token; the body is exactly
+{files, declaration}, no actor_id), one signed PUT per file under
+/storage/v1/object/upload/sign/..., and POST .../submissions/<sid>/confirm with
+{confirm: "yes"}. Each submit is a new version; confirm re-hashes what was PUT
+against the file list, as the platform does. With DAYCARE_MOCK_CHALLENGE_CLOSED=1
+both routes answer 409 {"error": "closed"}, the platform's answer once entries
+close. The shapes follow `src/app/api/daycare/challenges/[id]/submissions/**`
+in the platform (P11 Round 2).
 """
 
 import hashlib
@@ -50,6 +60,11 @@ VISIT_ID = "visit-live"
 CHALLENGE_MODE = os.environ.get("DAYCARE_MOCK_CHALLENGE") == "1"
 CHALLENGE_ID = "challenge-live"
 CHALLENGE_INPUT = b"name,email\nAda,ada@example.test\n"
+CHALLENGE_CLOSED = os.environ.get("DAYCARE_MOCK_CHALLENGE_CLOSED") == "1"
+UPLOAD_GRANT = "mock-upload-" + uuid.uuid4().hex[:12]
+# Bytes PUT to signed upload URLs, by storage path. Kept out of STATE so the
+# state dump stays readable; STATE records each PUT's path and sha256.
+UPLOADED = {}
 
 # constants.ts
 MCP_PATH = "/api/daycare/mcp/mcp"
@@ -82,6 +97,9 @@ STATE = {
     "visit_ends": [],
     "visit_reports": [],
     "challenge_attempts": [],
+    "challenge_submissions": [],
+    "challenge_puts": [],
+    "challenge_confirms": [],
     # The adjudicator scopes its memory cap to the current turn command.
     "window": None,
 }
@@ -524,6 +542,78 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 dump_state()
             return self._json(200, {"entry_id": "entry-live"})
 
+        submissions = f"/api/daycare/challenges/{CHALLENGE_ID}/submissions"
+        if CHALLENGE_MODE and self.path == submissions:
+            if not self._authorized():
+                return self._json(401, {"error": "Unauthorized"})
+            if CHALLENGE_CLOSED:
+                return self._json(409, {"error": "closed", "reason": "challenge_closed"})
+            body = json.loads(raw or "{}")
+            # Strict, as the platform is: the identity token is the agent.
+            if set(body) != {"files", "declaration"}:
+                return self._json(400, {"error": "unexpected fields", "reason": "invalid_request"})
+            with LOCK:
+                version = len(STATE["challenge_submissions"]) + 1
+                submission_id = f"submission-live-{version}"
+                STATE["challenge_submissions"].append(
+                    {"submission_id": submission_id, "version": version, **body}
+                )
+                dump_state()
+            uploads = []
+            for item in sorted(body["files"], key=lambda f: f["path"]):
+                storage_path = f"entries/entry-live/v{version}/{item['path']}"
+                uploads.append(
+                    {
+                        "path": item["path"],
+                        "storage_path": storage_path,
+                        "signed_url": f"http://127.0.0.1:{PORT}/storage/v1/object/upload/sign/"
+                        f"daycare-challenge-artifacts/{storage_path}?token={UPLOAD_GRANT}",
+                        "token": UPLOAD_GRANT,
+                    }
+                )
+            return self._json(
+                201,
+                {
+                    "submission_id": submission_id,
+                    "entry_id": "entry-live",
+                    "version": version,
+                    "uploads": uploads,
+                },
+            )
+
+        if (
+            CHALLENGE_MODE
+            and self.path.startswith(submissions + "/")
+            and self.path.endswith("/confirm")
+        ):
+            if not self._authorized():
+                return self._json(401, {"error": "Unauthorized"})
+            if CHALLENGE_CLOSED:
+                return self._json(409, {"error": "closed", "reason": "challenge_closed"})
+            submission_id = self.path[len(submissions) + 1 : -len("/confirm")]
+            if json.loads(raw or "{}") != {"confirm": "yes"}:
+                return self._json(400, {"error": 'Type "yes" to confirm.'})
+            with LOCK:
+                match = next(
+                    (s for s in STATE["challenge_submissions"] if s["submission_id"] == submission_id),
+                    None,
+                )
+                if match is None:
+                    return self._json(404, {"error": "not found", "reason": "not_found"})
+                for item in match["files"]:
+                    stored = UPLOADED.get(f"entries/entry-live/v{match['version']}/{item['path']}")
+                    if stored is None:
+                        return self._json(
+                            409, {"error": "Not every file has finished uploading.", "reason": "upload_incomplete", "path": item["path"]}
+                        )
+                    if len(stored) != item["bytes"] or hashlib.sha256(stored).hexdigest() != item["sha256"]:
+                        return self._json(
+                            409, {"error": "A stored file does not match the list you sent.", "reason": "upload_mismatch", "path": item["path"]}
+                        )
+                STATE["challenge_confirms"].append(submission_id)
+                dump_state()
+            return self._json(200, {"ok": True, "entry_id": "entry-live", "version": match["version"]})
+
         if VISIT_MODE and self.path.startswith("/api/daycare/visits"):
             if not self._authorized():
                 return self._json(401, {"error": "Unauthorized"})
@@ -545,6 +635,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._json(200, {"ok": True})
 
         return self._json(404, {"error": "Not found"})
+
+    def do_PUT(self):
+        # A signed upload URL: its own grant in the query, no Authorization.
+        prefix = "/storage/v1/object/upload/sign/daycare-challenge-artifacts/"
+        path, _, query = self.path.partition("?")
+        if not (CHALLENGE_MODE and path.startswith(prefix)):
+            return self._json(404, {"error": "Not found"})
+        if query != f"token={UPLOAD_GRANT}" or self.headers.get("Authorization"):
+            return self._json(403, {"error": "bad grant"})
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        storage_path = path[len(prefix) :]
+        with LOCK:
+            if storage_path in UPLOADED:
+                # Signed upload URLs never overwrite.
+                return self._json(409, {"error": "The resource already exists"})
+            UPLOADED[storage_path] = body
+            STATE["challenge_puts"].append(
+                {"path": storage_path, "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+            )
+            dump_state()
+        return self._json(200, {"Key": f"daycare-challenge-artifacts/{storage_path}"})
 
     # --- MCP (CONTRACT.md §5) ---------------------------------------------
 

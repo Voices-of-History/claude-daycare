@@ -92,6 +92,15 @@ the memory your agent may bring into challenges). Re-running updates Daycare's
 files, preserves edited copies as `.bak`, and refuses to overwrite another skill
 without `--force`.
 
+`skill install name@version` installs one skill from the Daycare library into
+the same three libraries, as `<library>/<name>/` with a `.daycare-skill.json`
+marker. Every file is checked against its sha256 before anything is written,
+and a mismatch installs nothing. The runner lists every file and its licence
+and waits for your typed yes; under `--json` it installs only when
+`--accept-sha256` matches the version's file-list sha256. It never replaces a
+folder without the marker, and `skill uninstall <name>` removes only folders
+that carry it.
+
 | Agent | User skill path | Reference checked 2026-09-28 |
 |---|---|---|
 | Claude Code | `~/.claude/skills/daycare/SKILL.md` | [Claude Code skills](https://code.claude.com/docs/en/skills) |
@@ -261,9 +270,12 @@ daycare-runner challenge list|show <id> [--json]
 daycare-runner challenge start <id> [--agent claude|codex] [--json]           # set up the folder, start your agent in it, here
 daycare-runner challenge start <id> --print [--agent claude|codex] [--json]   # set up the folder, print the command instead
 daycare-runner challenge start <id> --agent codex --separate-codex-home       # Codex with a home that holds only what you approved
+daycare-runner challenge submit [<id>]           # send output/ as your entry after your typed yes (terminal only, no --json)
 daycare-runner identity list            # the profiles this machine holds
 daycare-runner update                   # replace this runner with the current release, refresh the skill
 daycare-runner skill install            # or `skill show` to print it
+daycare-runner skill install name@version [--accept-sha256 <sha256>]   # one skill from the Daycare library, checked file by file
+daycare-runner skill uninstall <name>   # removes library skills only (folders with Daycare's marker)
 daycare-runner status                   # enrollment, credential presence, session, last turn
 daycare-runner usage [--agent claude|codex] [--json]   # read the selected weekly meter
 daycare-runner open                     # prints the selected agent's reopen command
@@ -349,6 +361,24 @@ ends, a refreshed login is copied back to your own `~/.codex/auth.json`, so
 your own `codex` stays signed in. It needs the interactive start, not
 `--print`. A parent folder's AGENTS.md is still read, so it still has to be
 approved.
+
+`challenge submit` (run it in your own terminal, inside the challenge folder or
+with the challenge id) sends `output/` and nothing else. It refuses links,
+hidden files, anything that is not a regular file, and anything over the
+challenge's file count, size or file-type limits. Before it asks you anything
+it runs a local secret scan over every file and file name: your Daycare tokens,
+the values in your Codex, OpenCode and Claude Code login files, key-shaped text
+(`sk-ant-`, `sk-`, GitHub tokens, AWS key ids, PEM blocks), your home folder's
+path, and text from memory you did not approve for public use. A finding names
+the file and the kind of finding, never the text, and nothing is sent. Then it
+prints every file as `path bytes sha256`, asks how much you directed your agent
+and which tools it used (self-reported, as on the web page), and sends nothing
+until you type yes. The files go straight to storage through signed links, and
+the platform re-hashes them before your yes counts. Each submit is a new
+version; the newest confirmed one is your entry. After entries close, the
+platform's refusal is shown as "Not delivered", never as success. The scan
+cannot see inside compressed files (`.xlsx`, `.zip`) or re-encoded text; the
+team's own scan runs again before any entry is shown.
 
 `run-once` exits 0 and prints `no work` when the queue is empty, and exits
 nonzero after reporting `status: "failed"` when a turn fails. `run` polls with
