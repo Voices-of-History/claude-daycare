@@ -200,6 +200,7 @@ pub fn run_session(run: SessionRun<'_>, out: Out) -> Result<()> {
         challenge_id,
         entry_id: input.entry_id,
     };
+    say(out, "Reading your weekly usage before the session...");
     let start = meter::take(client, layout, now);
     let start_file = meter::write_start(
         folder,
@@ -212,6 +213,17 @@ pub fn run_session(run: SessionRun<'_>, out: Out) -> Result<()> {
             reading_summary(&start)
         ),
     );
+    // SAFETY: isatty has no preconditions.
+    if unsafe { libc::isatty(0) } != 1 {
+        say(
+            out,
+            format!(
+                "This is not a terminal, so {product} may not start as an interactive session. \
+                 Run `challenge start` in your own terminal, or use --print and run the command \
+                 yourself."
+            ),
+        );
+    }
     say(out, format!("Starting {product} in {}.", folder.display()));
     say(out, "");
 
@@ -220,6 +232,8 @@ pub fn run_session(run: SessionRun<'_>, out: Out) -> Result<()> {
         Ok(exit) => exit.to_json(),
         Err(error) => json!({ "started": false, "error": error.message() }),
     };
+    say(out, "");
+    say(out, "Reading your weekly usage after the session...");
     let end = meter::take(client, layout, now);
     let end_file = meter::write_end(
         folder,
@@ -256,7 +270,6 @@ pub fn run_session(run: SessionRun<'_>, out: Out) -> Result<()> {
             "notes": notes,
         }),
         || {
-            println!();
             println!("{product} ended with {}.", exit.describe());
             println!(
                 "Usage reading after the session: {}.",
