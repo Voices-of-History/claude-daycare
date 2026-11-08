@@ -22,6 +22,14 @@
 //! Codex has no switch that leaves out a global or parent AGENTS.md without a
 //! different CODEX_HOME, so an unapproved one is a refusal, not a silent load.
 //!
+//! Codex, with `--separate-codex-home` (an opt-in): the same switches, and
+//! `CODEX_HOME` points at a folder under Daycare's own state that holds only
+//! approved parts (`client::CodexClient` fills it). The owner's global
+//! AGENTS.md and unapproved MCP servers are then simply not there, so they
+//! are left out instead of refused. A parent folder's AGENTS.md is still read
+//! from the folder's ancestors whatever `CODEX_HOME` says, so an unapproved
+//! one still refuses. HOME is never redirected.
+//!
 //! In both clients the challenge environment never carries a Daycare token,
 //! and it carries the session marker that stops `daycare-runner` from
 //! starting visits, challenges or memory approvals from inside the session.
@@ -124,6 +132,9 @@ pub struct PlanInput<'a> {
     /// Names of `DAYCARE_*` variables in the runner's own environment, so the
     /// session drops any that are set (a test override, a token file path).
     pub inherited_daycare_env: &'a [String],
+    /// Codex only: the separate `CODEX_HOME` the owner opted into, or `None`
+    /// for the owner's own Codex home.
+    pub codex_home: Option<&'a Path>,
 }
 
 impl PlanInput<'_> {
@@ -352,6 +363,11 @@ pub fn claude_plan(
 pub struct CodexPlan {
     pub launch: LaunchSpec,
     pub excluded: Vec<Excluded>,
+    /// The switches that shape what Codex loads: features, settings and the
+    /// MCP switches. The launch is `--cd <folder> --sandbox workspace-write`
+    /// plus these, and `codex debug prompt-input` is run with the same ones,
+    /// so the verified prompt is the launched prompt.
+    pub config_args: Vec<String>,
 }
 
 /// A server name `-c mcp_servers.<name>.enabled=false` can address.
@@ -363,18 +379,14 @@ fn codex_addressable(name: &str) -> bool {
 }
 
 pub fn codex_plan(input: &PlanInput<'_>) -> Result<CodexPlan> {
-    let mut args = vec![
-        "--cd".to_string(),
-        input.folder.to_string_lossy().into_owned(),
-        "--sandbox".into(),
-        "workspace-write".into(),
-    ];
+    let separate = input.codex_home.is_some();
+    let mut config_args = Vec::new();
     for feature in CODEX_DISABLED_FEATURES {
-        args.extend(["--disable".to_string(), feature.to_string()]);
+        config_args.extend(["--disable".to_string(), feature.to_string()]);
     }
     // Approved skills are listed in the folder's AGENTS.md, from their checked
     // copies; this keeps every user skill's instructions out of the prompt.
-    args.extend([
+    config_args.extend([
         "-c".to_string(),
         "skills.include_instructions=false".to_string(),
         "-c".to_string(),
@@ -387,10 +399,20 @@ pub fn codex_plan(input: &PlanInput<'_>) -> Result<CodexPlan> {
             continue;
         }
         match item.kind {
+            // The global AGENTS.md lives in the owner's Codex home, which a
+            // separate home does not read.
+            Kind::AgentsMd if separate => excluded.push(Excluded {
+                id: item.id.clone(),
+                how: "not copied into the separate Codex home",
+            }),
             Kind::AgentsMd | Kind::ProjectAgentsMd => refusals.push(format!(
                 "  {} (not approved; Codex would load it and has no setting to leave it out)",
                 item.path.display()
             )),
+            Kind::McpServer if separate => excluded.push(Excluded {
+                id: item.id.clone(),
+                how: "not copied into the separate Codex home",
+            }),
             Kind::McpServer => {
                 let name = item.name.clone().unwrap_or_default();
                 if !codex_addressable(&name) {
@@ -401,7 +423,7 @@ pub fn codex_plan(input: &PlanInput<'_>) -> Result<CodexPlan> {
                     ));
                     continue;
                 }
-                args.extend([
+                config_args.extend([
                     "-c".to_string(),
                     format!("mcp_servers.{name}.enabled=false"),
                 ]);
@@ -418,17 +440,38 @@ pub fn codex_plan(input: &PlanInput<'_>) -> Result<CodexPlan> {
         }
     }
     if !refusals.is_empty() {
+        let way_out = if separate {
+            "Approve it with the daycare-memory-review skill, move it aside for the challenge, \
+             or start with --agent claude. A parent folder's AGENTS.md is read whatever \
+             CODEX_HOME says, so a separate Codex home cannot leave it out"
+        } else {
+            "Approve it with the daycare-memory-review skill, move it aside for the challenge, \
+             start with --agent claude, or start with --separate-codex-home so Codex runs with \
+             a Codex home that holds only what you approved. Daycare does not redirect your \
+             own Codex home, so it cannot leave these out for you"
+        };
         return Err(Error::new(format!(
             "this challenge cannot start in Codex yet, because Codex would load memory you did \
-             not approve:\n{}\nApprove it with the daycare-memory-review skill, move it aside \
-             for the challenge, or start with --agent claude. Daycare does not redirect your \
-             Codex home, so it cannot leave these out for you",
+             not approve:\n{}\n{way_out}",
             refusals.join("\n")
         )));
     }
     let mut env_set = BTreeMap::new();
     let (marker, entry) = input.marker();
     env_set.insert(marker, entry);
+    if let Some(home) = input.codex_home {
+        env_set.insert(
+            "CODEX_HOME".to_string(),
+            home.to_string_lossy().into_owned(),
+        );
+    }
+    let mut args = vec![
+        "--cd".to_string(),
+        input.folder.to_string_lossy().into_owned(),
+        "--sandbox".into(),
+        "workspace-write".into(),
+    ];
+    args.extend(config_args.iter().cloned());
     Ok(CodexPlan {
         launch: LaunchSpec {
             program: input.program.to_string(),
@@ -438,6 +481,7 @@ pub fn codex_plan(input: &PlanInput<'_>) -> Result<CodexPlan> {
             env_unset: input.env_unset(&STRIPPED_CODEX_CHALLENGE_ENV),
         },
         excluded,
+        config_args,
     })
 }
 
@@ -557,6 +601,7 @@ mod tests {
             entry_id: "entry-1",
             program: "claude",
             inherited_daycare_env: env,
+            codex_home: None,
         }
     }
 
@@ -719,6 +764,84 @@ mod tests {
         ));
         let reconciled = approve(&inventory, &[]);
         assert!(codex_plan(&input(&inventory, &reconciled, &[])).is_err());
+    }
+
+    #[test]
+    fn a_separate_codex_home_leaves_the_global_agents_md_out_instead_of_refusing() {
+        let mut inventory = inventory();
+        inventory.items.push(item(
+            Client::Codex,
+            Kind::AgentsMd,
+            "/h/.codex/AGENTS.md",
+            None,
+        ));
+        inventory.items.push(item(
+            Client::Codex,
+            Kind::McpServer,
+            "/h/.codex/config.toml",
+            Some("has space"),
+        ));
+        let reconciled = approve(&inventory, &[]);
+        let home = Path::new("/h/.claude-daycare/challenges/c1/codex-home");
+        let plan = codex_plan(&PlanInput {
+            program: "codex",
+            codex_home: Some(home),
+            ..input(&inventory, &reconciled, &[])
+        })
+        .unwrap();
+        assert_eq!(
+            plan.launch.env_set["CODEX_HOME"],
+            "/h/.claude-daycare/challenges/c1/codex-home"
+        );
+        // HOME is never redirected, and the owner's CODEX_HOME is not kept.
+        assert!(!plan.launch.env_set.contains_key("HOME"));
+        assert!(plan
+            .excluded
+            .iter()
+            .any(|e| e.id.contains("/h/.codex/AGENTS.md")
+                && e.how == "not copied into the separate Codex home"));
+        // Unapproved servers are simply absent; no switch is needed, and a
+        // name the command line cannot address is no longer a refusal.
+        assert!(!plan
+            .config_args
+            .iter()
+            .any(|a| a.starts_with("mcp_servers.")));
+        assert!(plan
+            .config_args
+            .contains(&"skills.include_instructions=false".to_string()));
+        // The launch is the folder and sandbox plus exactly the probe switches.
+        assert_eq!(
+            plan.launch.args[..4],
+            [
+                "--cd",
+                "/h/daycare/challenges/c1",
+                "--sandbox",
+                "workspace-write"
+            ]
+        );
+        assert_eq!(plan.launch.args[4..], plan.config_args[..]);
+
+        // A parent folder's AGENTS.md is read whatever CODEX_HOME says.
+        inventory.items.push(item(
+            Client::Codex,
+            Kind::ProjectAgentsMd,
+            "/h/daycare/AGENTS.md",
+            None,
+        ));
+        let reconciled = approve(&inventory, &[]);
+        let error = codex_plan(&PlanInput {
+            codex_home: Some(home),
+            ..input(&inventory, &reconciled, &[])
+        })
+        .unwrap_err();
+        assert!(error.message().contains("/h/daycare/AGENTS.md"), "{error}");
+        assert!(
+            !error.message().contains("--separate-codex-home so"),
+            "{error}"
+        );
+        // Without the opt-in, the refusal names the opt-in.
+        let error = codex_plan(&input(&inventory, &reconciled, &[])).unwrap_err();
+        assert!(error.message().contains("--separate-codex-home"), "{error}");
     }
 
     #[test]

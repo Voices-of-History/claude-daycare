@@ -8,6 +8,8 @@
 //! CLAUDE.md|AGENTS.md a pointer Daycare writes for the chosen client
 //! output/             empty; the only folder that is ever uploaded
 //! ENTRY.json          which entry this folder belongs to, and what it holds
+//! meter/              start.json and end.json, the weekly-allowance readings
+//!                     taken around an interactive session (`challenge::meter`)
 //! ```
 //!
 //! Nothing is written until every input file has been downloaded and has
@@ -275,6 +277,24 @@ fn write_in(folder: &Path, relative: &str, bytes: &[u8]) -> Result<PathBuf> {
     let target = safe_target(folder, Path::new(relative))?;
     write_atomic(&target, bytes, 0o600)?;
     Ok(target)
+}
+
+/// Write one file Daycare owns inside an existing challenge folder (the meter
+/// readings), 0600, creating private folders on the way and never following a
+/// symlink.
+pub fn write_file_in(folder: &Path, relative: &str, bytes: &[u8]) -> Result<PathBuf> {
+    ensure_private_dir(folder)?;
+    write_in(folder, relative, bytes)
+}
+
+/// Remove one file Daycare owns inside the folder, if it is there. A symlink
+/// on the way is refused, as for writes; the link itself is never followed.
+pub fn remove_file_in(folder: &Path, relative: &str) -> Result<()> {
+    let target = safe_target(folder, Path::new(relative))?;
+    match fs::remove_file(&target) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
+        _ => Ok(()),
+    }
 }
 
 /// A directory inside the folder, created private, never a symlink.
@@ -880,6 +900,31 @@ mod tests {
             .unwrap_err()
             .message()
             .contains("755"));
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn meter_files_are_written_private_and_never_through_a_symlink() {
+        let base = unique_dir("daycare-folder-meter");
+        let folder = base.join("c1");
+        ensure_private_dir(&folder).unwrap();
+        let written = write_file_in(&folder, "meter/start.json", b"{}").unwrap();
+        assert_eq!(written, folder.join("meter/start.json"));
+        assert_eq!(mode(&folder.join("meter")), 0o700);
+        assert_eq!(mode(&written), 0o600);
+        remove_file_in(&folder, "meter/start.json").unwrap();
+        remove_file_in(&folder, "meter/start.json").unwrap();
+        assert!(!written.exists());
+        // A meter/ link to somewhere else is refused, for writes and removals.
+        fs::remove_dir(folder.join("meter")).unwrap();
+        let outside = base.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("end.json"), "theirs").unwrap();
+        std::os::unix::fs::symlink(&outside, folder.join("meter")).unwrap();
+        assert!(write_file_in(&folder, "meter/start.json", b"{}").is_err());
+        assert!(remove_file_in(&folder, "meter/end.json").is_err());
+        assert!(!outside.join("start.json").exists());
+        assert!(outside.join("end.json").exists());
         fs::remove_dir_all(base).ok();
     }
 

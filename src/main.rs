@@ -294,34 +294,49 @@ enum ChallengeAction {
         #[command(flatten)]
         which: Which,
     },
-    /// Set up a challenge folder and print the command to start your agent in it.
+    /// Set up a challenge folder and start your agent in it, in this terminal.
     ///
     /// Enrolls you, creates ~/daycare/challenges/<id>/ (or under
     /// DAYCARE_CHALLENGE_ROOT) with BRIEF.md, inputs/ checked against their
     /// sha256, copies of the memory you approved, and an empty output/. Then
-    /// it prints the exact command and environment for you to run: Daycare
-    /// does not start the session itself. Memory you did not approve is left
-    /// out with the client's own settings; memory that changed since you
-    /// approved it stops the start.
+    /// it starts Claude Code or Codex in that folder, in this terminal, and
+    /// waits for it to exit. With --print it starts nothing and prints the
+    /// exact command and environment for you to run yourself.
     ///
-    /// Limits: deny rules bind the client's file tools, not shell commands, and
-    /// Codex's sandbox limits writes, not reads. A program running as you can
-    /// read what you can read, and your account of how the work was done is
-    /// self-reported.
+    /// What the boundary covers: memory you did not approve is left out with
+    /// the client's own settings, and memory that changed since you approved
+    /// it stops the start. Codex's prompt is rendered and checked before it
+    /// starts (`codex debug prompt-input`); Claude Code has no such check, so
+    /// you run /status and /memory yourself, as the start tells you. The
+    /// session gets DAYCARE_CHALLENGE_SESSION, never a Daycare token or
+    /// ANTHROPIC_API_KEY. A usage reading is written to meter/start.json and
+    /// meter/end.json; it is a reading, not a limit.
+    ///
+    /// What it does not cover: deny rules bind Claude's file tools, not shell
+    /// commands, and Codex's sandbox limits writes, not reads. A program
+    /// running as you can read what you can read, the readings and your
+    /// account of how the work was done are self-reported, and Codex's MCP
+    /// servers are switched off by configuration, not proven (check /mcp).
     Start {
         /// The challenge id from `challenge list`.
         id: String,
-        /// Print the launch command instead of starting the client. Required
-        /// for now: automatic launch is not built.
+        /// Print the launch command instead of starting the client.
         #[arg(long)]
         print: bool,
         /// Client to work in: claude or codex. Defaults to this machine's choice.
         #[arg(long, value_parser = AgentKind::parse)]
         agent: Option<AgentKind>,
-        /// Claude Code binary to name in the command.
+        /// Codex only: run Codex with its own CODEX_HOME under Daycare's
+        /// folder, holding only what you approved (and a copy of your login,
+        /// handed back refreshed when the session ends), so an unapproved
+        /// global ~/.codex/AGENTS.md is left out instead of refused. Not
+        /// with --print.
+        #[arg(long)]
+        separate_codex_home: bool,
+        /// Claude Code binary to run.
         #[arg(long, default_value = "claude")]
         claude_bin: String,
-        /// Codex CLI binary to name in the command.
+        /// Codex CLI binary to run.
         #[arg(long, default_value = "codex")]
         codex_bin: String,
         #[command(flatten)]
@@ -434,6 +449,10 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 /// self-update `visit start` does first, so a refusal makes no request.
 fn refused_inside_challenge(command: &Commands) -> Option<&'static str> {
     match command {
+        Commands::Run { .. } => Some("run"),
+        Commands::RunOnce { .. } => Some("run-once"),
+        Commands::Enroll { .. } => Some("enroll"),
+        Commands::Update { .. } => Some("update"),
         Commands::Visit {
             action: VisitAction::Start { .. },
         } => Some("visit start"),
@@ -4249,17 +4268,12 @@ fn challenge_command(
             id,
             print,
             agent,
+            separate_codex_home,
             claude_bin,
             codex_bin,
             which,
         } => {
             challenge::refuse_inside_session("challenge start")?;
-            if !print {
-                return Err(Error::new(
-                    "automatic launch is not built yet. Run `daycare-runner challenge start <id> \
-                     --print` and run the command it prints yourself",
-                ));
-            }
             let client = match selected_agent(agent, layout)? {
                 AgentKind::Claude => Client::Claude,
                 AgentKind::Codex => Client::Codex,
@@ -4278,6 +4292,9 @@ fn challenge_command(
                     claude_bin: &claude_bin,
                     codex_bin: &codex_bin,
                     started_at: &now_rfc3339(),
+                    print,
+                    separate_codex_home,
+                    now: now_rfc3339,
                 },
                 out,
             )

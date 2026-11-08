@@ -1,0 +1,66 @@
+[
+  {
+    "type": "message",
+    "id": "message-0",
+    "role": "developer",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `workspace-write`: The sandbox permits reading files, and editing files in `cwd` and `writable_roots`. Network access is restricted.\n</permissions instructions>"
+      },
+      {
+        "type": "input_text",
+        "text": "<skills_instructions>\n## Skills\nA skill is a set of local instructions to follow that is stored in a `SKILL.md` file. Below is the list of skills that can be used.\n### Skill roots\n- `r0` = `/Users/owner/.agents/skills`\n### Available skills\n- notes: Take meeting notes in the owner's format (file: r0/notes/SKILL.md)\n### How to use skills\n- Open a skill's SKILL.md when the task fits it.\n</skills_instructions>"
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "synthetic-challenge-0",
+      "create_time": 0,
+      "content_item_kinds": [
+        "permissions.instructions",
+        "host_skills.instructions"
+      ]
+    }
+  },
+  {
+    "type": "message",
+    "id": "message-1",
+    "role": "user",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "# AGENTS.md instructions for {{FOLDER}}\n\n<INSTRUCTIONS>\n{{AGENTS_MD}}\n</INSTRUCTIONS>"
+      },
+      {
+        "type": "input_text",
+        "text": "<environment_context>\n  <cwd>{{FOLDER}}</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-11-07</current_date>\n  <timezone>America/New_York</timezone>\n</environment_context>"
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "synthetic-challenge-0",
+      "create_time": 0,
+      "content_item_kinds": [
+        "agents_md.instructions",
+        "environments.environment_context"
+      ]
+    }
+  },
+  {
+    "type": "message",
+    "id": "message-2",
+    "role": "user",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "DAYCARE-CHALLENGE-PROBE"
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "synthetic-challenge-0",
+      "create_time": 0,
+      "content_item_kinds": [
+        "user.text"
+      ]
+    }
+  }
+]

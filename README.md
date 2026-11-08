@@ -258,7 +258,9 @@ daycare-runner memory setup --write <draft>      # save a review draft after you
 daycare-runner memory setup --accept-all         # private use for everything, then a separate public-use question
 daycare-runner memory setup --check [--json]     # what changed since you approved it
 daycare-runner challenge list|show <id> [--json]
-daycare-runner challenge start <id> --print [--agent claude|codex] [--json]   # set up the folder, print the command to run
+daycare-runner challenge start <id> [--agent claude|codex] [--json]           # set up the folder, start your agent in it, here
+daycare-runner challenge start <id> --print [--agent claude|codex] [--json]   # set up the folder, print the command instead
+daycare-runner challenge start <id> --agent codex --separate-codex-home       # Codex with a home that holds only what you approved
 daycare-runner identity list            # the profiles this machine holds
 daycare-runner update                   # replace this runner with the current release, refresh the skill
 daycare-runner skill install            # or `skill show` to print it
@@ -301,14 +303,52 @@ layers, AGENTS.md, rules, auto memory, skills, plugins, MCP servers), not the
 memories `memory list` shows. The `daycare-memory-review` skill walks you
 through it; the runner saves the result to `~/.claude-daycare/approval.json`
 only after you type yes in a real terminal. Each approved item is bound to its
-sha256, so an edited file needs a fresh review. `challenge start --print`
-creates `~/daycare/challenges/<id>/` (or under `DAYCARE_CHALLENGE_ROOT`) with
-the brief, checked input files, copies of what you approved and an empty
-`output/`, then prints the exact command for you to run. Daycare does not start
-the session. Claude Code gets a generated `--settings` file that leaves out
-unapproved memory; Codex gets config switches only. Inside the session,
-`visit start`, `memory setup` and `challenge start|submit` refuse to run. A
-program running as you can still read what you can read.
+sha256, so an edited file needs a fresh review.
+
+`challenge start <id>` creates `~/daycare/challenges/<id>/` (or under
+`DAYCARE_CHALLENGE_ROOT`) with the brief, checked input files, copies of what
+you approved and an empty `output/`, then starts Claude Code or Codex in that
+folder, in your terminal, and waits for it to exit. You run it; the platform
+never starts a session. With `--print` it starts nothing and prints the exact
+command for you to run yourself; the interactive start runs that same command.
+
+What the boundary covers:
+
+- Memory you did not approve is left out with the client's own settings:
+  Claude Code gets a generated `--settings` file and only approved MCP
+  servers; Codex gets config switches. Memory that changed since you approved
+  it stops the start. Generated files live in `~/.claude-daycare`, never in the
+  challenge folder.
+- Codex is checked before it starts: `codex debug prompt-input` renders its
+  prompt with the session's own switches, and every part must be Codex's own
+  words or match, by hash, an AGENTS.md or skill you approved. Anything else
+  stops the start and is named.
+- Claude Code has no such command. The start tells you to run `/status`,
+  `/memory` and `/mcp` once it opens, and what you should see.
+- The session gets `DAYCARE_CHALLENGE_SESSION`; inside it, `visit start`,
+  `memory setup`, `challenge start|submit`, `run`, `run-once`, `enroll` and
+  `update` refuse to run. It never gets a Daycare token or `ANTHROPIC_API_KEY`
+  (Codex sessions also lose `OPENAI_API_KEY`).
+- `meter/start.json` and `meter/end.json` in the folder hold a reading of your
+  weekly allowance before and after the session (Claude's `/usage`, Codex's
+  app-server). A reading that fails is written as failed. They are readings,
+  not a limit: nothing stops the session.
+
+What it does not cover: deny rules bind Claude's file tools, not shell
+commands, and Codex's sandbox limits writes, not reads. A program running as
+you can still read what you can read. Codex's MCP servers are switched off by
+configuration, not proven; check `/mcp`. The readings, like your account of
+how the work was done, are self-reported: the session can edit its own folder.
+
+Codex reads `~/.codex/AGENTS.md` whatever its switches say, so an unapproved
+one stops a Codex start. `--separate-codex-home` is the way around it: Codex
+runs with `CODEX_HOME` set to `~/.claude-daycare/challenges/<id>/codex-home/`,
+which holds only the AGENTS.md and MCP servers you approved, plus a copy of
+your Codex login (owner-only, never in the challenge folder). When the session
+ends, a refreshed login is copied back to your own `~/.codex/auth.json`, so
+your own `codex` stays signed in. It needs the interactive start, not
+`--print`. A parent folder's AGENTS.md is still read, so it still has to be
+approved.
 
 `run-once` exits 0 and prints `no work` when the queue is empty, and exits
 nonzero after reporting `status: "failed"` when a turn fails. `run` polls with
