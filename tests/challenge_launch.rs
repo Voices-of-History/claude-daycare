@@ -1,6 +1,6 @@
 //! `challenge start` without `--print`: the interactive launch (N9), Codex
-//! verification (N10), meter readings (N11), and the separate Codex home
-//! opt-in.
+//! verification (N10), meter readings (N11), the session marker on the
+//! remaining commands (N13), and the separate Codex home opt-in.
 //!
 //! The shipped binary runs against a mock platform, a fake HOME, and
 //! recording fakes of `claude` and `codex`. No network, no keychain, no model,
@@ -989,6 +989,52 @@ fn agents_md_text_codex_loads_is_matched_by_hash_and_unmatched_text_refuses_unqu
         machine.recorded("call.argv").is_none(),
         "Codex was started anyway"
     );
+}
+
+#[test]
+fn run_run_once_enroll_and_update_refuse_inside_a_challenge_before_any_request() {
+    let machine = Machine::new("launch-marker");
+    let platform = platform();
+    machine.enroll(&platform);
+    let before = platform.requests().len();
+    let claude_bin = machine.claude_bin.to_str().unwrap().to_string();
+    for args in [
+        vec!["run", "--claude-bin", &claude_bin, "--json"],
+        vec!["run-once", "--claude-bin", &claude_bin, "--json"],
+        vec![
+            "enroll",
+            "--url",
+            &platform.base_url,
+            "--code",
+            "PAIR-9999",
+            "--json",
+        ],
+        vec!["update", "--json"],
+        vec!["update", "--url", &platform.base_url, "--json"],
+    ] {
+        let out = machine.run_with(&[("DAYCARE_CHALLENGE_SESSION", "entry-1")], &args);
+        assert!(!out.status.success(), "{args:?}");
+        let error = json_of(&out);
+        assert_eq!(error["ok"], false);
+        let message = error["error"].as_str().unwrap();
+        assert!(
+            message.contains("inside a challenge session"),
+            "{args:?}: {message}"
+        );
+        assert!(message.contains("entry-1"), "{message}");
+    }
+    assert_eq!(
+        platform.requests().len(),
+        before,
+        "a marked command reached the platform"
+    );
+    assert!(
+        support::recorded_argv(&machine.root).is_empty(),
+        "a marked command ran claude"
+    );
+    // An empty marker is no marker: `update` on a dev build answers itself.
+    let out = machine.run_with(&[("DAYCARE_CHALLENGE_SESSION", "")], &["update", "--json"]);
+    assert!(out.status.success(), "{}", stdout(&out));
 }
 
 #[test]

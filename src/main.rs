@@ -449,6 +449,10 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 /// self-update `visit start` does first, so a refusal makes no request.
 fn refused_inside_challenge(command: &Commands) -> Option<&'static str> {
     match command {
+        Commands::Run { .. } => Some("run"),
+        Commands::RunOnce { .. } => Some("run-once"),
+        Commands::Enroll { .. } => Some("enroll"),
+        Commands::Update { .. } => Some("update"),
         Commands::Visit {
             action: VisitAction::Start { .. },
         } => Some("visit start"),
