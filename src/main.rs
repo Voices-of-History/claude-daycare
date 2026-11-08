@@ -316,7 +316,7 @@ enum ChallengeAction {
     /// commands, and Codex's sandbox limits writes, not reads. A program
     /// running as you can read what you can read, the readings and your
     /// account of how the work was done are self-reported, and Codex's MCP
-    /// servers are checked by configuration, not proven.
+    /// servers are switched off by configuration, not proven (check /mcp).
     Start {
         /// The challenge id from `challenge list`.
         id: String,
