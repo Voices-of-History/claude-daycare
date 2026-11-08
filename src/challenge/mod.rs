@@ -1,33 +1,39 @@
-//! `daycare-runner challenge`: list, show, start (plan tasks N6–N8, N12, N13).
+//! `daycare-runner challenge`: list, show, start (plan tasks N6–N13).
 //!
 //! A challenge is work the owner's agent does on the owner's machine, with the
-//! owner's own client and tools, in a folder Daycare sets up. Daycare never
-//! starts that session itself: `challenge start --print` sets up the folder
-//! and prints the exact command (and environment) for the owner to run.
+//! owner's own client and tools, in a folder Daycare sets up. The platform
+//! never starts that session: the owner runs `challenge start` in their own
+//! terminal, and it starts their client there (`launch`), or with `--print`
+//! prints the exact command and environment for them to run themselves.
 //!
 //! `start` does its checks in an order that leaves nothing behind on failure:
 //! the session marker, the client's policy guard, the memory approval (a
-//! changed hash refuses), the challenge record, every input file downloaded
-//! and checked, and only then the enrollment call and the folder itself.
+//! changed hash refuses), the client's own refusals (`client`), the challenge
+//! record, every input file downloaded and checked, and only then the
+//! enrollment call and the folder itself. The interactive launch then
+//! verifies (`verify`), reads the meter (`meter`), and starts the client.
 //!
 //! Every platform call goes through `PlatformClient` with the identity token,
 //! so the release header is sent and a 426 makes `main` update once and run
 //! the same command again.
 
+pub mod client;
 pub mod exclusion;
 pub mod folder;
+pub mod launch;
+pub mod meter;
+pub mod verify;
 
-use crate::approval::scan::{self as memory_scan, Client, Kind, Roots};
+use crate::approval::scan::{self as memory_scan, Client, Roots};
 use crate::approval::{reconcile, Approval};
 use crate::out::Out;
-use crate::paths::{create_private_dir, sanitize_segment, write_atomic, Layout};
+use crate::paths::{create_private_dir, sanitize_segment, Layout};
 use crate::platform::{download_signed, PlatformClient};
 use crate::session::Active;
 use crate::{Error, Result};
 use exclusion::{PlanInput, SESSION_MARKER_ENV};
 use folder::{ChallengeDetail, FolderSpec};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The entry id when this process runs inside a challenge session.
@@ -125,6 +131,12 @@ pub struct StartRequest<'a> {
     pub claude_bin: &'a str,
     pub codex_bin: &'a str,
     pub started_at: &'a str,
+    /// Print the command instead of starting the client.
+    pub print: bool,
+    /// Codex only: run with a separate `CODEX_HOME` holding approved parts.
+    pub separate_codex_home: bool,
+    /// The clock for meter readings.
+    pub now: fn() -> String,
 }
 
 /// Codex reads managed and system configuration that no flag can leave out.
@@ -154,45 +166,44 @@ fn guard_no_managed_codex(codex_home: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Approved Claude MCP stanzas, read from `~/.claude.json` at start time and
-/// checked against the approved hash. Returned for the generated MCP config;
-/// never printed.
-fn approved_claude_mcp(
-    roots: &Roots,
-    approved: &[(memory_scan::Item, crate::approval::Scope)],
-) -> Result<BTreeMap<String, Value>> {
-    let wanted: Vec<&memory_scan::Item> = approved
-        .iter()
-        .map(|(item, _)| item)
-        .filter(|item| item.client == Client::Claude && item.kind == Kind::McpServer)
-        .collect();
-    let mut stanzas = BTreeMap::new();
-    if wanted.is_empty() {
-        return Ok(stanzas);
-    }
-    let bytes = std::fs::read(&roots.claude_json)?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
-        Error::new(format!(
-            "{} is not valid JSON; cannot bring its MCP servers",
-            roots.claude_json.display()
-        ))
-    })?;
-    for item in wanted {
-        let name = item.name.clone().unwrap_or_default();
-        let stanza = value["mcpServers"].get(&name).cloned().ok_or_else(|| {
-            Error::new(format!(
-                "the MCP server {name} is gone from {}",
-                roots.claude_json.display()
-            ))
-        })?;
-        if crate::self_update::sha256_hex(stanza.to_string().as_bytes()) != item.sha256 {
+/// Daycare's private folder for a challenge (generated settings, a separate
+/// Codex home) and the challenge folder must not overlap: what is generated
+/// there must never be part of what the session's work could upload.
+/// `DAYCARE_CHALLENGE_ROOT` could otherwise point the two at one place.
+fn guard_apart(private: &Path, folder: &Path) -> Result<()> {
+    let physical = |path: &Path| {
+        // The deepest existing ancestor, resolved, plus the rest.
+        let mut existing = path.to_path_buf();
+        let mut rest = Vec::new();
+        while std::fs::symlink_metadata(&existing).is_err() {
+            match (existing.file_name(), existing.parent()) {
+                (Some(name), Some(parent)) => {
+                    rest.push(name.to_os_string());
+                    existing = parent.to_path_buf();
+                }
+                _ => break,
+            }
+        }
+        let mut resolved = std::fs::canonicalize(&existing).unwrap_or(existing);
+        resolved.extend(rest.into_iter().rev());
+        resolved
+    };
+    for (a, b) in [
+        (private.to_path_buf(), folder.to_path_buf()),
+        (physical(private), physical(folder)),
+    ] {
+        if a.starts_with(&b) || b.starts_with(&a) {
             return Err(Error::new(format!(
-                "the MCP server {name} changed after you approved it; review it again"
+                "the challenge folder {} and Daycare's own folder for it {} overlap; set {} to \
+                 a folder outside {}",
+                folder.display(),
+                private.display(),
+                folder::CHALLENGE_ROOT_ENV,
+                private.parent().unwrap_or(private).display()
             )));
         }
-        stanzas.insert(name, stanza);
     }
-    Ok(stanzas)
+    Ok(())
 }
 
 fn inherited_daycare_env() -> Vec<String> {
@@ -204,7 +215,7 @@ fn inherited_daycare_env() -> Vec<String> {
     names
 }
 
-/// `challenge start <id> --print`.
+/// `challenge start <id>`, with or without `--print`.
 pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
     refuse_inside_session("challenge start")?;
     let StartRequest {
@@ -215,14 +226,37 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
         claude_bin,
         codex_bin,
         started_at,
+        print,
+        separate_codex_home,
+        now,
     } = request;
     folder::validate_challenge_id(challenge_id)?;
+    if separate_codex_home && client != Client::Codex {
+        return Err(Error::new(
+            "--separate-codex-home is for Codex; pass --agent codex with it",
+        ));
+    }
+    if separate_codex_home && print {
+        return Err(Error::new(
+            "--separate-codex-home needs Daycare to start Codex itself, so it can copy your \
+             login in and hand a refreshed one back when the session ends. Run it without \
+             --print",
+        ));
+    }
     let challenge_root = folder::challenge_root()?;
     let roots = Roots::discover(layout.root(), &challenge_root)?;
+    let private_root = layout.root().join("challenges");
+    let codex_home_under =
+        |private: &Path| separate_codex_home.then(|| client::separate_codex_home(private));
+    let placeholder_private = private_root.join(sanitize_segment(challenge_id));
 
     match client {
         Client::Claude => crate::workspace::guard_no_managed_claude(claude_bin)?,
-        Client::Codex => guard_no_managed_codex(&roots.codex_home)?,
+        Client::Codex => guard_no_managed_codex(
+            codex_home_under(&placeholder_private)
+                .as_deref()
+                .unwrap_or(&roots.codex_home),
+        )?,
     }
 
     // Memory first: a changed approval stops here, before any request.
@@ -230,21 +264,17 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
     let approval = Approval::load(layout)?;
     let reconciled = reconcile(approval.as_ref(), &inventory);
     reconciled.require_reviewed()?;
-    let approved_mcp = match client {
-        Client::Claude => approved_claude_mcp(&roots, &reconciled.approved)?,
-        Client::Codex => BTreeMap::new(),
-    };
     let inherited = inherited_daycare_env();
-    let program = match client {
-        Client::Claude => claude_bin,
-        Client::Codex => codex_bin,
-    };
+    let session_client = client::for_client(client, claude_bin, codex_bin, &roots);
+    let program = session_client.program().to_string();
 
-    // A Codex refusal (memory it cannot leave out) is known before the
-    // network, so check it with a placeholder folder and entry first.
+    // A client's refusals (memory it cannot leave out, approved bytes that
+    // changed) are known before the network, so plan once with a placeholder
+    // folder and entry first.
     let placeholder = challenge_root.join(sanitize_segment(challenge_id));
-    if client == Client::Codex {
-        exclusion::codex_plan(&PlanInput {
+    let placeholder_home = codex_home_under(&placeholder_private);
+    session_client.exclusion_plan(
+        &PlanInput {
             inventory: &inventory,
             reconciled: &reconciled,
             folder: &placeholder,
@@ -252,10 +282,12 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
             claude_config_dir: &roots.claude_config_dir,
             daycare_root: layout.root(),
             entry_id: "pending",
-            program,
+            program: &program,
             inherited_daycare_env: &inherited,
-        })?;
-    }
+            codex_home: placeholder_home.as_deref(),
+        },
+        &placeholder_private,
+    )?;
 
     let detail = fetch_detail(active, challenge_id)?;
     if let Some(state) = &detail.state {
@@ -265,6 +297,15 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
                 detail.title
             )));
         }
+    }
+    let challenge_folder = challenge_root.join(sanitize_segment(&detail.id));
+    // Generated client files live under Daycare's own folder, outside the
+    // challenge folder, where the session's deny rules cover them.
+    let private = private_root.join(sanitize_segment(&detail.id));
+    guard_apart(&private, &challenge_folder)?;
+    let codex_home = codex_home_under(&private);
+    if let Some(home) = &codex_home {
+        guard_no_managed_codex(home)?;
     }
     // Every input is downloaded and checked before the entry exists or a
     // single file is written.
@@ -290,7 +331,6 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
     }
 
     folder::ensure_root(&challenge_root)?;
-    let challenge_folder = challenge_root.join(sanitize_segment(&detail.id));
     let entry = json!({
         "version": 1,
         "challenge_id": detail.id,
@@ -313,14 +353,8 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
         entry,
     })?;
 
-    // Generated client files live under Daycare's own folder, outside the
-    // challenge folder, where the session's deny rules cover them.
-    let private = layout
-        .root()
-        .join("challenges")
-        .join(sanitize_segment(&detail.id));
     create_private_dir(layout.root())?;
-    create_private_dir(&layout.root().join("challenges"))?;
+    create_private_dir(&private_root)?;
     create_private_dir(&private)?;
 
     let plan_input = PlanInput {
@@ -331,36 +365,41 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
         claude_config_dir: &roots.claude_config_dir,
         daycare_root: layout.root(),
         entry_id: &entry_id,
-        program,
+        program: &program,
         inherited_daycare_env: &inherited,
+        codex_home: codex_home.as_deref(),
     };
-    let (launch, excluded, settings, settings_file, mcp_file) = match client {
-        Client::Claude => {
-            let settings_file = private.join("claude-settings.json");
-            let mcp_file = private.join("claude-mcp.json");
-            let plan =
-                exclusion::claude_plan(&plan_input, &settings_file, &mcp_file, &approved_mcp);
-            write_atomic(
-                &settings_file,
-                format!("{}\n", serde_json::to_string_pretty(&plan.settings)?).as_bytes(),
-                0o600,
-            )?;
-            write_atomic(&mcp_file, plan.mcp_config.to_string().as_bytes(), 0o600)?;
-            (
-                plan.launch,
-                plan.excluded,
-                Some(plan.settings),
-                Some(settings_file),
-                Some(mcp_file),
-            )
-        }
-        Client::Codex => {
-            let plan = exclusion::codex_plan(&plan_input)?;
-            (plan.launch, plan.excluded, None, None, None)
-        }
-    };
+    let plan = session_client.exclusion_plan(&plan_input, &private)?;
+    client::write_plan_files(&plan, &challenge_folder)?;
+    let approved: Vec<Value> = copies
+        .iter()
+        .map(|copy| {
+            json!({
+                "id": copy.item.id, "scope": copy.scope, "copy": copy.copy,
+            })
+        })
+        .collect();
+
+    if !print {
+        return launch::run_session(
+            launch::SessionRun {
+                client: session_client.as_ref(),
+                plan: &plan,
+                input: &plan_input,
+                layout,
+                challenge_id: &detail.id,
+                title: &detail.title,
+                approved,
+                excluded: &plan.excluded,
+                notes: launch::notes(client),
+                now,
+            },
+            out,
+        );
+    }
 
     let notes = notes(client);
+    let launch = &plan.launch;
     let command = launch.shell_command();
     out.emit(
         json!({
@@ -370,13 +409,11 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
             "client": client,
             "folder": challenge_folder,
             "launch": launch.to_json(),
-            "settings_file": settings_file,
-            "settings": settings,
-            "mcp_config_file": mcp_file,
-            "approved": copies.iter().map(|copy| json!({
-                "id": copy.item.id, "scope": copy.scope, "copy": copy.copy,
-            })).collect::<Vec<_>>(),
-            "excluded": excluded.iter().map(|excluded| json!({
+            "settings_file": plan.settings_file,
+            "settings": plan.settings,
+            "mcp_config_file": plan.mcp_config_file,
+            "approved": approved,
+            "excluded": plan.excluded.iter().map(|excluded| json!({
                 "id": excluded.id, "how": excluded.how,
             })).collect::<Vec<_>>(),
             "unreviewed": reconciled.unreviewed.iter()
@@ -389,9 +426,9 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
             println!(
                 "{} approved item(s) brought in; {} left out.",
                 copies.len(),
-                excluded.len()
+                plan.excluded.len()
             );
-            if let Some(path) = &settings_file {
+            if let Some(path) = &plan.settings_file {
                 println!("Claude Code settings for this session: {}", path.display());
             }
             println!();

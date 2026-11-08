@@ -698,14 +698,16 @@ fn a_wrong_input_sha256_aborts_before_enrolling_or_writing() {
     assert!(!machine.challenge_root().join("c-1").exists());
 }
 
+/// Without `--print`, `start` now launches the client interactively; that
+/// path is covered in `tests/challenge_launch.rs`. OpenCode is still refused.
 #[test]
-fn start_without_print_and_with_opencode_are_refused_before_any_request() {
+fn start_with_opencode_is_refused_before_any_request() {
     let machine = Machine::new("ch-noprint");
     let platform = platform_with(None);
     machine.enroll(&platform);
-    let out = machine.run(&["challenge", "start", "c-1", "--json"]);
+    let out = machine.run(&["challenge", "start", "c-1", "--agent", "opencode", "--json"]);
     assert!(!out.status.success());
-    assert!(stdout(&out).contains("--print"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("--agent claude"), "{}", stdout(&out));
     let out = machine.run(&[
         "challenge",
         "start",
