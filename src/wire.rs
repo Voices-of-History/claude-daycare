@@ -176,6 +176,17 @@ pub mod paths {
     pub fn challenge_attempts(challenge_id: &str) -> String {
         format!("/api/daycare/challenges/{challenge_id}/attempts")
     }
+
+    /// Start a submission: the file list and declaration in, one signed
+    /// upload URL per file out (P11 Round 2).
+    pub fn challenge_submissions(challenge_id: &str) -> String {
+        format!("/api/daycare/challenges/{challenge_id}/submissions")
+    }
+
+    /// The owner's typed yes to one submission, after every upload.
+    pub fn challenge_submission_confirm(challenge_id: &str, submission_id: &str) -> String {
+        format!("/api/daycare/challenges/{challenge_id}/submissions/{submission_id}/confirm")
+    }
 }
 
 #[cfg(test)]
@@ -256,5 +267,13 @@ mod tests {
         );
         assert_eq!(paths::end_visit("v-1"), "/api/daycare/visits/v-1/end");
         assert_eq!(paths::visit("v-1"), "/api/daycare/visits/v-1");
+        assert_eq!(
+            paths::challenge_submissions("c-1"),
+            "/api/daycare/challenges/c-1/submissions"
+        );
+        assert_eq!(
+            paths::challenge_submission_confirm("c-1", "s-1"),
+            "/api/daycare/challenges/c-1/submissions/s-1/confirm"
+        );
     }
 }

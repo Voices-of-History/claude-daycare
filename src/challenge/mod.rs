@@ -16,6 +16,9 @@
 
 pub mod exclusion;
 pub mod folder;
+pub mod scan;
+pub mod submit;
+pub mod upload;
 
 use crate::approval::scan::{self as memory_scan, Client, Kind, Roots};
 use crate::approval::{reconcile, Approval};
@@ -104,16 +107,6 @@ pub fn show(active: &Active, challenge_id: &str, out: Out) -> Result<()> {
         || print!("{}", folder::brief_text(&detail)),
     );
     Ok(())
-}
-
-/// `challenge submit`: Round 2 (plan task N14). Present now so the session
-/// marker already guards it.
-pub fn submit() -> Result<()> {
-    refuse_inside_session("challenge submit")?;
-    Err(Error::new(
-        "submitting from the runner is not built yet. Upload your output/ folder from the \
-         challenge's page on the Daycare site",
-    ))
 }
 
 /// What `challenge start` was asked to do.

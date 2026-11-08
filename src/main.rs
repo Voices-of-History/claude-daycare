@@ -327,8 +327,24 @@ enum ChallengeAction {
         #[command(flatten)]
         which: Which,
     },
-    /// Submit output/ for an entry. Not built yet: upload from the challenge page.
-    Submit,
+    /// Send output/ as your entry, after you have seen exactly what goes.
+    ///
+    /// Run it in your own terminal, inside the challenge folder or with the
+    /// challenge id. It lists every file in output/ with its size and sha256,
+    /// refuses links, hidden files and anything over the challenge's limits,
+    /// and runs a local secret scan first: your Daycare tokens, your Codex,
+    /// OpenCode and Claude Code logins, key-shaped text, your home path, and
+    /// memory you did not approve for public use. Then it asks how much you
+    /// directed your agent and which tools it used, and sends nothing until
+    /// you type yes. Each submit makes a new version; the newest confirmed one
+    /// counts. Refused under --json, without a terminal, and inside a
+    /// challenge session.
+    Submit {
+        /// The challenge id or slug. Defaults to the challenge folder you are in.
+        id: Option<String>,
+        #[command(flatten)]
+        which: Which,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -444,7 +460,7 @@ fn refused_inside_challenge(command: &Commands) -> Option<&'static str> {
             action: ChallengeAction::Start { .. },
         } => Some("challenge start"),
         Commands::Challenge {
-            action: ChallengeAction::Submit,
+            action: ChallengeAction::Submit { .. },
         } => Some("challenge submit"),
         _ => None,
     }
@@ -4282,8 +4298,44 @@ fn challenge_command(
                 out,
             )
         }
-        ChallengeAction::Submit => challenge::submit(),
+        ChallengeAction::Submit { id, which } => {
+            challenge_submit(layout, store, id.as_deref(), &which, out)
+        }
     }
+}
+
+/// `challenge submit [<id>]`. The identity defaults to the one that started
+/// the folder (ENTRY.json), so the entry's agent stays the one that did the
+/// work; `--identity` and friends still choose another of the owner's.
+fn challenge_submit(
+    layout: &Layout,
+    store: &dyn TokenStore,
+    id: Option<&str>,
+    which: &Which,
+    out: Out,
+) -> Result<()> {
+    use daycare_runner::challenge::{self, submit::ChallengeFolder};
+    challenge::refuse_inside_session("challenge submit")?;
+    // Before any request or file read: the typed yes needs a person.
+    daycare_runner::approval::require_terminal(out.json, "challenge submit")?;
+    let root = challenge::folder::challenge_root()?;
+    let folder = ChallengeFolder::locate(id, &root, &cwd())?;
+    let started_by = folder
+        .actor_id()
+        .filter(|actor| {
+            Identities::load(layout).is_ok_and(|identities| identities.0.contains_key(*actor))
+        })
+        .map(str::to_string);
+    let which = match (which.selector(), started_by) {
+        (Selector::Default, Some(identity_id)) => Which {
+            identity_id: Some(identity_id),
+            identity: None,
+            general: false,
+        },
+        _ => which.clone(),
+    };
+    let active = active_for(layout, store, &which)?;
+    challenge::submit::submit(layout, store, &active, folder, &root, &now_rfc3339(), out)
 }
 
 fn describe_duration(secs: u64) -> String {

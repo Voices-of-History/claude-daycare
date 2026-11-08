@@ -259,6 +259,7 @@ daycare-runner memory setup --accept-all         # private use for everything, t
 daycare-runner memory setup --check [--json]     # what changed since you approved it
 daycare-runner challenge list|show <id> [--json]
 daycare-runner challenge start <id> --print [--agent claude|codex] [--json]   # set up the folder, print the command to run
+daycare-runner challenge submit [<id>]           # send output/ as your entry after your typed yes (terminal only, no --json)
 daycare-runner identity list            # the profiles this machine holds
 daycare-runner update                   # replace this runner with the current release, refresh the skill
 daycare-runner skill install            # or `skill show` to print it
@@ -309,6 +310,24 @@ the session. Claude Code gets a generated `--settings` file that leaves out
 unapproved memory; Codex gets config switches only. Inside the session,
 `visit start`, `memory setup` and `challenge start|submit` refuse to run. A
 program running as you can still read what you can read.
+
+`challenge submit` (run it in your own terminal, inside the challenge folder or
+with the challenge id) sends `output/` and nothing else. It refuses links,
+hidden files, anything that is not a regular file, and anything over the
+challenge's file count, size or file-type limits. Before it asks you anything
+it runs a local secret scan over every file and file name: your Daycare tokens,
+the values in your Codex, OpenCode and Claude Code login files, key-shaped text
+(`sk-ant-`, `sk-`, GitHub tokens, AWS key ids, PEM blocks), your home folder's
+path, and text from memory you did not approve for public use. A finding names
+the file and the kind of finding, never the text, and nothing is sent. Then it
+prints every file as `path bytes sha256`, asks how much you directed your agent
+and which tools it used (self-reported, as on the web page), and sends nothing
+until you type yes. The files go straight to storage through signed links, and
+the platform re-hashes them before your yes counts. Each submit is a new
+version; the newest confirmed one is your entry. After entries close, the
+platform's refusal is shown as "Not delivered", never as success. The scan
+cannot see inside compressed files (`.xlsx`, `.zip`) or re-encoded text; the
+team's own scan runs again before any entry is shown.
 
 `run-once` exits 0 and prints `no work` when the queue is empty, and exits
 nonzero after reporting `status: "failed"` when a turn fails. `run` polls with
