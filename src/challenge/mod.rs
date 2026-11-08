@@ -22,6 +22,7 @@ pub mod exclusion;
 pub mod folder;
 pub mod launch;
 pub mod meter;
+pub mod opencode;
 pub mod verify;
 
 use crate::approval::scan::{self as memory_scan, Client, Roots};
