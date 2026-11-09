@@ -401,11 +401,23 @@ impl CodexClient {
             .filter(|item| input.reconciled.scope_of(&item.id).is_none())
             .map(|item| item.path.clone())
             .collect();
+        // A separate home's configuration is Daycare's own and sets none of
+        // these; the owner's own one is read as it stands.
+        let config = self.owner_codex_home.join("config.toml");
+        let base_instruction_overrides = match (input.codex_home, std::fs::read_to_string(&config))
+        {
+            (None, Ok(text)) => verify::base_instruction_overrides(&text)
+                .into_iter()
+                .map(|key| format!("{key} in {}", config.display()))
+                .collect(),
+            _ => Vec::new(),
+        };
         Ok(CodexAllowed {
             instructions,
             skills,
             folder: input.folder.to_path_buf(),
             unapproved_instructions,
+            base_instruction_overrides,
         })
     }
 

@@ -12,7 +12,13 @@
 //! - AGENTS.md text, but only text that matches, by hash, the folder's own
 //!   AGENTS.md (which Daycare wrote) or an AGENTS.md the owner approved;
 //! - a skill list, but only skills the owner approved;
-//! - an empty `developer_instructions` (the launch sets it to "").
+//! - an empty `developer_instructions` (the launch sets it to "");
+//! - from Codex 0.165, an `additional_tools` item declaring Codex's own tool
+//!   namespaces (`CODEX_OWN_TOOL_NAMESPACES`), and Codex's base instructions,
+//!   but only when the owner's configuration has no key that replaces them
+//!   (`BASE_INSTRUCTION_KEYS`). Those keys put the owner's text in that part
+//!   under the same kind and provenance as Codex's own, so the configuration
+//!   is what is checked, and a key anywhere in it refuses the launch.
 //!
 //! Anything else refuses the launch and says what it was: an unknown kind, an
 //! unapproved skill, AGENTS.md text that matches nothing approved (the likely
@@ -28,9 +34,12 @@
 //!
 //! The challenge fixtures, `tests/fixtures/codex-prompt-input-challenge*.json`,
 //! are synthetic: the part kinds and texts of the 0.158 visit captures beside
-//! them, with `{{FOLDER}}` and `{{AGENTS_MD}}` filled in at test time. They
-//! were not captured from a live challenge session; the dry run (N23) records
-//! a real one, and an unknown kind there is a refusal, not a pass.
+//! them, with `{{FOLDER}}` and `{{AGENTS_MD}}` filled in at test time.
+//! `codex-prompt-input-challenge-0165.json` is the shape of a real challenge
+//! render from the dry run (N23), on Codex 0.165.0-alpha.1.2 as the ChatGPT
+//! desktop app ships it: every item, kind, provenance and tool name as Codex
+//! rendered them, with long texts shortened and paths replaced. An unknown
+//! kind or tool namespace is still a refusal, not a pass.
 
 use super::exclusion::LaunchSpec;
 use super::launch::base_command;
@@ -47,11 +56,29 @@ pub const PROBE_MESSAGE: &str = "DAYCARE-CHALLENGE-PROBE";
 
 /// Codex's own words about its sandbox, environment and collaboration tools.
 /// They describe Codex, not the owner.
-pub const CODEX_OWN_KINDS: [&str; 4] = [
+pub const CODEX_OWN_KINDS: [&str; 6] = [
     "permissions.instructions",
     "environments.environment_context",
     "multi_agent.usage_hint",
     "multi_agent.mode_instructions",
+    "multi_agent.role_instructions",
+    "collaboration_mode.instructions",
+];
+
+/// The tool namespaces Codex declares for itself in an `additional_tools`
+/// item (0.165): `functions` (its code-mode `exec`, which wraps the shell and
+/// patch tools, plus waiting and asking the user), a clock, and its sub-agent
+/// tools. `debug prompt-input` starts no MCP server, so MCP tools never show
+/// here; apps and plugins are switched off by the launch.
+pub const CODEX_OWN_TOOL_NAMESPACES: [&str; 3] = ["functions", "clock", "collaboration"];
+
+/// Codex configuration keys that replace Codex's own base instructions: a
+/// file of the owner's text, its older name, and a model catalog, which
+/// carries base instructions per model.
+pub const BASE_INSTRUCTION_KEYS: [&str; 3] = [
+    "model_instructions_file",
+    "experimental_instructions_file",
+    "model_catalog_json",
 ];
 
 /// Codex joins the global AGENTS.md and the project ones with this line.
@@ -89,6 +116,10 @@ pub struct CodexAllowed {
     /// The owner's AGENTS.md files that were not approved: named as the
     /// likely source when unmatched text appears, never quoted.
     pub unapproved_instructions: Vec<PathBuf>,
+    /// Keys in the Codex configuration this session reads that would replace
+    /// Codex's base instructions, as `key in path`. Empty for a separate
+    /// Codex home, whose configuration Daycare wrote.
+    pub base_instruction_overrides: Vec<String>,
 }
 
 /// The checks the owner makes once Claude Code starts.
@@ -190,10 +221,29 @@ pub fn check_codex_prompt(rendered: &str, allowed: &CodexAllowed) -> Result<Vec<
     let items = items
         .as_array()
         .ok_or_else(|| refuse("its prompt-input is not a list"))?;
+    if !allowed.base_instruction_overrides.is_empty() {
+        return Err(refuse(format!(
+            "your Codex configuration replaces Codex's own base instructions ({}), and Daycare \
+             cannot tell that text from your own memory. Remove it for the challenge, or start \
+             with --separate-codex-home, whose configuration holds only what you approved",
+            allowed.base_instruction_overrides.join("; ")
+        )));
+    }
     let mut proven: Vec<String> = Vec::new();
     let mut user_parts = 0;
     for item in items {
         let role = item.get("role").and_then(Value::as_str).unwrap_or("");
+        if item.get("type").and_then(Value::as_str) == Some("additional_tools") {
+            let namespaces = check_codex_tools(item)?;
+            let line = format!(
+                "every tool the prompt declares is Codex's own ({})",
+                namespaces.join(", ")
+            );
+            if !proven.contains(&line) {
+                proven.push(line);
+            }
+            continue;
+        }
         if item.get("type").and_then(Value::as_str) != Some("message") {
             return Err(refuse(format!(
                 "its prompt holds a {} item, and only messages were expected",
@@ -270,6 +320,15 @@ pub fn check_codex_prompt(rendered: &str, allowed: &CodexAllowed) -> Result<Vec<
                     ));
                 }
                 "environments.environment_context" => check_cwd(text, &allowed.folder)?,
+                // Safe only because no key that replaces them is set (checked above).
+                "model.base_instructions" => {
+                    let line = "Codex's base instructions are its own: your Codex configuration \
+                                does not replace them"
+                        .to_string();
+                    if !proven.contains(&line) {
+                        proven.push(line);
+                    }
+                }
                 kind if CODEX_OWN_KINDS.contains(&kind) => {}
                 "apps.instructions" => {
                     return Err(refuse(
@@ -303,6 +362,63 @@ pub fn check_codex_prompt(rendered: &str, allowed: &CodexAllowed) -> Result<Vec<
             .into(),
     );
     Ok(proven)
+}
+
+/// An `additional_tools` item: every entry must be one of Codex's own tool
+/// namespaces. Returns the namespaces it declared.
+fn check_codex_tools(item: &Value) -> Result<Vec<String>> {
+    let tools = item
+        .get("tools")
+        .and_then(Value::as_array)
+        .ok_or_else(|| refuse("its prompt declares tools in a form Daycare cannot read"))?;
+    let mut namespaces = Vec::new();
+    for tool in tools {
+        let kind = tool
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("typeless");
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("unnamed");
+        if kind != "namespace" || !CODEX_OWN_TOOL_NAMESPACES.contains(&name) {
+            return Err(refuse(format!(
+                "its prompt declares tools Daycare does not know as Codex's own ({kind} {name})"
+            )));
+        }
+        if !namespaces.iter().any(|known| known == name) {
+            namespaces.push(name.to_string());
+        }
+    }
+    Ok(namespaces)
+}
+
+/// The keys in `config.toml` text that would replace Codex's base
+/// instructions (`BASE_INSTRUCTION_KEYS`). Deliberately coarse: an assignment
+/// to one of those names anywhere outside a comment counts, at the root, in a
+/// profile, as a dotted key or inside an inline table, so no layout hides one.
+/// Text that merely looks like one inside a multi-line string also counts,
+/// which refuses rather than lets a real one through.
+pub fn base_instruction_overrides(config: &str) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    for line in config.lines() {
+        let line = line.trim_start();
+        if line.starts_with('#') {
+            continue;
+        }
+        for key in BASE_INSTRUCTION_KEYS {
+            let assigned = line.match_indices(key).any(|(at, _)| {
+                let before = line[..at].chars().next_back();
+                let after = line[at + key.len()..].trim_start_matches(['"', '\'']);
+                before.is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                    && after.trim_start().starts_with('=')
+            });
+            if assigned && !found.contains(&key) {
+                found.push(key);
+            }
+        }
+    }
+    found
 }
 
 /// Match the text inside one `agents_md.instructions` part, piece by piece,
@@ -422,6 +538,8 @@ mod tests {
     const CLEAN: &str = include_str!("../../tests/fixtures/codex-prompt-input-challenge.json");
     const WITH_SKILL: &str =
         include_str!("../../tests/fixtures/codex-prompt-input-challenge-skill.json");
+    const CODEX_0165: &str =
+        include_str!("../../tests/fixtures/codex-prompt-input-challenge-0165.json");
 
     const POINTER: &str = "# Daycare challenge: Signup Rescue\n\nRead `BRIEF.md` first.\n";
 
@@ -450,6 +568,101 @@ mod tests {
             skills: BTreeSet::new(),
             folder: PathBuf::from("/h/daycare/challenges/c1"),
             unapproved_instructions: vec![PathBuf::from("/h/.codex/AGENTS.md")],
+            base_instruction_overrides: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_codex_0165_prompt_passes_with_its_own_tools_and_base_instructions() {
+        let rendered = render(CODEX_0165, "/h/daycare/challenges/c1", POINTER);
+        let proven = check_codex_prompt(&rendered, &allowed()).unwrap();
+        for wanted in [
+            "the folder's AGENTS.md",
+            "every tool the prompt declares is Codex's own (functions, clock, collaboration)",
+            "Codex's base instructions are its own",
+        ] {
+            assert!(
+                proven.iter().any(|line| line.contains(wanted)),
+                "{wanted}: {proven:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_key_that_replaces_base_instructions_refuses_and_names_it() {
+        let rendered = render(CODEX_0165, "/h/daycare/challenges/c1", POINTER);
+        let mut allowed = allowed();
+        allowed.base_instruction_overrides =
+            vec!["model_instructions_file in /h/.codex/config.toml".into()];
+        let error = check_codex_prompt(&rendered, &allowed)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("model_instructions_file in /h/.codex/config.toml")
+                && error.contains("--separate-codex-home"),
+            "{error}"
+        );
+        // The older shape shows no base instructions at all; the key still refuses.
+        let older = render(CLEAN, "/h/daycare/challenges/c1", POINTER);
+        assert!(check_codex_prompt(&older, &allowed).is_err());
+    }
+
+    #[test]
+    fn a_tool_namespace_that_is_not_codexs_own_refuses_by_name() {
+        let mut value: Value =
+            serde_json::from_str(&render(CODEX_0165, "/h/daycare/challenges/c1", POINTER)).unwrap();
+        let tools = value[0]["tools"].as_array_mut().unwrap();
+        tools.push(serde_json::json!({"type": "namespace", "name": "node_repl", "tools": []}));
+        let error = check_codex_prompt(&value.to_string(), &allowed())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("namespace node_repl"), "{error}");
+
+        value[0]["tools"] = serde_json::json!([{"type": "web_search"}]);
+        let error = check_codex_prompt(&value.to_string(), &allowed())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("web_search unnamed"), "{error}");
+    }
+
+    #[test]
+    fn base_instruction_keys_are_found_in_every_layout() {
+        for (config, wanted) in [
+            (
+                "model_instructions_file = \"/x.md\"\n",
+                vec!["model_instructions_file"],
+            ),
+            (
+                "[profiles.work]\nexperimental_instructions_file=\"/x.md\"\n",
+                vec!["experimental_instructions_file"],
+            ),
+            (
+                "profiles.work.model_catalog_json = \"/c.json\"\n",
+                vec!["model_catalog_json"],
+            ),
+            (
+                "[profiles]\nwork = { model = \"m\", model_instructions_file = \"/x.md\" }\n",
+                vec!["model_instructions_file"],
+            ),
+            (
+                "\"model_instructions_file\" = \"/x.md\"\n",
+                vec!["model_instructions_file"],
+            ),
+            (
+                "  model_instructions_file = 'a'\nmodel_catalog_json='b'\n",
+                vec!["model_instructions_file", "model_catalog_json"],
+            ),
+        ] {
+            assert_eq!(base_instruction_overrides(config), wanted, "{config}");
+        }
+        for config in [
+            "# model_instructions_file = \"/x.md\"\n",
+            "model = \"gpt\"\nnotes = \"model_instructions_file is unset\"\n",
+            "my_model_instructions_file = \"/x.md\"\n",
+            "model_instructions_files = 1\n",
+            "",
+        ] {
+            assert!(base_instruction_overrides(config).is_empty(), "{config}");
         }
     }
 
