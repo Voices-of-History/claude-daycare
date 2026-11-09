@@ -12,7 +12,11 @@
 //! 3. text from the owner's own memory that their approval does not allow in
 //!    public work: items marked private, and every item not approved at all
 //!    ("don't use"). Lines of instruction files, skill files and MCP settings
-//!    values are matched verbatim.
+//!    values are matched verbatim. A skill's code is not: its fenced code
+//!    examples and its script files are mostly the skill author's boilerplate
+//!    (a viewport `<meta>`, a labelled email field), which an entry writes on
+//!    its own, so they would refuse honest work. A skill's prose still counts,
+//!    and instruction files and auto memory are matched whole, code included.
 //!
 //! A finding names the file and the kind of finding, never the matched text,
 //! so the refusal itself cannot leak what it found. Any finding blocks the
@@ -551,11 +555,14 @@ fn add_item(set: &mut SecretSet, item: &Item, kind: FindingKind, claude_json: Op
         Kind::Skill => {
             let mut budget = MAX_MEMORY_FILE_BYTES;
             for file in text_files_under(&item.path) {
+                if is_skill_script(&file) {
+                    continue;
+                }
                 let Some(bytes) = read_small(&file, budget) else {
                     continue;
                 };
                 budget = budget.saturating_sub(bytes.len() as u64);
-                set.add_memory_text(&String::from_utf8_lossy(&bytes), kind);
+                set.add_memory_text(&without_fenced_code(&String::from_utf8_lossy(&bytes)), kind);
             }
         }
         _ => {
@@ -564,6 +571,37 @@ fn add_item(set: &mut SecretSet, item: &Item, kind: FindingKind, claude_json: Op
             }
         }
     }
+}
+
+/// A script in a skill folder: code, not the owner's writing (see the module
+/// notes). Settings files (JSON, YAML, TOML) are still read.
+fn is_skill_script(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "sh" | "py" | "js" | "ts"))
+}
+
+/// Markdown without its fenced code blocks (``` or ~~~), fences included. An
+/// unclosed fence runs to the end, as Markdown renders it.
+fn without_fenced_code(text: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut fence: Option<&str> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let marker = ["```", "~~~"]
+            .into_iter()
+            .find(|marker| trimmed.starts_with(marker));
+        match (fence, marker) {
+            (None, Some(marker)) => fence = Some(marker),
+            (Some(open), Some(marker)) if open == marker => fence = None,
+            (None, None) => {
+                kept.push_str(line);
+                kept.push('\n');
+            }
+            _ => {}
+        }
+    }
+    kept
 }
 
 /// The quoted string values in a TOML stanza, without a TOML parser: enough
@@ -858,6 +896,87 @@ mod tests {
             vec![FindingKind::DontUseMemory]
         );
         assert!(kinds(&set, "public rule that is long enough to match").is_empty());
+    }
+
+    #[test]
+    fn a_skills_code_examples_and_scripts_are_not_matched_but_its_prose_is() {
+        let dir = unique_dir("scan-skill-code");
+        let skill = dir.join("web-quality");
+        std::fs::create_dir_all(skill.join("references")).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "# Web quality\n\nAlways check the owner's private launch checklist first.\n\n```html\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n```\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill.join("references/PATTERNS.md"),
+            "~~~\n<label for=\"email\">Email address</label>\n~~~\nUse the house form pattern from the private handbook.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill.join("check.py"),
+            "print('a script line that is long enough')\n",
+        )
+        .unwrap();
+        let skill_item = Item {
+            id: item_id(Client::Claude, Kind::Skill, &skill, Some("web-quality")),
+            client: Client::Claude,
+            kind: Kind::Skill,
+            path: skill.clone(),
+            name: Some("web-quality".into()),
+            bytes: 0,
+            sha256: String::new(),
+            origin: None,
+        };
+        let claude_md = dir.join("CLAUDE.md");
+        std::fs::write(
+            &claude_md,
+            "```\nssh deploy@build-box.internal.example\n```\n",
+        )
+        .unwrap();
+        let claude_md_item = Item {
+            id: item_id(Client::Claude, Kind::ClaudeMd, &claude_md, None),
+            client: Client::Claude,
+            kind: Kind::ClaudeMd,
+            path: claude_md,
+            name: None,
+            bytes: 0,
+            sha256: String::new(),
+            origin: None,
+        };
+        let inventory = Inventory {
+            items: vec![skill_item.clone(), claude_md_item.clone()],
+            warnings: vec![],
+        };
+        let reconciled = Reconciled {
+            unreviewed: vec![skill_item, claude_md_item],
+            ..Reconciled::default()
+        };
+        let mut set = SecretSet::new();
+        add_memory(&mut set, &inventory, &reconciled, &dir.join("absent.json"));
+
+        let entry = "<!doctype html><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<label for=\"email\">Email address</label>\nprint('a script line that is long enough')";
+        assert!(kinds(&set, entry).is_empty(), "boilerplate matched");
+        for prose in [
+            "Always check the owner's private launch checklist first.",
+            "Use the house form pattern from the private handbook.",
+            // An instruction file's code block is the owner's own: still matched.
+            "ssh deploy@build-box.internal.example",
+        ] {
+            assert_eq!(
+                kinds(&set, prose),
+                vec![FindingKind::DontUseMemory],
+                "{prose}"
+            );
+        }
+    }
+
+    #[test]
+    fn fenced_code_is_dropped_with_its_fences_and_an_open_fence_runs_to_the_end() {
+        assert_eq!(
+            without_fenced_code("a\n```js\nb\n```\nc\n  ~~~\nd\n```\ne\n~~~\nf\n```\ng"),
+            "a\nc\nf\n"
+        );
     }
 
     #[test]
