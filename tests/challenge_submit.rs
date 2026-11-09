@@ -445,7 +445,7 @@ fn three_puts_with_matching_sha256_one_confirm_and_the_listing_is_the_manifest()
     std::fs::create_dir_all(machine.folder().join("meter")).unwrap();
     std::fs::write(
         machine.folder().join("meter/start.json"),
-        r#"{"ok":true,"used_percentage":12.5}"#,
+        r#"{"ok":true,"used_percentage":12.5,"taken_at":"2026-11-09T17:36:27Z","entry_id":"entry-1"}"#,
     )
     .unwrap();
 
@@ -476,6 +476,20 @@ fn three_puts_with_matching_sha256_one_confirm_and_the_listing_is_the_manifest()
     assert_eq!(
         posted["declaration"]["tools"],
         serde_json::json!(["Claude Code", "a browser"])
+    );
+    // The reading goes with the entry, trimmed to the share used and when,
+    // and the owner was told before the yes.
+    assert_eq!(
+        posted["declaration"]["meter"],
+        serde_json::json!({"start": {"ok": true, "used_percentage": 12.5, "taken_at": "2026-11-09T17:36:27Z"}})
+    );
+    let told = screen
+        .find("Your usage readings go with your entry")
+        .expect("the owner is told about the readings");
+    // The yes question goes to the prompt; what follows it here is the record.
+    assert!(
+        told < screen.find("Recorded the meter readings").unwrap(),
+        "{screen}"
     );
     assert!(posted.get("actor_id").is_none(), "{posted}");
     assert_eq!(

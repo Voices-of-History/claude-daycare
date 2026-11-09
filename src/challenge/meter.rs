@@ -103,6 +103,69 @@ fn write(folder: &Path, relative: &str, value: &Value) -> Result<PathBuf> {
 }
 
 /// Write `meter/start.json`, first removing the last session's `end.json`.
+/// What the platform keeps of the readings (`zMeterReadings` in the
+/// platform's `entries.ts`): for each reading, the share of the weekly
+/// allowance used and when, or only that it failed. Nothing else goes: not
+/// the error text, which can name paths on this machine, and not the ids the
+/// platform already has. A reading in any other shape, such as an edited or
+/// unreadable file, goes as failed.
+pub fn for_platform(readings: &Value) -> Option<Value> {
+    let mut sent = serde_json::Map::new();
+    for name in ["start", "end"] {
+        let Some(reading) = readings.get(name).filter(|reading| reading.is_object()) else {
+            continue;
+        };
+        let taken_at = reading
+            .get("taken_at")
+            .and_then(Value::as_str)
+            .filter(|text| is_utc_timestamp(text));
+        let used = reading
+            .get("used_percentage")
+            .and_then(Value::as_f64)
+            .filter(|used| used.is_finite() && (0.0..=100.0).contains(used));
+        let ok = reading.get("ok") == Some(&Value::Bool(true));
+        let value = match (ok, used, taken_at) {
+            (true, Some(used), Some(taken_at)) => {
+                json!({"ok": true, "used_percentage": used, "taken_at": taken_at})
+            }
+            (_, _, Some(taken_at)) => json!({"ok": false, "taken_at": taken_at}),
+            _ => json!({"ok": false}),
+        };
+        sent.insert(name.to_string(), value);
+    }
+    (!sent.is_empty()).then_some(Value::Object(sent))
+}
+
+/// The readings in words, for the owner before their typed yes.
+pub fn describe(sent: &Value) -> String {
+    [("start", "before"), ("end", "after")]
+        .into_iter()
+        .filter_map(|(name, label)| {
+            let reading = sent.get(name)?;
+            Some(
+                match reading.get("used_percentage").and_then(Value::as_f64) {
+                    Some(used) => format!("{label} the session {used}%"),
+                    None => format!("{label} the session: failed"),
+                },
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `2026-11-09T17:36:27Z`, the form `take` writes.
+fn is_utc_timestamp(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == 20
+        && bytes.iter().enumerate().all(|(at, byte)| match at {
+            4 | 7 => *byte == b'-',
+            10 => *byte == b'T',
+            13 | 16 => *byte == b':',
+            19 => *byte == b'Z',
+            _ => byte.is_ascii_digit(),
+        })
+}
+
 pub fn write_start(folder: &Path, value: &Value) -> Result<PathBuf> {
     remove_file_in(folder, END_FILE)?;
     write(folder, START_FILE, value)
@@ -122,6 +185,43 @@ mod tests {
             challenge_id: "c1",
             entry_id: "e1",
         }
+    }
+
+    #[test]
+    fn the_platform_gets_the_share_used_and_when_and_nothing_else() {
+        let readings = json!({
+            "start": {"version": 1, "reading": "start", "client": "codex", "challenge_id": "c1",
+                "entry_id": "e1", "taken_at": "2026-11-09T17:36:27Z", "ok": true,
+                "used_percentage": 44.0, "resets_at": "live:11:11", "meter_key": "codex_weekly:codex"},
+            "end": {"taken_at": "2026-11-09T17:44:02Z", "ok": false,
+                "error": "could not read /Users/someone/.codex/auth.json"},
+        });
+        let sent = for_platform(&readings).unwrap();
+        assert_eq!(
+            sent,
+            json!({
+                "start": {"ok": true, "used_percentage": 44.0, "taken_at": "2026-11-09T17:36:27Z"},
+                "end": {"ok": false, "taken_at": "2026-11-09T17:44:02Z"},
+            })
+        );
+        assert_eq!(
+            describe(&sent),
+            "before the session 44%, after the session: failed"
+        );
+
+        // An edited or unreadable reading goes as failed, never as a number.
+        for odd in [
+            json!({"ok": true, "used_percentage": 140, "taken_at": "2026-11-09T17:36:27Z"}),
+            json!({"ok": true, "used_percentage": 12.5}),
+            json!({"ok": true, "used_percentage": 12.5, "taken_at": "yesterday"}),
+            json!({"ok": "yes", "used_percentage": 12.5, "taken_at": "2026-11-09T17:36:27Z"}),
+            json!({"unreadable": "not valid JSON"}),
+        ] {
+            let sent = for_platform(&json!({ "start": odd })).unwrap();
+            assert_eq!(sent["start"]["ok"], false, "{odd}");
+            assert!(sent["start"].get("used_percentage").is_none(), "{odd}");
+        }
+        assert_eq!(for_platform(&json!({"start": "44", "during": {}})), None);
     }
 
     #[test]

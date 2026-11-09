@@ -48,18 +48,27 @@ pub fn manifest_sha256(files: &[OutputFile]) -> String {
     sha256_hex(format!("[{}]", items.join(",")).as_bytes())
 }
 
-/// The request body: the listing the owner saw, and their declaration.
-pub fn submit_body(files: &[OutputFile], declaration: &Declaration) -> Value {
+/// The request body: the listing the owner saw, and their declaration, with
+/// the usage readings (`meter::for_platform`) when there are any.
+pub fn submit_body(
+    files: &[OutputFile],
+    declaration: &Declaration,
+    meter: Option<&Value>,
+) -> Value {
+    let mut declared = json!({
+        "direction": declaration.direction,
+        "tools": declaration.tools,
+    });
+    if let Some(meter) = meter {
+        declared["meter"] = meter.clone();
+    }
     json!({
         "files": files.iter().map(|file| json!({
             "path": file.path,
             "bytes": file.bytes.len(),
             "sha256": file.sha256,
         })).collect::<Vec<_>>(),
-        "declaration": {
-            "direction": declaration.direction,
-            "tools": declaration.tools,
-        },
+        "declaration": declared,
     })
 }
 
@@ -172,6 +181,8 @@ pub struct Delivery<'a> {
     pub expected_entry_id: Option<&'a str>,
     pub files: &'a [OutputFile],
     pub declaration: &'a Declaration,
+    /// The usage readings as the platform keeps them, when there are any.
+    pub meter: Option<&'a Value>,
 }
 
 /// POST, one PUT per file, confirm. `progress` hears one line per step.
@@ -184,11 +195,12 @@ pub fn deliver(delivery: Delivery<'_>, progress: &mut dyn FnMut(&str)) -> Result
         expected_entry_id,
         files,
         declaration,
+        meter,
     } = delivery;
     let manifest_sha256 = manifest_sha256(files);
 
     let started = platform
-        .submit_entry(token, challenge_id, &submit_body(files, declaration))
+        .submit_entry(token, challenge_id, &submit_body(files, declaration, meter))
         .map_err(|error| not_delivered("starting the upload", error))?;
     let submission_id = text(&started, "submission_id").ok_or_else(|| {
         not_delivered(
@@ -305,17 +317,24 @@ mod tests {
 
     #[test]
     fn the_body_carries_the_listing_and_the_declaration_and_no_agent() {
-        let body = submit_body(
-            &[file("entry.html", "<p>hi</p>")],
-            &Declaration {
-                direction: "light".into(),
-                tools: vec!["Claude Code".into()],
-            },
-        );
+        let declaration = Declaration {
+            direction: "light".into(),
+            tools: vec!["Claude Code".into()],
+        };
+        let body = submit_body(&[file("entry.html", "<p>hi</p>")], &declaration, None);
         assert_eq!(body["files"][0]["path"], "entry.html");
         assert_eq!(body["files"][0]["bytes"], 9);
         assert_eq!(body["declaration"]["direction"], "light");
+        assert!(body["declaration"].get("meter").is_none());
         assert!(body.get("actor_id").is_none());
+
+        let meter = json!({"start": {"ok": false}});
+        let body = submit_body(
+            &[file("entry.html", "<p>hi</p>")],
+            &declaration,
+            Some(&meter),
+        );
+        assert_eq!(body["declaration"]["meter"], meter);
     }
 
     #[test]

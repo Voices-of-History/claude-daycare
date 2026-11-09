@@ -806,6 +806,18 @@ pub fn run(
 
     let declaration = ask_declaration(prompt, screen)?;
 
+    // Said before the yes, because they go with the entry: the share of the
+    // weekly allowance used before and after the session, nothing else.
+    let readings = folder.meter_readings();
+    let sent_meter = readings.as_ref().and_then(super::meter::for_platform);
+    if let Some(meter) = &sent_meter {
+        writeln!(
+            screen,
+            "Your usage readings go with your entry, self-reported: {}.",
+            super::meter::describe(meter)
+        )?;
+    }
+
     writeln!(screen)?;
     screen.flush()?;
     let answer = prompt.ask(&format!(
@@ -821,7 +833,7 @@ pub fn run(
 
     // The readings go into ENTRY.json before anything leaves the machine, so
     // they are on record whatever the network does.
-    if let Some(meter) = folder.meter_readings() {
+    if let Some(meter) = readings {
         folder.update_entry(|entry| entry["meter"] = meter)?;
         writeln!(
             screen,
@@ -844,6 +856,7 @@ pub fn run(
             expected_entry_id: expected_entry_id.as_deref(),
             files: &manifest.files,
             declaration: &declaration,
+            meter: sent_meter.as_ref(),
         },
         &mut progress,
     )?;
