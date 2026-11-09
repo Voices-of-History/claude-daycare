@@ -25,7 +25,7 @@ use crate::paths::{create_private_dir, write_atomic, Layout};
 use crate::{Error, Result};
 use scan::{Client, Inventory, Item, Kind, Roots};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -458,32 +458,102 @@ fn describe_parts(client: Client, kind: Kind, name: Option<&str>, path: &Path) -
     }
 }
 
-fn print_plan(items: &[ApprovedItem], out: Out) {
-    if items.is_empty() {
-        out.say(
-            "Nothing is approved: your agent will start every challenge with none of your memory.",
-        );
-        return;
+/// The project an auto memory file belongs to: the folder Claude Code names
+/// after the project's path, in `<config>/projects/<project>/memory/…`.
+fn auto_memory_project(kind: Kind, path: &Path) -> Option<String> {
+    if kind != Kind::AutoMemory {
+        return None;
     }
-    out.say("Your agent may use these in challenges:");
+    let parts: Vec<String> = path
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    (0..parts.len().saturating_sub(2))
+        .find(|&at| parts[at] == "projects" && parts[at + 2] == "memory")
+        .map(|at| parts[at + 1].clone())
+}
+
+/// Auto memory files counted by project, in project order. A machine can hold
+/// hundreds of them, so the review takes them as one item, not one per file.
+fn auto_memory_projects<'a>(
+    items: impl IntoIterator<Item = (Kind, &'a Path)>,
+) -> Vec<(String, usize)> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for (kind, path) in items {
+        if let Some(project) = auto_memory_project(kind, path) {
+            *counts.entry(project).or_default() += 1;
+        }
+    }
+    counts.into_iter().collect()
+}
+
+/// The scan's auto memory, summed up for the review skill.
+fn auto_memory_summary(inventory: &Inventory) -> Value {
+    let projects = auto_memory_projects(
+        inventory
+            .items
+            .iter()
+            .map(|item| (item.kind, item.path.as_path())),
+    );
+    json!({
+        "files": projects.iter().map(|(_, files)| files).sum::<usize>(),
+        "projects": projects
+            .iter()
+            .map(|(project, files)| json!({"project": project, "files": files}))
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn files(count: usize) -> String {
+    if count == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{count} files")
+    }
+}
+
+/// What the owner is asked to say yes to, auto memory counted by project.
+fn plan_lines(items: &[ApprovedItem]) -> Vec<String> {
+    if items.is_empty() {
+        return vec![
+            "Nothing is approved: your agent will start every challenge with none of your memory."
+                .to_string(),
+        ];
+    }
+    let mut lines = vec!["Your agent may use these in challenges:".to_string()];
     for scope in [Scope::Private, Scope::Public] {
         let chosen: Vec<_> = items.iter().filter(|item| item.scope == scope).collect();
         if chosen.is_empty() {
             continue;
         }
-        out.say(match scope {
-            Scope::Private => "  Private (to do the work, never copied into public work):",
-            Scope::Public => "  Public (may also appear in work other people see):",
-        });
-        for item in chosen {
-            let what = item.kind.as_str().replace('_', " ");
-            match &item.name {
-                Some(name) => out.say(format!("    {what}: {name}")),
-                None => out.say(format!("    {what}: {}", item.path.display())),
+        lines.push(
+            match scope {
+                Scope::Private => "  Private (to do the work, never copied into public work):",
+                Scope::Public => "  Public (may also appear in work other people see):",
             }
+            .to_string(),
+        );
+        for item in chosen.iter().filter(|item| item.kind != Kind::AutoMemory) {
+            let what = item.kind.as_str().replace('_', " ");
+            lines.push(match &item.name {
+                Some(name) => format!("    {what}: {name}"),
+                None => format!("    {what}: {}", item.path.display()),
+            });
+        }
+        for (project, count) in
+            auto_memory_projects(chosen.iter().map(|item| (item.kind, item.path.as_path())))
+        {
+            lines.push(format!("    auto memory: {} from {project}", files(count)));
         }
     }
-    out.say("Everything else is \"don't use\".");
+    lines.push("Everything else is \"don't use\".".to_string());
+    lines
+}
+
+fn print_plan(items: &[ApprovedItem], out: Out) {
+    for line in plan_lines(items) {
+        out.say(line);
+    }
 }
 
 /// How `memory setup` was asked to run.
@@ -510,6 +580,7 @@ pub fn setup_command(
                 json!({
                     "ok": true,
                     "items": inventory.items,
+                    "auto_memory": auto_memory_summary(&inventory),
                     "warnings": inventory.warnings,
                 }),
                 || print_inventory(&inventory),
@@ -606,9 +677,12 @@ fn read_draft(path: &Path) -> Result<Draft> {
     })
 }
 
-fn print_inventory(inventory: &Inventory) {
+/// The scan as the owner reads it: one line per item, except auto memory,
+/// which is one item with a line per project.
+fn inventory_lines(inventory: &Inventory) -> Vec<String> {
+    let mut lines = Vec::new();
     if inventory.items.is_empty() {
-        println!("No memory found for Claude Code or Codex.");
+        lines.push("No memory found for Claude Code or Codex.".to_string());
     }
     let mut by_client: BTreeMap<&str, Vec<&Item>> = BTreeMap::new();
     for item in &inventory.items {
@@ -618,22 +692,43 @@ fn print_inventory(inventory: &Inventory) {
             .push(item);
     }
     for (client, items) in by_client {
-        println!("{client}:");
-        for item in items {
+        lines.push(format!("{client}:"));
+        for item in items.iter().filter(|item| item.kind != Kind::AutoMemory) {
             let origin = match item.origin.as_deref() {
                 Some(origin) => format!(" [{origin}]"),
                 None => String::new(),
             };
-            println!("  {}{origin}", describe(item));
+            lines.push(format!("  {}{origin}", describe(item)));
+        }
+        let projects =
+            auto_memory_projects(items.iter().map(|item| (item.kind, item.path.as_path())));
+        if !projects.is_empty() {
+            let total: usize = projects.iter().map(|(_, count)| count).sum();
+            lines.push(format!(
+                "  {client}, auto memory, {} in {} project(s), reviewed as one item:",
+                files(total),
+                projects.len()
+            ));
+            for (project, count) in &projects {
+                lines.push(format!("    {project}: {}", files(*count)));
+            }
         }
     }
     for warning in &inventory.warnings {
-        println!("note: {warning}");
+        lines.push(format!("note: {warning}"));
     }
-    println!(
+    lines.push(
         "These are your own agent memory, not Daycare memories. Review them with the \
          daycare-memory-review skill."
+            .to_string(),
     );
+    lines
+}
+
+fn print_inventory(inventory: &Inventory) {
+    for line in inventory_lines(inventory) {
+        println!("{line}");
+    }
 }
 
 #[cfg(test)]
@@ -689,6 +784,114 @@ mod tests {
             })).collect::<Vec<_>>(),
         }))
         .unwrap()
+    }
+
+    fn listed(client: Client, kind: Kind, path: &str, name: Option<&str>) -> Item {
+        Item {
+            id: scan::item_id(client, kind, Path::new(path), name),
+            client,
+            kind,
+            path: PathBuf::from(path),
+            name: name.map(str::to_string),
+            bytes: 1,
+            sha256: "0".repeat(64),
+            origin: None,
+        }
+    }
+
+    fn many_auto_memories() -> Inventory {
+        let mut items = vec![
+            listed(Client::Claude, Kind::ClaudeMd, "/h/.claude/CLAUDE.md", None),
+            listed(
+                Client::Codex,
+                Kind::Skill,
+                "/h/.codex/skills/notes",
+                Some("notes"),
+            ),
+        ];
+        for at in 0..30 {
+            items.push(listed(
+                Client::Claude,
+                Kind::AutoMemory,
+                &format!("/h/.claude/projects/-h-site/memory/note-{at}.md"),
+                None,
+            ));
+        }
+        items.push(listed(
+            Client::Claude,
+            Kind::AutoMemory,
+            "/h/.claude/projects/-h-app/memory/projects/MEMORY.md",
+            None,
+        ));
+        Inventory {
+            items,
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn auto_memory_is_one_item_with_a_line_per_project() {
+        let lines = inventory_lines(&many_auto_memories());
+        assert_eq!(
+            lines,
+            vec![
+                "claude:",
+                "  claude, claude md, /h/.claude/CLAUDE.md",
+                "  claude, auto memory, 31 files in 2 project(s), reviewed as one item:",
+                "    -h-app: 1 file",
+                "    -h-site: 30 files",
+                "codex:",
+                "  codex, skill, notes (/h/.codex/skills/notes)",
+                "These are your own agent memory, not Daycare memories. Review them with the \
+                 daycare-memory-review skill.",
+            ]
+        );
+        assert_eq!(
+            auto_memory_summary(&many_auto_memories()),
+            json!({"files": 31, "projects": [
+                {"project": "-h-app", "files": 1},
+                {"project": "-h-site", "files": 30},
+            ]})
+        );
+        // A folder named "projects" inside a memory tree is not a project.
+        assert_eq!(
+            auto_memory_project(
+                Kind::AutoMemory,
+                Path::new("/h/.claude/projects/-h-app/memory/projects/MEMORY.md")
+            ),
+            Some("-h-app".to_string())
+        );
+        assert_eq!(
+            auto_memory_project(
+                Kind::ClaudeMd,
+                Path::new("/h/.claude/projects/p/memory/a.md")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn the_list_before_the_yes_counts_auto_memory_by_project() {
+        let inventory = many_auto_memories();
+        let mut items: Vec<ApprovedItem> = inventory
+            .items
+            .iter()
+            .filter(|item| item.kind == Kind::AutoMemory)
+            .map(|item| ApprovedItem::from_item(item, Scope::Private))
+            .collect();
+        items.push(ApprovedItem::from_item(&inventory.items[0], Scope::Public));
+        assert_eq!(
+            plan_lines(&items),
+            vec![
+                "Your agent may use these in challenges:",
+                "  Private (to do the work, never copied into public work):",
+                "    auto memory: 1 file from -h-app",
+                "    auto memory: 30 files from -h-site",
+                "  Public (may also appear in work other people see):",
+                "    claude md: /h/.claude/CLAUDE.md",
+                "Everything else is \"don't use\".",
+            ]
+        );
     }
 
     #[test]

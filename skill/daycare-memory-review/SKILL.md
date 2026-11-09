@@ -26,6 +26,18 @@ kind, and the path or name. For example:
 - claude, CLAUDE.md, ~/.claude/CLAUDE.md
 - claude, MCP server, github (in ~/.claude.json)
 
+Auto memory (`kind: "auto_memory"`) is different: Claude Code keeps a memory
+folder for every project, and a machine can hold hundreds of these files. Show
+all of them as **one** line, using the scan's `auto_memory` summary, for
+example:
+
+- claude, auto memory, 227 files in 4 projects
+
+Then ask about auto memory once (section 2). If your person wants finer
+choices, name the projects with their file counts from
+`auto_memory.projects` and ask once per project. Never list the files one by
+one unless they ask for that.
+
 Rules for the list:
 
 - Never paste file contents. Never show or read MCP settings values, headers,
@@ -49,6 +61,13 @@ An item with no answer is **don't use**. Never fill in an answer your person
 did not give. If they stop partway, everything they did not answer stays
 "don't use".
 
+For auto memory, one answer covers every auto memory file (or every file of
+one project, if you asked per project). Tell your person, before they answer,
+that Claude rewrites these files whenever it saves a memory, and an approved
+file that changes needs a fresh review before the next challenge. "Don't use"
+never needs redoing. A challenge session has auto memory switched off either
+way; an approved file reaches the agent only as a copy.
+
 **Accept all** covers private use only. If your person says "accept all",
 mark every item private, then ask the public question separately, as its own
 question: "Should all of them also be allowed in public work?" If they do not
@@ -70,11 +89,15 @@ Copy each `id` and `sha256` exactly from the scan:
 ```
 
 `scope` is `none`, `private` or `public`. Items left out are "don't use".
+For an answer about auto memory as a whole (or about one project), write one
+entry for each of its files, with that answer, copying every `id` and
+`sha256` from the scan. Auto memory files that appear after the scan were
+never reviewed, so they are "don't use".
 
 ## 4. Your person confirms
 
 Ask your person to run this **in their own terminal**, read the list it
-prints, and type `yes`:
+prints (auto memory is counted by project there), and type `yes`:
 
 ```bash
 daycare-runner memory setup --write ~/daycare-memory-draft.json

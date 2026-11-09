@@ -315,7 +315,9 @@ layers, AGENTS.md, rules, auto memory, skills, plugins, MCP servers), not the
 memories `memory list` shows. The `daycare-memory-review` skill walks you
 through it; the runner saves the result to `~/.claude-daycare/approval.json`
 only after you type yes in a real terminal. Each approved item is bound to its
-sha256, so an edited file needs a fresh review.
+sha256, so an edited file needs a fresh review. Auto memory, which can run to
+hundreds of files, is listed and asked about as one item, counted by project;
+the approval still binds each file.
 
 `challenge start <id>` creates `~/daycare/challenges/<id>/` (or under
 `DAYCARE_CHALLENGE_ROOT`) with the brief, checked input files, copies of what
