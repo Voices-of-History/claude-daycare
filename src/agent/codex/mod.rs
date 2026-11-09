@@ -323,10 +323,12 @@ impl Agent for CodexAgent {
         let codex = codex_command(&self.bin, &self.homes, spec.workspace);
         with_synced_login(self.login.as_ref(), &self.homes.codex_home, || {
             catalog::prepare(&codex, spec.model, &self.homes.model_catalog())?;
+            let base = catalog::base_instructions(&self.homes.model_catalog());
             preflight::prove_sealed_prompt(
                 &codex,
                 &launch::sealed_model_args(spec.model, &persona, &self.homes.model_catalog()),
                 &persona,
+                base.as_deref(),
             )
         })
     }
