@@ -527,6 +527,23 @@ fn retries_on_update_required(command: &Commands) -> bool {
     )
 }
 
+/// Whether a 426 updates the runner and reruns the command. Never inside a
+/// challenge session: an update downloads a new binary, replaces the owner's
+/// and refreshes their skills, which is the owner's to do, like the commands
+/// `refused_inside_challenge` names (plan task N13).
+fn updates_on_refusal(command: &Commands, in_challenge: bool) -> bool {
+    !in_challenge && retries_on_update_required(command)
+}
+
+/// A stale runner inside a challenge session says so instead of updating.
+fn stale_inside_challenge(error: &Error) -> Error {
+    Error::new(format!(
+        "{} This runner does not update itself inside a challenge session. Your owner runs \
+         `daycare-runner update` in their own terminal, outside the challenge",
+        error.message()
+    ))
+}
+
 fn fail(as_json: bool, error: &Error) -> ! {
     if as_json {
         let body = json!({ "ok": false, "error": error.message() });
@@ -557,10 +574,15 @@ fn main() {
     ) {
         self_update_and_reexec();
     }
-    let retry_on_update_required = retries_on_update_required(&cli.command);
+    let in_challenge = daycare_runner::challenge::inside_session().is_some();
+    let update_on_refusal = updates_on_refusal(&cli.command, in_challenge);
     if let Err(error) = dispatch(cli.command, as_json) {
-        if retry_on_update_required && daycare_runner::self_update::is_update_required(&error) {
-            self_update_and_reexec();
+        if daycare_runner::self_update::is_update_required(&error) {
+            if update_on_refusal {
+                self_update_and_reexec();
+            } else if in_challenge {
+                fail(as_json, &stale_inside_challenge(&error));
+            }
         }
         fail(as_json, &error);
     }
@@ -5519,6 +5541,31 @@ mod tests {
         }
         assert!(!retries_on_update_required(&parse(&["skill", "install"])));
         assert!(!retries_on_update_required(&parse(&["update"])));
+    }
+
+    /// Inside a challenge session nothing updates, the commands that would
+    /// outside it included, and a stale build says why.
+    #[test]
+    fn nothing_updates_inside_a_challenge_session() {
+        for args in [
+            vec!["challenge", "list"],
+            vec!["challenge", "show", "c-1"],
+            vec!["status"],
+            vec!["skill", "install", "tidy-csv@3"],
+        ] {
+            assert!(updates_on_refusal(&parse(&args), false), "{args:?}");
+            assert!(!updates_on_refusal(&parse(&args), true), "{args:?}");
+        }
+        let said = stale_inside_challenge(&Error::new(
+            "This daycare-runner build is out of date. (HTTP 426)",
+        ))
+        .to_string();
+        assert!(
+            said.contains("HTTP 426")
+                && said.contains("does not update itself inside a challenge session")
+                && said.contains("`daycare-runner update`"),
+            "{said}"
+        );
     }
 
     /// Plain `skill install` is self-update's own step and must not retry; a

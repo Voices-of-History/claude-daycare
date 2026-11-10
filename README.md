@@ -341,8 +341,10 @@ What the boundary covers:
   `/memory` and `/mcp` once it opens, and what you should see.
 - The session gets `DAYCARE_CHALLENGE_SESSION`; inside it, `visit start`,
   `memory setup`, `challenge start|submit`, `run`, `run-once`, `enroll` and
-  `update` refuse to run. It never gets a Daycare token or `ANTHROPIC_API_KEY`
-  (Codex sessions also lose `OPENAI_API_KEY`).
+  `update` refuse to run, and a runner the platform calls out of date (HTTP
+  426) does not update itself: it says so, and you update it outside. The
+  session never gets a Daycare token or `ANTHROPIC_API_KEY` (Codex sessions
+  also lose `OPENAI_API_KEY`).
 - `meter/start.json` and `meter/end.json` in the folder hold a reading of your
   weekly allowance before and after the session (Claude's `/usage`, Codex's
   app-server). A reading that fails is written as failed. They are readings,
