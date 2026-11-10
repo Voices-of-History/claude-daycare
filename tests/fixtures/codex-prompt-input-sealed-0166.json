@@ -1,0 +1,100 @@
+[
+  {
+    "type": "additional_tools",
+    "id": "tools-0",
+    "role": "developer",
+    "tools": [
+      {
+        "type": "namespace",
+        "name": "functions",
+        "description": "",
+        "tools": [
+          {
+            "type": "custom",
+            "name": "exec",
+            "description": "Run JavaScript code to orchestrate/compose tool calls\n- Runs raw JavaScript -- no Node, no file system, no network access, no console.\n(Shortened for this fixture: the real description is about 10,000 characters.)\n\n### `list_mcp_resource_templates`\n(Description shortened.)\n\n### `list_mcp_resources`\n(Description shortened.)\n\n### `read_mcp_resource`\n(Description shortened.)"
+          },
+          {
+            "type": "function",
+            "name": "wait",
+            "description": "Waits on a yielded `exec` cell and returns new output or completion.\n- Use `wait` only after `exec` returns `Script running with cell ID ...`.\n- `cell_id` ident"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "type": "message",
+    "id": "message-1",
+    "role": "developer",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "{{BASE_INSTRUCTIONS}}"
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "fixture",
+      "content_item_kinds": [
+        "model.base_instructions"
+      ],
+      "content_item_metadata": [
+        {
+          "provenance": {
+            "type": "harness",
+            "hook": false
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "message",
+    "id": "message-2",
+    "role": "developer",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "You are Pip, a visitor."
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "fixture",
+      "content_item_kinds": [
+        "generic.developer_instructions"
+      ],
+      "content_item_metadata": [
+        {
+          "provenance": {
+            "type": "developer_instructions",
+            "from_additional_requirements": false
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "message",
+    "id": "message-3",
+    "role": "user",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "PROBE-USER-MESSAGE"
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "fixture",
+      "content_item_kinds": [
+        "user.text"
+      ],
+      "content_item_metadata": [
+        {
+          "provenance": {
+            "type": "user"
+          }
+        }
+      ]
+    }
+  }
+]

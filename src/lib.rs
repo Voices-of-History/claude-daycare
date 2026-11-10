@@ -9,6 +9,8 @@
 //! prototype, which proved the argv/stream seams against Claude Code 2.1.220.
 
 pub mod agent;
+pub mod approval;
+pub mod challenge;
 pub mod config;
 pub mod error;
 pub mod homecoming;
@@ -18,10 +20,12 @@ pub mod keychain;
 pub mod launch;
 pub mod memory;
 pub mod meter;
+pub mod out;
 pub mod paths;
 pub mod platform;
 pub mod self_update;
 pub mod session;
+pub mod skills;
 pub mod stream;
 pub mod terminal;
 pub mod turn;

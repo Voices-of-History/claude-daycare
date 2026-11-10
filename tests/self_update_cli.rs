@@ -50,7 +50,8 @@ struct Seen {
 }
 
 /// A site that serves `current.json` for `new1`, the `new1` build, and a
-/// pair/claim route that answers 426 to any release in `refuse`.
+/// pair/claim route and a challenge list that answer 426 to any release in
+/// `refuse`.
 struct Site {
     base: String,
     seen: Arc<Mutex<Vec<Seen>>>,
@@ -106,6 +107,10 @@ impl Site {
                         (426, br#"{"error":"runner_update_required"}"#.to_vec())
                     }
                     "/api/daycare/pair/claim" => (400, br#"{"error":"bad code"}"#.to_vec()),
+                    "/api/daycare/challenges" if refuse.contains(&release.as_str()) => {
+                        (426, br#"{"error":"runner_update_required"}"#.to_vec())
+                    }
+                    "/api/daycare/challenges" => (200, br#"{"challenges":[]}"#.to_vec()),
                     _ => (404, b"{}".to_vec()),
                 };
                 log.lock().unwrap().push(Seen {
@@ -213,6 +218,66 @@ fn a_426_updates_once_and_the_same_command_retries_on_the_new_binary() {
     assert!(stderr.contains("bad code"), "{stderr}");
     assert!(version(&exe).contains("(release new1)"));
     assert!(home.join(".claude/skills/daycare/SKILL.md").exists());
+}
+
+/// A device token in the test's file store, under the bare device id the
+/// first run migrates, so a command that needs the platform can reach it.
+fn signed_in(home: &Path) {
+    std::fs::write(home.join("token"), r#"{"d":"device-token"}"#).unwrap();
+}
+
+/// `challenge list` stands for any command a challenge session may run.
+fn run_challenge_list(exe: &Path, home: &Path, session: Option<&str>) -> std::process::Output {
+    let mut command = Command::new(exe);
+    command
+        .args(["challenge", "list"])
+        .env("HOME", home)
+        .env_remove("DAYCARE_HOME")
+        .env_remove("DAYCARE_RUNNER_SELF_UPDATED")
+        .env_remove("DAYCARE_CHALLENGE_SESSION")
+        .env("DAYCARE_TOKEN_FILE", home.join("token"))
+        .env("DAYCARE_WORKSPACE_ROOT", home.join("workspaces"))
+        .env("DAYCARE_SKIP_CLAUDE_PREFLIGHT", "1")
+        .env("PATH", "/usr/bin:/bin");
+    if let Some(entry) = session {
+        command.env("DAYCARE_CHALLENGE_SESSION", entry);
+    }
+    command.output().unwrap()
+}
+
+#[test]
+fn outside_a_challenge_a_426_on_challenge_list_updates() {
+    let site = Site::start(&["old0"]);
+    let (home, exe) = machine("su-cli-list", &site, &builds().old);
+    signed_in(&home);
+    let out = run_challenge_list(&exe, &home, None);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(site.pointer_reads(), 1, "{stderr}");
+    assert!(version(&exe).contains("(release new1)"), "{stderr}");
+}
+
+#[test]
+fn inside_a_challenge_session_a_426_never_updates_and_says_why() {
+    let site = Site::start(&["old0"]);
+    let (home, exe) = machine("su-cli-session", &site, &builds().old);
+    signed_in(&home);
+    let out = run_challenge_list(&exe, &home, Some("entry-1"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(!out.status.success());
+    // It asked once, was refused, and fetched nothing.
+    assert_eq!(site.pointer_reads(), 0, "{stderr}");
+    assert!(
+        !site.seen().iter().any(|s| s.path == "/releases/new1"),
+        "{stderr}"
+    );
+    assert!(version(&exe).contains("(release old0)"), "{stderr}");
+    assert!(!home.join(".claude/skills/daycare/SKILL.md").exists());
+    assert!(
+        stderr.contains("does not update itself inside a challenge session"),
+        "{stderr}"
+    );
 }
 
 #[test]
