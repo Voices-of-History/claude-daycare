@@ -7,7 +7,7 @@
 //! approved/public/    copies of approved memory, public use allowed
 //! CLAUDE.md|AGENTS.md a pointer Daycare writes for the chosen client
 //! output/             empty; the only folder that is ever uploaded
-//! ENTRY.json          which entry this folder belongs to, and what it holds
+//! .daycare-record.json  which entry this folder belongs to, and what it holds
 //! meter/              start.json and end.json, the weekly-allowance readings
 //!                     taken around an interactive session (`challenge::meter`)
 //! ```
@@ -17,6 +17,11 @@
 //! write follows a symlink inside the folder, and copies of approved memory
 //! are checked against the approved hash as they are made: a file edited
 //! after approval is refused here as well as by `challenge start`.
+//!
+//! The record is not called `ENTRY.json`: that is the name of the declaration
+//! every brief asks the agent to write in `output/`, and a real session read
+//! the record while writing its own declaration. As a dot-file it is also left
+//! out of the file listings both clients use by default.
 //!
 //! The folder lives under `$HOME` by default, so `$HOME` is an ancestor and
 //! Claude would load `~/CLAUDE.md` and `~/.claude/CLAUDE.md` from it. That is
@@ -34,6 +39,9 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 pub const CHALLENGE_ROOT_ENV: &str = "DAYCARE_CHALLENGE_ROOT";
+
+/// The runner's record of a challenge folder, at the folder's top.
+pub const RECORD_FILE: &str = ".daycare-record.json";
 
 /// The largest single input file a challenge may declare.
 pub const MAX_INPUT_BYTES: u64 = 256 * 1024 * 1024;
@@ -597,7 +605,8 @@ pub fn pointer_text(client: Client, detail: &ChallengeDetail, copies: &[Approved
          - The input files are in `inputs/`. Do not change them.\n\
          - Put everything you want to submit in `output/`. Only `output/` is uploaded, and \
            only after your owner types yes.\n\
-         - Work in this folder.\n\n\
+         - Work in this folder. Leave `.daycare-record.json` and `meter/` alone: they are \
+           Daycare's records.\n\n\
          ## Memory your owner approved\n\n\
          Private items help you do the work. Do not copy them, or anything that gives them \
          away, into `output/`. Public items may also appear in your entry. Your owner did \
@@ -704,7 +713,7 @@ pub fn write_folder(spec: &FolderSpec<'_>) -> Result<Vec<ApprovedCopy>> {
     );
     let mut entry_text = serde_json::to_string_pretty(&entry)?;
     entry_text.push('\n');
-    write_in(spec.folder, "ENTRY.json", entry_text.as_bytes())?;
+    write_in(spec.folder, RECORD_FILE, entry_text.as_bytes())?;
     Ok(copies)
 }
 
@@ -851,7 +860,7 @@ mod tests {
             "approved memory\n"
         );
         let entry: Value =
-            serde_json::from_slice(&fs::read(folder.join("ENTRY.json")).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(folder.join(RECORD_FILE)).unwrap()).unwrap();
         assert_eq!(entry["entry_id"], "e1");
         assert_eq!(entry["approved"][0]["scope"], "private");
         assert_eq!(entry["inputs"][0]["sha256"], sha256_hex(&csv));

@@ -177,7 +177,7 @@ pub struct Delivery<'a> {
     pub uploader: &'a SignedUploader,
     pub token: &'a str,
     pub challenge_id: &'a str,
-    /// The entry this folder was started for, from `ENTRY.json`.
+    /// The entry this folder was started for, from the folder's record.
     pub expected_entry_id: Option<&'a str>,
     pub files: &'a [OutputFile],
     pub declaration: &'a Declaration,

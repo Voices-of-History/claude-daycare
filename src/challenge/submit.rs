@@ -5,7 +5,7 @@
 //! 1. refuse under `--json`, without a terminal, and inside a challenge
 //!    session (the agent must not be the one that submits);
 //! 2. find the challenge folder (`challenge submit <id>`, or run it inside the
-//!    folder) and read `ENTRY.json`;
+//!    folder) and read its record (`folder::RECORD_FILE`);
 //! 3. read the challenge's upload limits from the platform;
 //! 4. walk `output/`: links and anything that is not a regular file abort, as
 //!    do hidden files and names the platform would refuse; the count, size and
@@ -14,14 +14,14 @@
 //! 5. the local secret scan (`scan`): any finding stops here;
 //! 6. print `path bytes sha256` for every file, ask the declaration (how much
 //!    the owner directed the agent, which tools it used), and ask for `yes`;
-//! 7. record the meter readings `challenge start` left in `meter/` in
-//!    `ENTRY.json`, then deliver (`upload`): POST, one PUT per file, confirm.
+//! 7. record the meter readings `challenge start` left in `meter/` in the
+//!    folder's record, then deliver (`upload`): POST, one PUT per file, confirm.
 //!
 //! A resubmission is a new version; only a confirmed one counts.
 
 use crate::approval::scan::Roots;
 use crate::approval::{reconcile, Approval, Prompt};
-use crate::challenge::folder::validate_challenge_id;
+use crate::challenge::folder::{validate_challenge_id, RECORD_FILE};
 use crate::challenge::scan::{self as secret_scan, CredentialFiles, FindingKind, SecretSet};
 use crate::challenge::upload::{self, Delivered, Delivery};
 use crate::config::Config;
@@ -56,7 +56,7 @@ pub const MAX_TOOL_CHARS: usize = 100;
 /// Files an operating system drops into folders. Left out, and said so, as
 /// the web page does.
 const SYSTEM_FILES: [&str; 3] = [".ds_store", "thumbs.db", "desktop.ini"];
-/// `ENTRY.json` and a meter reading are small; anything larger is not ours.
+/// The folder's record and a meter reading are small; anything larger is not ours.
 const MAX_RECORD_BYTES: u64 = 1024 * 1024;
 const MAX_METER_BYTES: u64 = 64 * 1024;
 
@@ -377,7 +377,7 @@ fn read_capped(path: &Path, max: u64) -> Result<Option<Vec<u8>>> {
     Ok((bytes.len() as u64 <= max).then_some(bytes))
 }
 
-/// The challenge folder `challenge start` made, and its `ENTRY.json`.
+/// The challenge folder `challenge start` made, and its record (`RECORD_FILE`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChallengeFolder {
     pub folder: PathBuf,
@@ -386,10 +386,10 @@ pub struct ChallengeFolder {
 }
 
 fn read_entry(folder: &Path) -> Result<Value> {
-    let path = folder.join("ENTRY.json");
+    let path = folder.join(RECORD_FILE);
     let metadata = fs::symlink_metadata(&path).map_err(|_| {
         Error::new(format!(
-            "{} has no ENTRY.json, so it is not a challenge folder. Run `daycare-runner \
+            "{} has no {RECORD_FILE}, so it is not a challenge folder. Run `daycare-runner \
              challenge start <id>` first",
             folder.display()
         ))
@@ -414,7 +414,7 @@ fn real_dir(path: &Path) -> bool {
 
 impl ChallengeFolder {
     /// `challenge submit <id>`: the folder named for the id, or the one whose
-    /// `ENTRY.json` has that id or slug. Without an id: the challenge folder
+    /// record has that id or slug. Without an id: the challenge folder
     /// the current directory is in.
     pub fn locate(challenge: Option<&str>, root: &Path, cwd: &Path) -> Result<ChallengeFolder> {
         let folder = match challenge {
@@ -440,7 +440,7 @@ impl ChallengeFolder {
         let challenge_id = entry
             .get("challenge_id")
             .and_then(Value::as_str)
-            .ok_or_else(|| Error::new("ENTRY.json has no challenge_id"))?
+            .ok_or_else(|| Error::new(format!("{RECORD_FILE} has no challenge_id")))?
             .to_string();
         validate_challenge_id(&challenge_id)?;
         Ok(ChallengeFolder {
@@ -543,9 +543,9 @@ impl ChallengeFolder {
         (!readings.is_empty()).then_some(Value::Object(readings))
     }
 
-    /// Rewrite `ENTRY.json` with `edit` applied, never through a link.
+    /// Rewrite the record with `edit` applied, never through a link.
     pub fn update_entry(&mut self, edit: impl FnOnce(&mut Value)) -> Result<()> {
-        let path = self.folder.join("ENTRY.json");
+        let path = self.folder.join(RECORD_FILE);
         if fs::symlink_metadata(&path).is_ok_and(|metadata| !metadata.is_file()) {
             return Err(Error::new(format!(
                 "{} is not a regular file; refusing to write it",
@@ -831,13 +831,13 @@ pub fn run(
         ));
     }
 
-    // The readings go into ENTRY.json before anything leaves the machine, so
+    // The readings go into the record before anything leaves the machine, so
     // they are on record whatever the network does.
     if let Some(meter) = readings {
         folder.update_entry(|entry| entry["meter"] = meter)?;
         writeln!(
             screen,
-            "Recorded the meter readings from meter/ in ENTRY.json."
+            "Recorded the meter readings from meter/ in {RECORD_FILE}."
         )?;
     }
 
@@ -1136,7 +1136,7 @@ mod tests {
         let folder = root.join("c-1");
         fs::create_dir_all(folder.join("output/sub")).unwrap();
         fs::write(
-            folder.join("ENTRY.json"),
+            folder.join(RECORD_FILE),
             r#"{"challenge_id":"c-1","challenge_slug":"signup-rescue","entry_id":"entry-1","actor_id":"actor-1"}"#,
         )
         .unwrap();
@@ -1158,7 +1158,7 @@ mod tests {
         let root = unique_dir("submit-meter");
         let folder = root.join("c-1");
         fs::create_dir_all(folder.join("meter")).unwrap();
-        fs::write(folder.join("ENTRY.json"), r#"{"challenge_id":"c-1"}"#).unwrap();
+        fs::write(folder.join(RECORD_FILE), r#"{"challenge_id":"c-1"}"#).unwrap();
         let mut located = ChallengeFolder::locate(Some("c-1"), &root, Path::new("/")).unwrap();
         assert_eq!(located.meter_readings(), None);
         fs::write(folder.join("meter/start.json"), r#"{"used_percentage":12}"#).unwrap();
@@ -1170,7 +1170,7 @@ mod tests {
             .update_entry(|entry| entry["meter"] = meter)
             .unwrap();
         let written: Value =
-            serde_json::from_slice(&fs::read(folder.join("ENTRY.json")).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(folder.join(RECORD_FILE)).unwrap()).unwrap();
         assert_eq!(written["meter"]["start"]["used_percentage"], 12);
         assert_eq!(written["challenge_id"], "c-1");
     }

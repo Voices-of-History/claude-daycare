@@ -262,7 +262,7 @@ impl Machine {
     fn make_folder(&self) {
         std::fs::create_dir_all(self.folder().join("output")).unwrap();
         std::fs::write(
-            self.folder().join("ENTRY.json"),
+            self.folder().join(".daycare-record.json"),
             serde_json::json!({
                 "version": 1, "challenge_id": "c-1", "challenge_slug": "signup-rescue",
                 "title": "Signup Rescue", "entry_id": ENTRY_ID, "actor_id": "actor-1",
@@ -355,7 +355,8 @@ impl Machine {
     }
 
     fn entry_json(&self) -> serde_json::Value {
-        serde_json::from_slice(&std::fs::read(self.folder().join("ENTRY.json")).unwrap()).unwrap()
+        serde_json::from_slice(&std::fs::read(self.folder().join(".daycare-record.json")).unwrap())
+            .unwrap()
     }
 }
 

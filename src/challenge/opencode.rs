@@ -17,7 +17,7 @@
 //!
 //! - The memory scan (`approval::scan`) has no OpenCode inventory, and its
 //!   `Client` has no OpenCode variant, so no OpenCode memory can be approved
-//!   or recorded in ENTRY.json yet. That module is outside this stream.
+//!   or recorded in the folder's record yet. That module is outside this stream.
 //! - The generated `OPENCODE_CONFIG` (approved MCP only, the others switched
 //!   off with `enabled: false`) needs a check on a real OpenCode first: that a
 //!   partial server entry validates and merges over the global one, and that

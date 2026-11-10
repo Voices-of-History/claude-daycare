@@ -621,11 +621,19 @@ fn start_print_sets_up_the_folder_and_prints_the_exclusions_and_no_token() {
         .join("approved/private/skills/keep/SKILL.md")
         .is_file());
     let entry: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(folder.join("ENTRY.json")).unwrap()).unwrap();
+        serde_json::from_slice(&std::fs::read(folder.join(".daycare-record.json")).unwrap())
+            .unwrap();
     assert_eq!(entry["entry_id"], "entry-1");
     assert_eq!(entry["challenge_id"], "c-1");
     assert_eq!(entry["inputs"][0]["sha256"], sha256(CSV.as_bytes()));
-    for file in ["ENTRY.json", "CLAUDE.md", "BRIEF.md"] {
+    // The record is not named like the declaration the brief asks for in
+    // output/, and the agent is told to leave it alone.
+    assert!(!folder.join("ENTRY.json").exists());
+    assert!(
+        pointer.contains("Leave `.daycare-record.json` and `meter/` alone"),
+        "{pointer}"
+    );
+    for file in [".daycare-record.json", "CLAUDE.md", "BRIEF.md"] {
         let contents = std::fs::read_to_string(folder.join(file)).unwrap();
         assert!(!contents.contains(TOKEN), "{file} holds the token");
         assert!(
