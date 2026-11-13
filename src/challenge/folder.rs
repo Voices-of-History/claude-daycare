@@ -349,7 +349,9 @@ pub fn copy_approved(
         .enumerate()
     {
         let copy = match item.kind {
-            Kind::Plugin | Kind::McpServer => None,
+            // Used by reference (an OpenCode agent by name, code where it
+            // lives), never copied: an inline stanza's file holds other settings.
+            Kind::Plugin | Kind::McpServer | Kind::Agent | Kind::Tool => None,
             Kind::Skill => {
                 let name = sanitize_segment(item.name.as_deref().unwrap_or("skill"));
                 let relative = format!("approved/{}/skills/{name}", scope.as_str());
@@ -595,8 +597,10 @@ pub fn brief_text(detail: &ChallengeDetail) -> String {
 }
 
 /// The pointer file Daycare writes: `CLAUDE.md` for Claude Code (approved
-/// instruction files are imported with `@`), `AGENTS.md` for Codex (they are
-/// listed, since AGENTS.md has no imports).
+/// instruction files are imported with `@`), `AGENTS.md` for Codex and
+/// OpenCode (they are listed, since AGENTS.md has no imports). OpenCode reads
+/// it through Daycare's generated config (`instructions`), because a challenge
+/// turns off its own project lookup.
 pub fn pointer_text(client: Client, detail: &ChallengeDetail, copies: &[ApprovedCopy]) -> String {
     let mut text = format!(
         "# Daycare challenge: {}\n\n\
@@ -627,8 +631,15 @@ pub fn pointer_text(client: Client, detail: &ChallengeDetail, copies: &[Approved
             let name = copy.item.name.as_deref().unwrap_or("");
             let line = match (copy.item.kind, &copy.copy, client) {
                 (Kind::McpServer, _, _) => format!("- MCP server `{name}`\n"),
+                (Kind::Plugin, _, _) if name.is_empty() => {
+                    format!("- Plugin `{}`\n", copy.item.path.display())
+                }
                 (Kind::Plugin, _, _) => format!("- Plugin `{name}`\n"),
-                (Kind::Skill, Some(path), Client::Claude) => {
+                (Kind::Agent, _, _) => format!("- OpenCode agent `{name}`\n"),
+                (Kind::Tool, _, _) => {
+                    format!("- Custom tool `{}`\n", copy.item.path.display())
+                }
+                (Kind::Skill, Some(path), Client::Claude | Client::Opencode) => {
                     format!(
                         "- Skill `{name}` (available as a skill; copy in `{}`)\n",
                         path.display()
@@ -642,7 +653,7 @@ pub fn pointer_text(client: Client, detail: &ChallengeDetail, copies: &[Approved
                     format!("- Command `/{name}` (copy in `{}`)\n", path.display())
                 }
                 (_, Some(path), Client::Claude) => format!("@{}\n", path.display()),
-                (_, Some(path), Client::Codex) => {
+                (_, Some(path), Client::Codex | Client::Opencode) => {
                     format!("- Read `{}` before you start\n", path.display())
                 }
                 (_, None, _) => continue,
@@ -677,7 +688,7 @@ pub fn write_folder(spec: &FolderSpec<'_>) -> Result<Vec<ApprovedCopy>> {
     let copies = copy_approved(spec.folder, spec.approved, spec.client)?;
     let pointer = match spec.client {
         Client::Claude => "CLAUDE.md",
-        Client::Codex => "AGENTS.md",
+        Client::Codex | Client::Opencode => "AGENTS.md",
     };
     write_in(
         spec.folder,

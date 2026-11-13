@@ -1,10 +1,26 @@
-//! The deterministic inventory behind `memory setup --scan` (plan task N4).
+//! The deterministic inventory behind `memory setup --scan` (plan tasks N4
+//! and N18).
 //!
-//! It lists every piece of the owner's own memory that Claude Code or Codex
-//! would load into a session started in a challenge folder: instruction files
-//! (CLAUDE.md layers, rules, AGENTS.md layers), auto memory, user skills and
-//! commands, plugins, and MCP servers. Each item is a path plus a sha256, so an
-//! approval can be bound to exactly the bytes the owner reviewed.
+//! It lists every piece of the owner's own memory that Claude Code, Codex or
+//! OpenCode would load into a session started in a challenge folder:
+//! instruction files (CLAUDE.md layers, rules, AGENTS.md layers), auto memory,
+//! user skills and commands, agents, plugins and custom tools, and MCP
+//! servers. Each item is a path plus a sha256, so an approval can be bound to
+//! exactly the bytes the owner reviewed.
+//!
+//! OpenCode (checked against the 1.18.33 source) is scanned where a challenge
+//! session still reads it: a challenge sets `OPENCODE_DISABLE_PROJECT_CONFIG`,
+//! `OPENCODE_DISABLE_CLAUDE_CODE` and `OPENCODE_DISABLE_EXTERNAL_SKILLS`, so
+//! project files and `~/.claude` and `~/.agents` are not read, but its global
+//! config folder (`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`) and
+//! `~/.opencode` always are. From those: the global `AGENTS.md`; skills
+//! (`{skill,skills}/**/SKILL.md`); agents (`{agent,agents}/**/*.md`,
+//! `{mode,modes}/*.md`, and `agent` and `mode` entries in the config files);
+//! plugins (`{plugin,plugins}/*.{ts,js}` and `plugin` entries); custom tools
+//! (`{tool,tools}/*.{ts,js}`), which are code OpenCode imports; and `mcp`
+//! entries. Config files are JSON with comments (`config.json`,
+//! `opencode.json`, `opencode.jsonc`). OpenCode's custom commands are not
+//! listed: they reach a session only when the owner types one.
 //!
 //! What it never does:
 //! - read out file contents (only hashes and sizes leave this module);
@@ -23,13 +39,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The two clients a challenge can run in today. OpenCode is not supported
-/// for challenges yet, so it has no inventory.
+/// The clients a challenge can run in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Client {
     Claude,
     Codex,
+    Opencode,
 }
 
 impl Client {
@@ -37,6 +53,7 @@ impl Client {
         match self {
             Client::Claude => "claude",
             Client::Codex => "codex",
+            Client::Opencode => "opencode",
         }
     }
 }
@@ -63,10 +80,16 @@ pub enum Kind {
     Plugin,
     /// One MCP server stanza. Hashed, never shown.
     McpServer,
-    /// The user-level AGENTS.md or AGENTS.override.md in the Codex home.
+    /// The user-level AGENTS.md or AGENTS.override.md in the Codex home, or
+    /// OpenCode's global AGENTS.md.
     AgentsMd,
     /// An AGENTS.md or AGENTS.override.md in a directory above the folder.
     ProjectAgentsMd,
+    /// An OpenCode agent: a markdown file, or an `agent` or `mode` entry in a
+    /// config file (hashed as its stanza, never shown).
+    Agent,
+    /// An OpenCode custom tool: a script OpenCode imports and runs.
+    Tool,
 }
 
 impl Kind {
@@ -83,6 +106,8 @@ impl Kind {
             Kind::McpServer => "mcp_server",
             Kind::AgentsMd => "agents_md",
             Kind::ProjectAgentsMd => "project_agents_md",
+            Kind::Agent => "agent",
+            Kind::Tool => "tool",
         }
     }
 
@@ -164,6 +189,11 @@ pub struct Roots {
     pub codex_home: PathBuf,
     /// The shared `~/.agents` folder Codex reads skills from.
     pub agents_home: PathBuf,
+    /// OpenCode's global config folder: `$XDG_CONFIG_HOME/opencode`, or
+    /// `~/.config/opencode`.
+    pub opencode_config_dir: PathBuf,
+    /// `~/.opencode`, which OpenCode reads as a config folder too.
+    pub opencode_dot_dir: PathBuf,
     /// The folder challenge folders are made in. Its ancestors are where
     /// project-level CLAUDE.md and AGENTS.md layers come from.
     pub challenge_root: PathBuf,
@@ -184,8 +214,13 @@ impl Roots {
             None => (home.join(".claude"), home.join(".claude.json")),
         };
         let codex_home = absolute_env("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
+        let opencode_config_dir = absolute_env("XDG_CONFIG_HOME")
+            .unwrap_or_else(|| home.join(".config"))
+            .join("opencode");
         Ok(Roots {
             agents_home: home.join(".agents"),
+            opencode_config_dir,
+            opencode_dot_dir: home.join(".opencode"),
             home,
             claude_config_dir,
             claude_json,
@@ -220,7 +255,7 @@ impl Inventory {
     }
 }
 
-/// Scan both clients.
+/// Scan every client.
 pub fn scan(roots: &Roots) -> Inventory {
     let mut scanner = Scanner {
         roots,
@@ -230,6 +265,7 @@ pub fn scan(roots: &Roots) -> Inventory {
     };
     scanner.claude();
     scanner.codex();
+    scanner.opencode();
     let mut warnings = scanner.warnings;
     warnings.sort();
     warnings.dedup();
@@ -255,8 +291,9 @@ impl Scanner<'_> {
         // is also an ancestor's `.claude/CLAUDE.md`, and a folder reached
         // through a symlink (macOS `/var` is `/private/var`) is walked twice.
         // The first spelling wins; user-level layers are scanned first.
-        // MCP servers and plugins share a file and are keyed by name instead.
-        if !matches!(item.kind, Kind::McpServer | Kind::Plugin) {
+        // MCP servers, plugins and OpenCode agents can share a file and are
+        // keyed by name instead.
+        if !matches!(item.kind, Kind::McpServer | Kind::Plugin | Kind::Agent) {
             let physical = fs::canonicalize(&item.path).unwrap_or_else(|_| item.path.clone());
             if !self.seen_files.insert((item.client, physical)) {
                 return;
@@ -535,6 +572,333 @@ impl Scanner<'_> {
                 .push(format!("could not read {}: {error}", config.display())),
         }
     }
+
+    fn opencode(&mut self) {
+        let config = self.roots.opencode_config_dir.clone();
+        // The global instructions. A challenge leaves out `~/.claude/CLAUDE.md`
+        // and every project AGENTS.md, but not this one.
+        self.file(Client::Opencode, Kind::AgentsMd, config.join("AGENTS.md"));
+        for file in opencode_config_files(self.roots) {
+            self.opencode_config_file(&file);
+        }
+        for dir in opencode_config_dirs(self.roots) {
+            for sub in ["skill", "skills"] {
+                for path in walk_files_following(&dir.join(sub), &mut self.warnings) {
+                    if path.file_name().is_some_and(|name| name == "SKILL.md") {
+                        if let Some(parent) = path.parent() {
+                            self.skill(Client::Opencode, parent);
+                        }
+                    }
+                }
+            }
+            for sub in ["agent", "agents"] {
+                let root = dir.join(sub);
+                for path in walk_files_following(&root, &mut self.warnings) {
+                    if path.extension().is_some_and(|ext| ext == "md") {
+                        let name = opencode_entry_name(&root, &path);
+                        self.named_file(Client::Opencode, Kind::Agent, path, name);
+                    }
+                }
+            }
+            for sub in ["mode", "modes"] {
+                let root = dir.join(sub);
+                for path in direct_files(&root, &["md"], &mut self.warnings) {
+                    let name = opencode_entry_name(&root, &path);
+                    self.named_file(Client::Opencode, Kind::Agent, path, name);
+                }
+            }
+            for (subs, kind) in [
+                (["plugin", "plugins"], Kind::Plugin),
+                (["tool", "tools"], Kind::Tool),
+            ] {
+                for sub in subs {
+                    for path in direct_files(&dir.join(sub), &["ts", "js"], &mut self.warnings) {
+                        self.file(Client::Opencode, kind, path);
+                    }
+                }
+            }
+        }
+    }
+
+    /// A file item that carries a name (an OpenCode agent's).
+    fn named_file(&mut self, client: Client, kind: Kind, path: PathBuf, name: String) {
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let item = Item::new(
+                    client,
+                    kind,
+                    path,
+                    Some(name),
+                    bytes.len() as u64,
+                    sha256_hex(&bytes),
+                );
+                self.push(item);
+            }
+            Err(error) => self
+                .warnings
+                .push(format!("could not read {}: {error}", path.display())),
+        }
+    }
+
+    /// The `mcp`, `agent`, `mode` and `plugin` entries of one OpenCode config
+    /// file. Each entry is hashed as its canonical JSON and never shown.
+    fn opencode_config_file(&mut self, path: &Path) {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) => {
+                self.warnings
+                    .push(format!("could not read {}: {error}", path.display()));
+                return;
+            }
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        let Some(value) = parse_jsonc(&text) else {
+            // Never include the parse error: it can quote the file.
+            self.warnings
+                .push(format!("{} is not valid JSON; skipped", path.display()));
+            return;
+        };
+        for (key, kind) in [
+            ("mcp", Kind::McpServer),
+            ("agent", Kind::Agent),
+            ("mode", Kind::Agent),
+        ] {
+            let Some(entries) = value.get(key).and_then(serde_json::Value::as_object) else {
+                continue;
+            };
+            for (name, stanza) in entries {
+                let canonical = stanza.to_string();
+                self.push(Item::new(
+                    Client::Opencode,
+                    kind,
+                    path.to_path_buf(),
+                    Some(name.clone()),
+                    canonical.len() as u64,
+                    sha256_hex(canonical.as_bytes()),
+                ));
+            }
+        }
+        for entry in value
+            .get("plugin")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let spec = match entry {
+                serde_json::Value::String(spec) => spec.clone(),
+                serde_json::Value::Array(pair) => match pair.first() {
+                    Some(serde_json::Value::String(spec)) => spec.clone(),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let canonical = entry.to_string();
+            self.push(Item::new(
+                Client::Opencode,
+                Kind::Plugin,
+                path.to_path_buf(),
+                Some(spec),
+                canonical.len() as u64,
+                sha256_hex(canonical.as_bytes()),
+            ));
+        }
+    }
+}
+
+/// OpenCode's global config files, in the order it merges them: the global
+/// folder's `config.json`, `opencode.json`, `opencode.jsonc`, then
+/// `~/.opencode`'s `opencode.json` and `opencode.jsonc`, which OpenCode reads
+/// after a custom `OPENCODE_CONFIG` and so can override it.
+pub fn opencode_config_files(roots: &Roots) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = ["config.json", "opencode.json", "opencode.jsonc"]
+        .iter()
+        .map(|name| roots.opencode_config_dir.join(name))
+        .collect();
+    if roots.opencode_dot_dir != roots.opencode_config_dir {
+        files.extend(
+            ["opencode.json", "opencode.jsonc"]
+                .iter()
+                .map(|name| roots.opencode_dot_dir.join(name)),
+        );
+    }
+    files
+}
+
+/// The config folders OpenCode reads agents, skills, plugins and tools from
+/// in a challenge session.
+pub fn opencode_config_dirs(roots: &Roots) -> Vec<PathBuf> {
+    let mut dirs = vec![roots.opencode_config_dir.clone()];
+    if roots.opencode_dot_dir != roots.opencode_config_dir {
+        dirs.push(roots.opencode_dot_dir.clone());
+    }
+    dirs
+}
+
+/// An OpenCode agent's name: its path below `agent/` without `.md`, folders
+/// joined by `/`, as OpenCode names it.
+fn opencode_entry_name(root: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(root).unwrap_or(path).with_extension("");
+    relative
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Regular files directly in `dir` with one of `extensions`, sorted.
+/// Symlinked files are followed, as OpenCode's own scan follows them.
+fn direct_files(dir: &Path, extensions: &[&str], warnings: &mut Vec<String>) -> Vec<PathBuf> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Vec::new()
+        }
+        Err(error) => {
+            warnings.push(format!("could not list {}: {error}", dir.display()));
+            return Vec::new();
+        }
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| extensions.contains(&ext))
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// Regular files under `dir`, recursively, sorted, following symlinked files
+/// and folders as OpenCode's own scan does. A folder already visited (by its
+/// physical path) is not entered again, so a link loop ends.
+fn walk_files_following(dir: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
+    const MAX_DEPTH: usize = 16;
+    let mut out = Vec::new();
+    let mut visited = std::collections::BTreeSet::new();
+    let mut stack = vec![(dir.to_path_buf(), 0usize)];
+    while let Some((current, depth)) = stack.pop() {
+        let physical = fs::canonicalize(&current).unwrap_or_else(|_| current.clone());
+        if depth > MAX_DEPTH || !visited.insert(physical) {
+            continue;
+        }
+        let entries = match fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue
+            }
+            Err(error) => {
+                warnings.push(format!("could not list {}: {error}", current.display()));
+                continue;
+            }
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push((path, depth + 1));
+            } else if path.is_file() {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// JSON with comments and trailing commas, as OpenCode reads its config
+/// files. `None` when it does not parse; the error is never kept, since it
+/// can quote the file.
+pub fn parse_jsonc(text: &str) -> Option<serde_json::Value> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            match c {
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        out.push(next);
+                    }
+                }
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('"', _) => {
+                in_string = true;
+                out.push(c);
+            }
+            ('/', Some('/')) => {
+                for skipped in chars.by_ref() {
+                    if skipped == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut last = ' ';
+                for skipped in chars.by_ref() {
+                    if last == '*' && skipped == '/' {
+                        break;
+                    }
+                    last = skipped;
+                }
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    // Trailing commas: a comma followed only by whitespace before `}` or `]`.
+    let bytes: Vec<char> = out.chars().collect();
+    let mut cleaned = String::with_capacity(out.len());
+    let mut in_string = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let c = bytes[index];
+        if in_string {
+            cleaned.push(c);
+            if c == '\\' && index + 1 < bytes.len() {
+                cleaned.push(bytes[index + 1]);
+                index += 2;
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+        } else if c == '"' {
+            in_string = true;
+            cleaned.push(c);
+        } else if c == ',' {
+            let next = bytes[index + 1..].iter().find(|c| !c.is_whitespace());
+            if !matches!(next, Some('}') | Some(']')) {
+                cleaned.push(c);
+            }
+        } else {
+            cleaned.push(c);
+        }
+        index += 1;
+    }
+    serde_json::from_str(&cleaned).ok()
 }
 
 /// The folder itself and every directory above it, lexically and, where it
@@ -803,6 +1167,8 @@ mod tests {
             claude_json: home.join(".claude.json"),
             codex_home: home.join(".codex"),
             agents_home: home.join(".agents"),
+            opencode_config_dir: home.join(".config/opencode"),
+            opencode_dot_dir: home.join(".opencode"),
             challenge_root: home.join("daycare/challenges"),
             daycare_root: home.join(".claude-daycare"),
             home,
@@ -1040,6 +1406,141 @@ x = 1
             .unwrap()
             .1;
         assert!(quoted.contains("[mcp_servers.fake]"), "{quoted}");
+    }
+
+    /// One of everything OpenCode reads in a challenge, with secrets in its
+    /// MCP and plugin settings.
+    fn populated_opencode() -> (PathBuf, Roots) {
+        let base = unique_dir("daycare-scan-opencode");
+        let roots = roots(&base);
+        let config = roots.opencode_config_dir.clone();
+        let dot = roots.opencode_dot_dir.clone();
+        write(&config.join("AGENTS.md"), "# OPENCODE-GLOBAL-RULES\n");
+        write(
+            &config.join("opencode.jsonc"),
+            r#"{
+  // My setup. The URL below is not a comment: "https://x//y".
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "search": { "type": "local", "command": ["s"], "environment": { "KEY": "oc-planted-secret-888" } },
+  },
+  "agent": { "reviewer": { "prompt": "OPENCODE-AGENT-PROMPT", "mode": "subagent" } },
+  "plugin": ["opencode-wakatime", ["opencode-notify", { "token": "oc-plugin-secret-999" }]],
+  /* trailing commas are fine */
+}
+"#,
+        );
+        write(
+            &config.join("skills/notes/SKILL.md"),
+            "---\nname: notes\ndescription: Notes.\n---\nOPENCODE-SKILL-BODY\n",
+        );
+        write(
+            &config.join("skills/group/deep/SKILL.md"),
+            "---\nname: deep\n---\n",
+        );
+        write(
+            &config.join("agents/team/review.md"),
+            "---\ndescription: x\n---\nREVIEW-PROMPT\n",
+        );
+        write(&config.join("modes/focus.md"), "FOCUS\n");
+        write(&config.join("plugin/notify.ts"), "export default {}\n");
+        write(&config.join("plugin/readme.txt"), "not a plugin\n");
+        write(&config.join("tools/search.ts"), "export default {}\n");
+        write(
+            &dot.join("opencode.json"),
+            r#"{"mcp":{"docs":{"type":"remote","url":"https://example.test/mcp"}}}"#,
+        );
+        (base, roots)
+    }
+
+    #[test]
+    fn the_opencode_scan_lists_what_a_challenge_session_would_load() {
+        let (base, roots) = populated_opencode();
+        let inventory = scan(&roots);
+        let json = serde_json::to_string(&inventory).unwrap();
+        for secret in [
+            "oc-planted-secret-888",
+            "oc-plugin-secret-999",
+            "OPENCODE-GLOBAL-RULES",
+            "OPENCODE-AGENT-PROMPT",
+            "OPENCODE-SKILL-BODY",
+            "REVIEW-PROMPT",
+            "example.test/mcp",
+        ] {
+            assert!(!json.contains(secret), "scan leaked {secret:?}: {json}");
+        }
+        let listed: Vec<(Kind, Option<&str>)> = inventory
+            .for_client(Client::Opencode)
+            .map(|item| (item.kind, item.name.as_deref()))
+            .collect();
+        for expected in [
+            (Kind::AgentsMd, None),
+            (Kind::McpServer, Some("search")),
+            (Kind::McpServer, Some("docs")),
+            (Kind::Agent, Some("reviewer")),
+            (Kind::Agent, Some("team/review")),
+            (Kind::Agent, Some("focus")),
+            (Kind::Skill, Some("notes")),
+            (Kind::Skill, Some("deep")),
+            (Kind::Plugin, Some("opencode-wakatime")),
+            (Kind::Plugin, Some("opencode-notify")),
+            (Kind::Plugin, None),
+            (Kind::Tool, None),
+        ] {
+            assert!(
+                listed.contains(&expected),
+                "missing {expected:?} in {listed:?}"
+            );
+        }
+        assert_eq!(listed.len(), 12, "{listed:?}");
+        let plugin_file = inventory
+            .for_client(Client::Opencode)
+            .find(|item| item.kind == Kind::Plugin && item.name.is_none())
+            .unwrap();
+        assert_eq!(
+            plugin_file.path,
+            roots.opencode_config_dir.join("plugin/notify.ts")
+        );
+        // Nothing of OpenCode's is listed for the other clients.
+        assert!(inventory
+            .items
+            .iter()
+            .all(|item| item.client == Client::Opencode));
+        assert!(inventory.warnings.is_empty(), "{:?}", inventory.warnings);
+        // A changed stanza changes its hash, not its listing.
+        let before = scan(&roots);
+        write(
+            &roots.opencode_dot_dir.join("opencode.json"),
+            r#"{"mcp":{"docs":{"type":"remote","url":"https://example.test/other"}}}"#,
+        );
+        let after = scan(&roots);
+        let docs = |inventory: &Inventory| {
+            inventory
+                .items
+                .iter()
+                .find(|item| item.name.as_deref() == Some("docs"))
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(docs(&before).id, docs(&after).id);
+        assert_ne!(docs(&before).sha256, docs(&after).sha256);
+        assert_eq!(
+            serde_json::to_string(&scan(&roots)).unwrap(),
+            serde_json::to_string(&after).unwrap()
+        );
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn jsonc_comments_and_trailing_commas_parse_and_strings_are_kept() {
+        let value = parse_jsonc(
+            "{\n // c\n \"a\": \"x//y /* z */\", /* b */ \"b\": [1, 2,],\n \"c\": \"q\\\"//\",\n}",
+        )
+        .unwrap();
+        assert_eq!(value["a"], "x//y /* z */");
+        assert_eq!(value["b"], serde_json::json!([1, 2]));
+        assert_eq!(value["c"], "q\"//");
+        assert!(parse_jsonc("{\"a\": }").is_none());
     }
 
     #[test]

@@ -335,6 +335,8 @@ impl Machine {
             claude_json: self.fake_home.join(".claude.json"),
             codex_home: self.fake_home.join(".codex"),
             agents_home: self.fake_home.join(".agents"),
+            opencode_config_dir: self.fake_home.join(".config/opencode"),
+            opencode_dot_dir: self.fake_home.join(".opencode"),
             challenge_root: self.challenge_root(),
             daycare_root: self.daycare_home.clone(),
         };

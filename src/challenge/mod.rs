@@ -4,7 +4,8 @@
 //! owner's own client and tools, in a folder Daycare sets up. The platform
 //! never starts that session: the owner runs `challenge start` in their own
 //! terminal, and it starts their client there (`launch`), or with `--print`
-//! prints the exact command and environment for them to run themselves.
+//! prints the exact command and environment for them to run themselves. The
+//! client is Claude Code, Codex CLI or OpenCode (`client`).
 //!
 //! `start` does its checks in an order that leaves nothing behind on failure:
 //! the session marker, the client's policy guard, the memory approval (a
@@ -124,6 +125,9 @@ pub struct StartRequest<'a> {
     pub client: Client,
     pub claude_bin: &'a str,
     pub codex_bin: &'a str,
+    pub opencode_bin: &'a str,
+    /// OpenCode only, and required for it: `provider/model`.
+    pub model: Option<&'a str>,
     pub started_at: &'a str,
     /// Print the command instead of starting the client.
     pub print: bool,
@@ -219,12 +223,30 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
         client,
         claude_bin,
         codex_bin,
+        opencode_bin,
+        model,
         started_at,
         print,
         separate_codex_home,
         now,
     } = request;
     folder::validate_challenge_id(challenge_id)?;
+    match (client, model) {
+        (Client::Opencode, None) => {
+            return Err(Error::new(
+                "OpenCode challenges need --model provider/model, on your own provider API key                  (for example --model openai/gpt-5.5)",
+            ))
+        }
+        (Client::Opencode, Some(model)) => {
+            opencode::check_model(model)?;
+        }
+        (_, Some(_)) => {
+            return Err(Error::new(
+                "--model is for --agent opencode; Claude Code and Codex use your own default                  model",
+            ))
+        }
+        (_, None) => {}
+    }
     if separate_codex_home && client != Client::Codex {
         return Err(Error::new(
             "--separate-codex-home is for Codex; pass --agent codex with it",
@@ -251,6 +273,7 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
                 .as_deref()
                 .unwrap_or(&roots.codex_home),
         )?,
+        Client::Opencode => opencode::guard_no_managed_config()?,
     }
 
     // Memory first: a changed approval stops here, before any request.
@@ -259,7 +282,13 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
     let reconciled = reconcile(approval.as_ref(), &inventory);
     reconciled.require_reviewed()?;
     let inherited = inherited_daycare_env();
-    let session_client = client::for_client(client, claude_bin, codex_bin, &roots);
+    let programs = client::Programs {
+        claude: claude_bin.to_string(),
+        codex: codex_bin.to_string(),
+        opencode: opencode_bin.to_string(),
+        opencode_model: model.map(str::to_string),
+    };
+    let session_client = client::for_client(client, &programs, &roots);
     let program = session_client.program().to_string();
 
     // A client's refusals (memory it cannot leave out, approved bytes that
@@ -423,7 +452,11 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
                 plan.excluded.len()
             );
             if let Some(path) = &plan.settings_file {
-                println!("Claude Code settings for this session: {}", path.display());
+                println!(
+                    "{} settings for this session: {}",
+                    session_client.product_name(),
+                    path.display()
+                );
             }
             println!();
             println!("Run this yourself, in your own terminal:");
@@ -454,6 +487,15 @@ fn notes(client: Client) -> Vec<&'static str> {
         Client::Codex => notes.extend([
             "Codex's workspace-write sandbox limits writes to this folder, not reads.",
             "Needs Codex CLI 0.158.0 or newer.",
+        ]),
+        Client::Opencode => notes.extend([
+            "OpenCode has no sandbox: its shell commands run as you, under your own OpenCode \
+             permissions.",
+            "OpenCode runs on your own provider API key. Daycare never reads, stores or sends \
+             the key.",
+            "Daycare has not checked what OpenCode resolves. Run `challenge start` without \
+             --print to have it checked before OpenCode starts.",
+            "Needs OpenCode 1.18.33 or newer.",
         ]),
     }
     notes

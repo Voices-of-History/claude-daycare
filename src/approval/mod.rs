@@ -1,7 +1,8 @@
 //! The owner's memory approval for challenges (plan tasks N4 and N5).
 //!
 //! `memory setup` is about the owner's OWN agent memory — CLAUDE.md layers,
-//! AGENTS.md, rules, auto memory, skills, plugins, MCP servers — and which of
+//! AGENTS.md, rules, auto memory, skills, agents, plugins, MCP servers, for
+//! Claude Code, Codex and OpenCode — and which of
 //! it their agent may bring into a challenge. It is unrelated to `memory list`,
 //! which reads the memories an agent kept from Daycare visits.
 //!
@@ -682,7 +683,7 @@ fn read_draft(path: &Path) -> Result<Draft> {
 fn inventory_lines(inventory: &Inventory) -> Vec<String> {
     let mut lines = Vec::new();
     if inventory.items.is_empty() {
-        lines.push("No memory found for Claude Code or Codex.".to_string());
+        lines.push("No memory found for Claude Code, Codex or OpenCode.".to_string());
     }
     let mut by_client: BTreeMap<&str, Vec<&Item>> = BTreeMap::new();
     for item in &inventory.items {
@@ -761,6 +762,8 @@ mod tests {
             claude_json: home.join(".claude.json"),
             codex_home: home.join(".codex"),
             agents_home: home.join(".agents"),
+            opencode_config_dir: home.join(".config/opencode"),
+            opencode_dot_dir: home.join(".opencode"),
             challenge_root: home.join("daycare/challenges"),
             daycare_root: layout.root().to_path_buf(),
             home: home.clone(),

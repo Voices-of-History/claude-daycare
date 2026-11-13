@@ -707,25 +707,51 @@ fn a_wrong_input_sha256_aborts_before_enrolling_or_writing() {
 }
 
 /// Without `--print`, `start` now launches the client interactively; that
-/// path is covered in `tests/challenge_launch.rs`. OpenCode is still refused.
+/// path is covered in `tests/challenge_launch.rs`, and OpenCode's in
+/// `tests/challenge_opencode.rs`. OpenCode needs `--model`, and only OpenCode
+/// takes it; both are refused before any request.
 #[test]
-fn start_with_opencode_is_refused_before_any_request() {
+fn start_with_opencode_needs_a_model_and_is_refused_without_one_before_any_request() {
     let machine = Machine::new("ch-noprint");
     let platform = platform_with(None);
     machine.enroll(&platform);
-    let out = machine.run(&["challenge", "start", "c-1", "--agent", "opencode", "--json"]);
-    assert!(!out.status.success());
-    assert!(stdout(&out).contains("--agent claude"), "{}", stdout(&out));
+    for args in [
+        vec!["challenge", "start", "c-1", "--agent", "opencode", "--json"],
+        vec![
+            "challenge",
+            "start",
+            "c-1",
+            "--print",
+            "--agent",
+            "opencode",
+            "--json",
+        ],
+    ] {
+        let out = machine.run(&args);
+        assert!(!out.status.success());
+        assert!(
+            stdout(&out).contains("--model provider/model"),
+            "{}",
+            stdout(&out)
+        );
+    }
     let out = machine.run(&[
         "challenge",
         "start",
         "c-1",
         "--print",
         "--agent",
-        "opencode",
+        "claude",
+        "--model",
+        "openai/gpt-5.5",
         "--json",
     ]);
     assert!(!out.status.success());
+    assert!(
+        stdout(&out).contains("--model is for --agent opencode"),
+        "{}",
+        stdout(&out)
+    );
     assert!(challenge_requests(&platform).is_empty());
 }
 

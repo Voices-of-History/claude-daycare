@@ -321,33 +321,47 @@ enum ChallengeAction {
     /// Enrolls you, creates ~/daycare/challenges/<id>/ (or under
     /// DAYCARE_CHALLENGE_ROOT) with BRIEF.md, inputs/ checked against their
     /// sha256, copies of the memory you approved, and an empty output/. Then
-    /// it starts Claude Code or Codex in that folder, in this terminal, and
-    /// waits for it to exit. With --print it starts nothing and prints the
-    /// exact command and environment for you to run yourself.
+    /// it starts Claude Code, Codex or OpenCode in that folder, in this
+    /// terminal, and waits for it to exit. With --print it starts nothing and
+    /// prints the exact command and environment for you to run yourself.
     ///
     /// What the boundary covers: memory you did not approve is left out with
     /// the client's own settings, and memory that changed since you approved
     /// it stops the start. Codex's prompt is rendered and checked before it
-    /// starts (`codex debug prompt-input`); Claude Code has no such check, so
-    /// you run /status and /memory yourself, as the start tells you. The
-    /// session gets DAYCARE_CHALLENGE_SESSION, never a Daycare token or
-    /// ANTHROPIC_API_KEY. A usage reading is written to meter/start.json and
-    /// meter/end.json; it is a reading, not a limit.
+    /// starts (`codex debug prompt-input`), and so is OpenCode's resolved
+    /// configuration (`opencode debug config` and `debug agent build`);
+    /// Claude Code has no such check, so you run /status and /memory
+    /// yourself, as the start tells you. The session gets
+    /// DAYCARE_CHALLENGE_SESSION, never a Daycare token, and never
+    /// ANTHROPIC_API_KEY unless it is the key for the OpenCode provider you
+    /// chose. A usage reading is written to meter/start.json and
+    /// meter/end.json; it is a reading, not a limit (OpenCode has none, so
+    /// its readings are recorded as failed).
+    ///
+    /// OpenCode needs --model provider/model and runs on your own provider
+    /// API key only: a subscription login for that provider stops the start.
+    /// Daycare never reads, stores or sends the key.
     ///
     /// What it does not cover: deny rules bind Claude's file tools, not shell
-    /// commands, and Codex's sandbox limits writes, not reads. A program
-    /// running as you can read what you can read, the readings and your
-    /// account of how the work was done are self-reported, and Codex's MCP
-    /// servers are switched off by configuration, not proven (check /mcp).
+    /// commands, Codex's sandbox limits writes, not reads, and OpenCode has
+    /// no sandbox. A program running as you can read what you can read, the
+    /// readings and your account of how the work was done are self-reported,
+    /// and Codex's MCP servers are switched off by configuration, not proven
+    /// (check /mcp).
     Start {
         /// The challenge id from `challenge list`.
         id: String,
         /// Print the launch command instead of starting the client.
         #[arg(long)]
         print: bool,
-        /// Client to work in: claude or codex. Defaults to this machine's choice.
+        /// Client to work in: claude, codex or opencode. Defaults to this
+        /// machine's choice.
         #[arg(long, value_parser = AgentKind::parse)]
         agent: Option<AgentKind>,
+        /// OpenCode only, and required for it: the provider/model to work
+        /// with, on your own API key for that provider.
+        #[arg(long, value_name = "PROVIDER/MODEL")]
+        model: Option<String>,
         /// Codex only: run Codex with its own CODEX_HOME under Daycare's
         /// folder, holding only what you approved (and a copy of your login,
         /// handed back refreshed when the session ends), so an unapproved
@@ -361,6 +375,9 @@ enum ChallengeAction {
         /// Codex CLI binary to run.
         #[arg(long, default_value = "codex")]
         codex_bin: String,
+        /// OpenCode binary to run.
+        #[arg(long, default_value = "opencode")]
+        opencode_bin: String,
         #[command(flatten)]
         which: Which,
     },
@@ -4493,19 +4510,18 @@ fn challenge_command(
             id,
             print,
             agent,
+            model,
             separate_codex_home,
             claude_bin,
             codex_bin,
+            opencode_bin,
             which,
         } => {
             challenge::refuse_inside_session("challenge start")?;
             let client = match selected_agent(agent, layout)? {
                 AgentKind::Claude => Client::Claude,
                 AgentKind::Codex => Client::Codex,
-                AgentKind::Opencode => return Err(Error::new(
-                    "challenges support Claude Code and Codex CLI for now; pass --agent claude \
-                         or --agent codex",
-                )),
+                AgentKind::Opencode => Client::Opencode,
             };
             let active = active_for(layout, store, &which)?;
             challenge::start(
@@ -4516,6 +4532,8 @@ fn challenge_command(
                     client,
                     claude_bin: &claude_bin,
                     codex_bin: &codex_bin,
+                    opencode_bin: &opencode_bin,
+                    model: model.as_deref(),
                     started_at: &now_rfc3339(),
                     print,
                     separate_codex_home,

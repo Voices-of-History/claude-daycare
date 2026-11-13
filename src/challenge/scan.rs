@@ -547,11 +547,17 @@ fn add_item(set: &mut SecretSet, item: &Item, kind: FindingKind, claude_json: Op
                         }
                     }
                 }
+                Client::Opencode => add_opencode_stanza(set, item, &["mcp"], kind),
             }
         }
-        // A plugin is used by reference and can be large; its files are the
-        // plugin author's, not the owner's writing.
-        Kind::Plugin => {}
+        // An OpenCode agent from a config file: its stanza's values. One from
+        // a markdown file is read whole, as instruction files are.
+        Kind::Agent if is_json_config(&item.path) => {
+            add_opencode_stanza(set, item, &["agent", "mode"], kind)
+        }
+        // A plugin or custom tool is code, used by reference; a plugin's files
+        // are the plugin author's, not the owner's writing.
+        Kind::Plugin | Kind::Tool => {}
         Kind::Skill => {
             let mut budget = MAX_MEMORY_FILE_BYTES;
             for file in text_files_under(&item.path) {
@@ -568,6 +574,32 @@ fn add_item(set: &mut SecretSet, item: &Item, kind: FindingKind, claude_json: Op
         _ => {
             if let Some(bytes) = read_small(&item.path, MAX_MEMORY_FILE_BYTES) {
                 set.add_memory_text(&String::from_utf8_lossy(&bytes), kind);
+            }
+        }
+    }
+}
+
+fn is_json_config(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext == "json" || ext == "jsonc")
+}
+
+/// The string values of one named entry under `keys` in an OpenCode config
+/// file (JSON with comments).
+fn add_opencode_stanza(set: &mut SecretSet, item: &Item, keys: &[&str], kind: FindingKind) {
+    let Some(bytes) = read_small(&item.path, MAX_MEMORY_FILE_BYTES) else {
+        return;
+    };
+    let Some(config) = crate::approval::scan::parse_jsonc(&String::from_utf8_lossy(&bytes)) else {
+        return;
+    };
+    let name = item.name.as_deref().unwrap_or_default();
+    for key in keys {
+        if let Some(stanza) = config.get(*key).and_then(|entries| entries.get(name)) {
+            let mut strings = Vec::new();
+            json_strings(stanza, &mut strings);
+            for value in strings {
+                set.add_memory_value(&value, kind);
             }
         }
     }
