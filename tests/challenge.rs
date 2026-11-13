@@ -193,6 +193,20 @@ fn json_of(output: &Output) -> serde_json::Value {
 /// A platform with one open challenge, `c-1`, whose input is served by the
 /// same mock as a signed storage URL.
 fn platform_with(input_sha256: Option<String>) -> MockPlatform {
+    platform_answering_attempts(input_sha256, None)
+}
+
+/// The platform's refusal when the owner has not accepted the current terms:
+/// the sentence is in `error`, the code in `reason`.
+const TERMS_REFUSAL: &str = r#"{"error": "Accept the updated terms at claudedaycare.com before entering a challenge.", "reason": "terms_not_accepted"}"#;
+const TERMS_SENTENCE: &str =
+    "Accept the updated terms at claudedaycare.com before entering a challenge.";
+
+/// `platform_with`, answering the attempts route with `attempts` instead.
+fn platform_answering_attempts(
+    input_sha256: Option<String>,
+    attempts: Option<(u16, &'static str)>,
+) -> MockPlatform {
     let base: Arc<OnceLock<String>> = Arc::new(OnceLock::new());
     let seen_base = Arc::clone(&base);
     let declared = input_sha256.unwrap_or_else(|| sha256(CSV.as_bytes()));
@@ -237,6 +251,9 @@ fn platform_with(input_sha256: Option<String>) -> MockPlatform {
             return Response::json(200, CSV);
         }
         if request.method == "POST" && path == "/api/daycare/challenges/c-1/attempts" {
+            if let Some((status, body)) = attempts {
+                return Response::json(status, body);
+            }
             return Response::json(200, r#"{"entry_id":"entry-1"}"#);
         }
         Response::json(404, r#"{"error":"not here"}"#)
@@ -704,6 +721,55 @@ fn a_wrong_input_sha256_aborts_before_enrolling_or_writing() {
         .iter()
         .all(|request| !request.path.ends_with("/attempts")));
     assert!(!machine.challenge_root().join("c-1").exists());
+}
+
+#[test]
+fn a_terms_refusal_on_start_reaches_the_owner_and_sets_up_nothing() {
+    let machine = Machine::new("ch-terms");
+    let platform = platform_answering_attempts(None, Some((403, TERMS_REFUSAL)));
+    machine.enroll(&platform);
+    let claude_bin = machine.claude_bin.to_str().unwrap().to_string();
+    let start = |json: bool| {
+        let mut args = vec![
+            "challenge",
+            "start",
+            "c-1",
+            "--print",
+            "--agent",
+            "claude",
+            "--claude-bin",
+            &claude_bin,
+        ];
+        if json {
+            args.push("--json");
+        }
+        machine.run(&args)
+    };
+    // --json: one refusal whose error is the platform's own sentence.
+    let out = start(true);
+    assert!(!out.status.success());
+    let result = json_of(&out);
+    assert_eq!(result["ok"], false);
+    let error = result["error"].as_str().unwrap();
+    assert!(error.contains(TERMS_SENTENCE), "{error}");
+    assert!(error.contains("HTTP 403"), "{error}");
+    assert!(!error.contains("terms_not_accepted"), "{error}");
+    // Without --json, the owner reads the same sentence.
+    let out = start(false);
+    assert!(!out.status.success());
+    let text = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(text.contains(TERMS_SENTENCE), "{text}");
+    assert!(!text.contains("panicked"), "{text}");
+    // It stopped there: no folder, no entry, no second request.
+    assert!(!machine.challenge_root().join("c-1").exists());
+    let attempts = challenge_requests(&platform)
+        .iter()
+        .filter(|request| request.path.ends_with("/attempts"))
+        .count();
+    assert_eq!(attempts, 2);
+    assert!(challenge_requests(&platform)
+        .iter()
+        .all(|request| request.method == "GET" || request.path.ends_with("/attempts")));
 }
 
 /// Without `--print`, `start` now launches the client interactively; that
