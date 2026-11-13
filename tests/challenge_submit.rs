@@ -335,6 +335,8 @@ impl Machine {
             claude_json: self.fake_home.join(".claude.json"),
             codex_home: self.fake_home.join(".codex"),
             agents_home: self.fake_home.join(".agents"),
+            opencode_config_dir: self.fake_home.join(".config/opencode"),
+            opencode_dot_dir: self.fake_home.join(".opencode"),
             challenge_root: self.challenge_root(),
             daycare_root: self.daycare_home.clone(),
         };
@@ -704,6 +706,45 @@ fn another_refusal_on_confirm_is_not_delivered_either() {
     let error = result.unwrap_err();
     assert!(error.message().starts_with("Not delivered"), "{error}");
     assert!(error.message().contains("does not match"), "{error}");
+}
+
+/// The platform's refusal when the owner has not accepted the current terms
+/// (submissions and confirm routes): the sentence is in `error`, the code in
+/// `reason`.
+const TERMS_REFUSAL: &str = r#"{"error": "Accept the updated terms at claudedaycare.com before entering a challenge.", "reason": "terms_not_accepted"}"#;
+const TERMS_SENTENCE: &str =
+    "Accept the updated terms at claudedaycare.com before entering a challenge.";
+
+#[test]
+fn a_terms_refusal_reaches_the_owner_and_nothing_is_confirmed() {
+    // Refused when the submission starts: nothing uploaded, nothing confirmed.
+    let machine = Machine::new("submit-terms");
+    let (platform, world) = mock_platform();
+    machine.put_entry();
+    world.lock().unwrap().submit_refusal = Some((403, TERMS_REFUSAL));
+    let (result, screen) = submit_with(&machine, &platform, &SecretSet::new(), &mut answers());
+    let error = result.unwrap_err();
+    assert!(error.message().contains(TERMS_SENTENCE), "{error}");
+    assert!(error.message().starts_with("Not delivered"), "{error}");
+    assert_eq!(error.http_status(), Some(403));
+    assert!(!screen.contains("Delivered:"), "{screen}");
+    let calls = method_paths(&platform);
+    assert!(!calls.iter().any(|p| p.starts_with("PUT")), "{calls:?}");
+    assert!(!calls.iter().any(|p| p.ends_with("/confirm")), "{calls:?}");
+    assert!(machine.entry_json().get("submissions").is_none());
+
+    // Refused at confirm: the files went up, and still nothing counts.
+    let machine = Machine::new("submit-terms-confirm");
+    let (platform, world) = mock_platform();
+    machine.put_entry();
+    world.lock().unwrap().confirm_refusal = Some((403, TERMS_REFUSAL));
+    let (result, screen) = submit_with(&machine, &platform, &SecretSet::new(), &mut answers());
+    let error = result.unwrap_err();
+    assert!(error.message().contains(TERMS_SENTENCE), "{error}");
+    assert!(error.message().starts_with("Not delivered"), "{error}");
+    assert_eq!(error.http_status(), Some(403));
+    assert!(!screen.contains("Delivered:"), "{screen}");
+    assert!(machine.entry_json().get("submissions").is_none());
 }
 
 #[test]

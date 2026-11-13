@@ -30,7 +30,14 @@
 //! from the folder's ancestors whatever `CODEX_HOME` says, so an unapproved
 //! one still refuses. HOME is never redirected.
 //!
-//! In both clients the challenge environment never carries a Daycare token,
+//! OpenCode: the `OPENCODE_DISABLE_*` switches, a generated `OPENCODE_CONFIG`
+//! outside the folder that switches off unapproved MCP servers and agents and
+//! denies unapproved skills, and `--pure` when no plugin is approved
+//! (`opencode_plan`; the details and the refusals are in `challenge::opencode`).
+//! HOME is never redirected, so its global AGENTS.md and custom tools are
+//! refusals unless approved.
+//!
+//! In every client the challenge environment never carries a Daycare token,
 //! and it carries the session marker that stops `daycare-runner` from
 //! starting visits, challenges or memory approvals from inside the session.
 //!
@@ -304,7 +311,7 @@ pub fn claude_plan(
                     how: "left out of --mcp-config, and a deny rule",
                 });
             }
-            Kind::AgentsMd | Kind::ProjectAgentsMd => {}
+            Kind::AgentsMd | Kind::ProjectAgentsMd | Kind::Agent | Kind::Tool => {}
         }
     }
     // Unapproved servers' settings (and their secrets) live in this file.
@@ -485,6 +492,106 @@ pub fn codex_plan(input: &PlanInput<'_>) -> Result<CodexPlan> {
     })
 }
 
+/// The generated OpenCode launch.
+#[derive(Debug, Clone)]
+pub struct OpencodePlan {
+    pub launch: LaunchSpec,
+    pub excluded: Vec<Excluded>,
+    /// Daycare's `OPENCODE_CONFIG`: switches only, no secret.
+    pub config: Value,
+    /// The flags `opencode debug config` and `debug agent` run with, the
+    /// same ones the launch carries (`--pure`, or none).
+    pub config_args: Vec<String>,
+}
+
+/// The OpenCode launch for `model` (`provider/model`), with Daycare's config
+/// at `config_file`. Refuses what OpenCode would load and no switch leaves
+/// out. Writes nothing.
+pub fn opencode_plan(
+    input: &PlanInput<'_>,
+    model: &str,
+    config_file: &Path,
+) -> Result<OpencodePlan> {
+    use super::opencode;
+    let provider = opencode::check_model(model)?;
+    if !input.inventory.opencode_unreadable.is_empty() {
+        let files: Vec<String> = input
+            .inventory
+            .opencode_unreadable
+            .iter()
+            .map(|path| format!("  {}", path.display()))
+            .collect();
+        return Err(Error::new(format!(
+            "this challenge cannot start in OpenCode yet, because Daycare could not read these \
+             OpenCode config files, so it cannot tell what OpenCode would load from them:\n{}\n\
+             Each must be JSON (comments and trailing commas are fine), and every {{file:…}} it \
+             names must be readable. Fix them or move them aside for the challenge, then start \
+             again",
+            files.join("\n")
+        )));
+    }
+    let selection = opencode::select(&input.inventory.items, input.reconciled);
+    let refusals = opencode::refusals(&selection);
+    if !refusals.is_empty() {
+        return Err(Error::new(format!(
+            "this challenge cannot start in OpenCode yet, because OpenCode would load memory you \
+             did not approve:\n{}\nApprove it with the daycare-memory-review skill, move it \
+             aside for the challenge, or start with --agent claude or --agent codex. Daycare \
+             does not redirect your home folder, so it cannot leave these out for you",
+            refusals.join("\n")
+        )));
+    }
+    let pointer = input.folder.join("AGENTS.md");
+    let config = opencode::challenge_config(&pointer, &provider, &selection);
+    let config_args: Vec<String> = if selection.pure() {
+        vec![opencode::PURE_FLAG.to_string()]
+    } else {
+        Vec::new()
+    };
+    let mut env_set = BTreeMap::new();
+    let (marker, entry) = input.marker();
+    env_set.insert(marker, entry);
+    env_set.insert(
+        "OPENCODE_CONFIG".to_string(),
+        config_file.to_string_lossy().into_owned(),
+    );
+    for switch in opencode::CHALLENGE_SWITCHES {
+        env_set.insert(switch.to_string(), "1".to_string());
+    }
+    // The owner's own key for the chosen provider stays, even where other
+    // challenge sessions drop it (`ANTHROPIC_API_KEY`). Every other
+    // provider's key is dropped.
+    let keep = opencode::provider_key_env(&provider);
+    let mut stripped: Vec<&str> = opencode::STRIPPED_OPENCODE_CHALLENGE_ENV.to_vec();
+    stripped.extend(opencode::other_provider_key_env(&provider));
+    let env_unset: Vec<String> = input
+        .env_unset(&stripped)
+        .into_iter()
+        .filter(|name| !keep.contains(&name.as_str()))
+        .collect();
+    let mut args = config_args.clone();
+    args.extend(["--model".to_string(), model.to_string()]);
+    Ok(OpencodePlan {
+        launch: LaunchSpec {
+            program: input.program.to_string(),
+            args,
+            cwd: input.folder.to_path_buf(),
+            env_set,
+            env_unset,
+        },
+        excluded: selection
+            .excluded
+            .iter()
+            .map(|(id, how)| Excluded {
+                id: id.clone(),
+                how,
+            })
+            .collect(),
+        config,
+        config_args,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,6 +664,7 @@ mod tests {
         Inventory {
             items,
             warnings: vec![],
+            ..Inventory::default()
         }
     }
 

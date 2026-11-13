@@ -123,6 +123,16 @@ const PROVIDER_KEYS: [(&str, &[&str]); 10] = [
     ("zai", &["ZHIPU_API_KEY"]),
 ];
 
+/// The API-key variables OpenCode reads for `provider`, where known. A
+/// challenge session keeps these for the provider the owner chose.
+pub fn provider_key_names(provider: &str) -> &'static [&'static str] {
+    PROVIDER_KEYS
+        .iter()
+        .find(|(name, _)| *name == provider)
+        .map(|(_, keys)| *keys)
+        .unwrap_or(&[])
+}
+
 /// Providers whose credentials live under `~` (`~/.aws`, Google ADC). The
 /// seal moves `HOME`, so they cannot authenticate; refuse them up front.
 const UNSUPPORTED_PROVIDERS: [&str; 3] =

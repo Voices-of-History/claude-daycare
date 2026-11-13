@@ -6,13 +6,18 @@
 //!    Daycare identity token and the device token, every value in Daycare's
 //!    own `tokens.json`, and the values in the Codex, OpenCode and Claude Code
 //!    login files;
-//! 2. patterns for well-known credential shapes (`sk-ant-`, `sk-`, GitHub
-//!    tokens, AWS access key ids, PEM blocks) and the owner's home path, which
-//!    names them and their machine;
+//!    Also the provider keys this machine holds for OpenCode: each
+//!    provider's `options.apiKey` and header values in the OpenCode config
+//!    files, and the value of every model provider's API-key variable set in
+//!    the environment;
+//! 2. patterns for well-known credential shapes (`sk-ant-`, `sk-`, Google
+//!    `AIza`, Groq `gsk_`, xAI `xai-`, GitHub tokens, AWS access key ids, PEM
+//!    blocks) and the owner's home path, which names them and their machine;
 //! 3. text from the owner's own memory that their approval does not allow in
 //!    public work: items marked private, and every item not approved at all
 //!    ("don't use"). Lines of instruction files, skill files and MCP settings
-//!    values are matched verbatim. A skill's code is not: its fenced code
+//!    values are matched verbatim, and so are OpenCode plugin options and the
+//!    text an OpenCode stanza pulls in with `{file:…}` or `{env:…}`. A skill's code is not: its fenced code
 //!    examples and its script files are mostly the skill author's boilerplate
 //!    (a viewport `<meta>`, a labelled email field), which an entry writes on
 //!    its own, so they would refuse honest work. A skill's prose still counts,
@@ -68,6 +73,16 @@ pub enum FindingKind {
     AnthropicKey,
     /// `sk-…` (OpenAI and others).
     ApiKey,
+    /// `AIza…`.
+    GoogleApiKey,
+    /// `gsk_…`.
+    GroqKey,
+    /// `xai-…`.
+    XaiKey,
+    /// A provider's `apiKey` or header value in an OpenCode config file.
+    OpencodeProviderKey,
+    /// The value of a model provider's API-key variable in the environment.
+    ProviderKeyEnv,
     /// `ghp_…`, `github_pat_…` and the other GitHub token prefixes.
     GithubToken,
     /// `AKIA…` or `ASIA…`.
@@ -93,6 +108,11 @@ impl FindingKind {
             FindingKind::ClaudeLogin => "a value from your Claude Code login (.credentials.json)",
             FindingKind::AnthropicKey => "something shaped like an Anthropic API key (sk-ant-)",
             FindingKind::ApiKey => "something shaped like an API key (sk-)",
+            FindingKind::GoogleApiKey => "something shaped like a Google API key (AIza)",
+            FindingKind::GroqKey => "something shaped like a Groq API key (gsk_)",
+            FindingKind::XaiKey => "something shaped like an xAI API key (xai-)",
+            FindingKind::OpencodeProviderKey => "a provider API key from your OpenCode settings",
+            FindingKind::ProviderKeyEnv => "a model provider API key from your environment",
             FindingKind::GithubToken => "something shaped like a GitHub token",
             FindingKind::AwsAccessKey => "something shaped like an AWS access key id",
             FindingKind::PemBlock => "a PEM block (a private key or certificate)",
@@ -329,6 +349,21 @@ fn patterns(haystack: &[u8], found: &mut BTreeSet<FindingKind>) {
             found.insert(FindingKind::ApiKey);
         }
     }
+    // Provider key prefixes, each followed by a long run of key characters:
+    // Google `AIza` + 35, Groq `gsk_` + 52, xAI `xai-` + 80.
+    for (prefix, min, kind) in [
+        (&b"AIza"[..], 30, FindingKind::GoogleApiKey),
+        (b"gsk_", 40, FindingKind::GroqKey),
+        (b"xai-", 40, FindingKind::XaiKey),
+    ] {
+        for at in occurrences(haystack, prefix) {
+            if starts_a_word(haystack, at)
+                && run_length(haystack, at + prefix.len(), is_key_byte) >= min
+            {
+                found.insert(kind);
+            }
+        }
+    }
     for prefix in [&b"ghp_"[..], b"gho_", b"ghu_", b"ghs_", b"ghr_"] {
         for at in occurrences(haystack, prefix) {
             if starts_a_word(haystack, at)
@@ -490,6 +525,7 @@ pub fn add_memory(
     inventory: &Inventory,
     reconciled: &Reconciled,
     claude_json: &Path,
+    home: &Path,
 ) {
     let public: BTreeSet<&str> = reconciled
         .approved
@@ -514,11 +550,17 @@ pub fn add_memory(
         } else {
             FindingKind::DontUseMemory
         };
-        add_item(set, item, kind, claude_mcp.as_ref());
+        add_item(set, item, kind, claude_mcp.as_ref(), home);
     }
 }
 
-fn add_item(set: &mut SecretSet, item: &Item, kind: FindingKind, claude_json: Option<&Value>) {
+fn add_item(
+    set: &mut SecretSet,
+    item: &Item,
+    kind: FindingKind,
+    claude_json: Option<&Value>,
+    home: &Path,
+) {
     match item.kind {
         Kind::McpServer => {
             let name = item.name.as_deref().unwrap_or_default();
@@ -547,11 +589,31 @@ fn add_item(set: &mut SecretSet, item: &Item, kind: FindingKind, claude_json: Op
                         }
                     }
                 }
+                Client::Opencode => add_opencode_stanza(set, item, &["mcp"], kind, home),
             }
         }
-        // A plugin is used by reference and can be large; its files are the
-        // plugin author's, not the owner's writing.
-        Kind::Plugin => {}
+        // An OpenCode agent from a config file: its stanza's values (the
+        // key its id names, `agent` or `mode`). One from a markdown file is
+        // read whole, as instruction files are.
+        Kind::Agent if is_json_config(&item.path) => {
+            let name = item.name.as_deref().unwrap_or_default();
+            let keys: &[&str] = if item.id.ends_with(&format!("#mode.{name}")) {
+                &["mode"]
+            } else if item.id.ends_with(&format!("#agent.{name}")) {
+                &["agent"]
+            } else {
+                &["agent", "mode"]
+            };
+            add_opencode_stanza(set, item, keys, kind, home)
+        }
+        // A plugin listed in an OpenCode config: the options the owner gave
+        // it (they can hold a token). Its code is the plugin author's.
+        Kind::Plugin if item.client == Client::Opencode && is_json_config(&item.path) => {
+            add_opencode_plugin_options(set, item, kind, home)
+        }
+        // A plugin or custom tool is code, used by reference; a plugin's files
+        // are the plugin author's, not the owner's writing.
+        Kind::Plugin | Kind::Tool => {}
         Kind::Skill => {
             let mut budget = MAX_MEMORY_FILE_BYTES;
             for file in text_files_under(&item.path) {
@@ -569,6 +631,162 @@ fn add_item(set: &mut SecretSet, item: &Item, kind: FindingKind, claude_json: Op
             if let Some(bytes) = read_small(&item.path, MAX_MEMORY_FILE_BYTES) {
                 set.add_memory_text(&String::from_utf8_lossy(&bytes), kind);
             }
+        }
+    }
+}
+
+fn is_json_config(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext == "json" || ext == "jsonc")
+}
+
+fn read_opencode_config(path: &Path) -> Option<Value> {
+    let bytes = read_small(path, MAX_MEMORY_FILE_BYTES)?;
+    crate::approval::scan::parse_jsonc(&String::from_utf8_lossy(&bytes))
+}
+
+/// Every string in an OpenCode stanza, plus what OpenCode substitutes into
+/// it: the text of each `{file:…}` it names and the value of each `{env:…}`.
+fn add_opencode_values(
+    set: &mut SecretSet,
+    stanza: &Value,
+    config: &Path,
+    home: &Path,
+    kind: FindingKind,
+) {
+    use crate::approval::scan::{
+        opencode_env_references, opencode_file_references, resolve_opencode_file,
+    };
+    let mut strings = Vec::new();
+    json_strings(stanza, &mut strings);
+    for value in strings {
+        set.add_memory_value(&value, kind);
+    }
+    for reference in opencode_file_references(stanza) {
+        let file = resolve_opencode_file(&reference, config, home);
+        if let Some(bytes) = read_small(&file, MAX_MEMORY_FILE_BYTES) {
+            let text = String::from_utf8_lossy(&bytes);
+            set.add_memory_value(&text, kind);
+            set.add_memory_text(&text, kind);
+        }
+    }
+    for name in opencode_env_references(stanza) {
+        if let Some(value) = std::env::var_os(&name) {
+            set.add_memory_value(&value.to_string_lossy(), kind);
+        }
+    }
+}
+
+/// The values of one named entry under `keys` in an OpenCode config file
+/// (JSON with comments).
+fn add_opencode_stanza(
+    set: &mut SecretSet,
+    item: &Item,
+    keys: &[&str],
+    kind: FindingKind,
+    home: &Path,
+) {
+    let Some(config) = read_opencode_config(&item.path) else {
+        return;
+    };
+    let name = item.name.as_deref().unwrap_or_default();
+    for key in keys {
+        if let Some(stanza) = config.get(*key).and_then(|entries| entries.get(name)) {
+            add_opencode_values(set, stanza, &item.path, home, kind);
+        }
+    }
+}
+
+/// The options of every `plugin` entry for one spec (`[spec, options]`).
+fn add_opencode_plugin_options(set: &mut SecretSet, item: &Item, kind: FindingKind, home: &Path) {
+    let Some(config) = read_opencode_config(&item.path) else {
+        return;
+    };
+    let spec = item.name.as_deref().unwrap_or_default();
+    for entry in config
+        .get("plugin")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Value::Array(pair) = entry {
+            if pair.first().and_then(Value::as_str) == Some(spec) {
+                for options in &pair[1..] {
+                    add_opencode_values(set, options, &item.path, home, kind);
+                }
+            }
+        }
+    }
+}
+
+/// Substitute `{env:…}` and `{file:…}` in one OpenCode config value as
+/// OpenCode does. A file that cannot be read gives nothing.
+fn resolve_opencode_value(value: &str, config: &Path, home: &Path) -> String {
+    let mut text = value.to_string();
+    let as_value = Value::String(value.to_string());
+    for name in crate::approval::scan::opencode_env_references(&as_value) {
+        let resolved = std::env::var(&name).unwrap_or_default();
+        text = text.replace(&format!("{{env:{name}}}"), &resolved);
+    }
+    for reference in crate::approval::scan::opencode_file_references(&as_value) {
+        let file = crate::approval::scan::resolve_opencode_file(&reference, config, home);
+        let resolved = read_small(&file, MAX_CREDENTIAL_FILE_BYTES)
+            .map(|bytes| String::from_utf8_lossy(&bytes).trim().to_string())
+            .unwrap_or_default();
+        text = text.replace(&format!("{{file:{reference}}}"), &resolved);
+    }
+    text
+}
+
+/// The provider keys in the owner's OpenCode config files: every
+/// `provider.<id>.options.apiKey` and header value, resolved. Each is a
+/// secret whatever the approval says, so it is matched exactly, and so is
+/// each long word of it (the token of `Bearer <token>`).
+pub fn add_opencode_provider_keys(set: &mut SecretSet, roots: &crate::approval::scan::Roots) {
+    for path in crate::approval::scan::opencode_config_files(roots) {
+        let Some(config) = read_opencode_config(&path) else {
+            continue;
+        };
+        let Some(providers) = config.get("provider").and_then(Value::as_object) else {
+            continue;
+        };
+        for provider in providers.values() {
+            let options = provider.get("options");
+            let mut values = Vec::new();
+            if let Some(key) = options
+                .and_then(|o| o.get("apiKey"))
+                .and_then(Value::as_str)
+            {
+                values.push(key.to_string());
+            }
+            if let Some(headers) = options.and_then(|o| o.get("headers")) {
+                json_strings(headers, &mut values);
+            }
+            for value in values {
+                let resolved = resolve_opencode_value(&value, &path, &roots.home);
+                set.add_exact(&resolved, FindingKind::OpencodeProviderKey);
+                for word in resolved.split_whitespace() {
+                    set.add_exact(word, FindingKind::OpencodeProviderKey);
+                }
+            }
+        }
+    }
+}
+
+/// The value of every model provider's API-key variable that is set
+/// (`challenge::opencode::PROVIDER_KEY_ENV`), the chosen provider's
+/// included: the runner does not know at submit which one a session used.
+pub fn add_provider_env_keys(
+    set: &mut SecretSet,
+    vars: impl IntoIterator<Item = (String, String)>,
+) {
+    let names: BTreeSet<&str> = crate::challenge::opencode::PROVIDER_KEY_ENV
+        .iter()
+        .flat_map(|(_, keys)| keys.iter().copied())
+        .collect();
+    for (name, value) in vars {
+        if names.contains(name.as_str()) {
+            set.add_exact(&value, FindingKind::ProviderKeyEnv);
         }
     }
 }
@@ -756,6 +974,19 @@ mod tests {
             ),
             ("aws AKIAIOSFODNN7EXAMPLE here", FindingKind::AwsAccessKey),
             (
+                // Split so the source never holds a whole key-shaped literal.
+                concat!("key=AIza", "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q"),
+                FindingKind::GoogleApiKey,
+            ),
+            (
+                concat!("GROQ=gsk_", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOP"),
+                FindingKind::GroqKey,
+            ),
+            (
+                concat!("xai-", "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefgh"),
+                FindingKind::XaiKey,
+            ),
+            (
                 "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
                 FindingKind::PemBlock,
             ),
@@ -773,6 +1004,9 @@ mod tests {
             "task-abcdefghijklmnopqrstuvwxyz0123",
             "sk-abcdefghijklmnopqrstuvwxyz",
             "ghp_short",
+            "AIzaShort-but-not-a-key",
+            "gsk_short_value",
+            "the xai-grok model",
             "AKIAIOSFODNN7EXAMPLEX",
             "-----BEGIN-----",
         ] {
@@ -879,6 +1113,7 @@ mod tests {
         let inventory = Inventory {
             items: vec![private.clone(), public.clone(), unreviewed.clone()],
             warnings: vec![],
+            ..Inventory::default()
         };
         let reconciled = Reconciled {
             approved: vec![(private, Scope::Private), (public, Scope::Public)],
@@ -886,7 +1121,13 @@ mod tests {
             ..Reconciled::default()
         };
         let mut set = SecretSet::new();
-        add_memory(&mut set, &inventory, &reconciled, &dir.join("absent.json"));
+        add_memory(
+            &mut set,
+            &inventory,
+            &reconciled,
+            &dir.join("absent.json"),
+            &dir,
+        );
         assert_eq!(
             kinds(&set, "private rule that is long enough to match"),
             vec![FindingKind::PrivateMemory]
@@ -947,13 +1188,20 @@ mod tests {
         let inventory = Inventory {
             items: vec![skill_item.clone(), claude_md_item.clone()],
             warnings: vec![],
+            ..Inventory::default()
         };
         let reconciled = Reconciled {
             unreviewed: vec![skill_item, claude_md_item],
             ..Reconciled::default()
         };
         let mut set = SecretSet::new();
-        add_memory(&mut set, &inventory, &reconciled, &dir.join("absent.json"));
+        add_memory(
+            &mut set,
+            &inventory,
+            &reconciled,
+            &dir.join("absent.json"),
+            &dir,
+        );
 
         let entry = "<!doctype html><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<label for=\"email\">Email address</label>\nprint('a script line that is long enough')";
         assert!(kinds(&set, entry).is_empty(), "boilerplate matched");
@@ -1007,17 +1255,194 @@ mod tests {
         let inventory = Inventory {
             items: vec![item.clone()],
             warnings: vec![],
+            ..Inventory::default()
         };
         let reconciled = Reconciled {
             unreviewed: vec![item],
             ..Reconciled::default()
         };
         let mut set = SecretSet::new();
-        add_memory(&mut set, &inventory, &reconciled, &claude_json);
+        add_memory(&mut set, &inventory, &reconciled, &claude_json, &dir);
         assert_eq!(
             kinds(&set, "header: Bearer planted-mcp-secret-31337"),
             vec![FindingKind::DontUseMemory]
         );
+    }
+
+    #[test]
+    fn opencode_config_entries_are_matched_by_their_values_and_markdown_agents_whole() {
+        let dir = unique_dir("scan-opencode");
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        let config = dir.join("opencode.jsonc");
+        std::fs::write(
+            &config,
+            "{\n  // mine\n  \"mcp\": {\"search\": {\"environment\": {\"KEY\": \"planted-oc-secret-4444\"}},},\n  \"agent\": {\"reviewer\": {\"prompt\": \"Always cite the internal wiki page first\"}}\n}",
+        )
+        .unwrap();
+        let agent_file = dir.join("agents/helper.md");
+        std::fs::write(
+            &agent_file,
+            "Answer in the house voice of our team, always\n",
+        )
+        .unwrap();
+        let tool_file = dir.join("lookup.ts");
+        std::fs::write(
+            &tool_file,
+            "export const planted = 'tool-code-not-memory-5555'\n",
+        )
+        .unwrap();
+        let item = |kind: Kind, path: &Path, name: Option<&str>| Item {
+            id: item_id(Client::Opencode, kind, path, name),
+            client: Client::Opencode,
+            kind,
+            path: path.to_path_buf(),
+            name: name.map(str::to_string),
+            bytes: 1,
+            sha256: "0".repeat(64),
+            origin: None,
+        };
+        let items = vec![
+            item(Kind::McpServer, &config, Some("search")),
+            item(Kind::Agent, &config, Some("reviewer")),
+            item(Kind::Agent, &agent_file, Some("helper")),
+            item(Kind::Tool, &tool_file, None),
+        ];
+        let inventory = Inventory {
+            items: items.clone(),
+            warnings: vec![],
+            ..Inventory::default()
+        };
+        let reconciled = Reconciled {
+            unreviewed: items,
+            ..Reconciled::default()
+        };
+        let mut set = SecretSet::new();
+        add_memory(
+            &mut set,
+            &inventory,
+            &reconciled,
+            &dir.join(".claude.json"),
+            &dir,
+        );
+        for text in [
+            "env: planted-oc-secret-4444",
+            "Always cite the internal wiki page first",
+            "Answer in the house voice of our team, always",
+        ] {
+            assert_eq!(
+                kinds(&set, text),
+                vec![FindingKind::DontUseMemory],
+                "{text}"
+            );
+        }
+        // A custom tool is code, used by reference, as a plugin is.
+        assert!(kinds(&set, "tool-code-not-memory-5555").is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn opencode_plugin_options_provider_keys_and_substituted_values_are_found() {
+        let dir = unique_dir("scan-opencode-keys");
+        let home = dir.join("home");
+        let roots = crate::approval::scan::Roots {
+            claude_config_dir: home.join(".claude"),
+            claude_json: home.join(".claude.json"),
+            codex_home: home.join(".codex"),
+            agents_home: home.join(".agents"),
+            opencode_config_dir: home.join(".config/opencode"),
+            opencode_dot_dir: home.join(".opencode"),
+            challenge_root: home.join("daycare/challenges"),
+            daycare_root: home.join(".claude-daycare"),
+            home: home.clone(),
+        };
+        let write = |path: &Path, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            &roots.opencode_config_dir.join("opencode.jsonc"),
+            r#"{
+  // A token in a plugin's options, a header from a file, provider keys.
+  "plugin": ["opencode-notify", ["opencode-notify", {"token": "plugin-option-token-1234"}]],
+  "mcp": {"docs": {"type": "remote", "url": "https://x.test/mcp",
+                   "headers": {"Authorization": "Bearer {file:~/.secrets/docs}"}}},
+  "provider": {
+    "openai": {"options": {"apiKey": "{file:~/.secrets/openai}"}},
+    "groq": {"options": {"apiKey": "literal-provider-key-5678",
+                         "headers": {"Authorization": "Bearer header-token-abcdef12"}}},
+  },
+}"#,
+        );
+        write(&home.join(".secrets/docs"), "docs-token-from-a-file-9999\n");
+        write(
+            &home.join(".secrets/openai"),
+            "openai-key-from-a-file-7777\n",
+        );
+        let inventory = crate::approval::scan::scan(&roots);
+        assert!(
+            inventory.opencode_unreadable.is_empty(),
+            "{:?}",
+            inventory.warnings
+        );
+        let reconciled = Reconciled {
+            unreviewed: inventory.items.clone(),
+            ..Reconciled::default()
+        };
+        let mut set = SecretSet::new();
+        add_memory(&mut set, &inventory, &reconciled, &roots.claude_json, &home);
+        add_opencode_provider_keys(&mut set, &roots);
+        add_provider_env_keys(
+            &mut set,
+            [
+                (
+                    "GROQ_API_KEY".to_string(),
+                    "env-groq-value-123456".to_string(),
+                ),
+                (
+                    "UNRELATED".to_string(),
+                    "unrelated-value-123456".to_string(),
+                ),
+            ],
+        );
+        for (text, kind) in [
+            (
+                "token: plugin-option-token-1234",
+                FindingKind::DontUseMemory,
+            ),
+            ("docs-token-from-a-file-9999", FindingKind::DontUseMemory),
+            (
+                "k=literal-provider-key-5678",
+                FindingKind::OpencodeProviderKey,
+            ),
+            (
+                "openai-key-from-a-file-7777",
+                FindingKind::OpencodeProviderKey,
+            ),
+            ("header-token-abcdef12", FindingKind::OpencodeProviderKey),
+            ("env-groq-value-123456", FindingKind::ProviderKeyEnv),
+        ] {
+            assert_eq!(kinds(&set, text), vec![kind], "{text}");
+        }
+        assert!(kinds(&set, "unrelated-value-123456").is_empty());
+        // Approved for public work, a plugin's options are not matched as
+        // memory; a provider key still is, whatever the approval says.
+        let public = Reconciled {
+            approved: inventory
+                .items
+                .iter()
+                .map(|item| (item.clone(), Scope::Public))
+                .collect(),
+            ..Reconciled::default()
+        };
+        let mut set = SecretSet::new();
+        add_memory(&mut set, &inventory, &public, &roots.claude_json, &home);
+        add_opencode_provider_keys(&mut set, &roots);
+        assert!(kinds(&set, "plugin-option-token-1234").is_empty());
+        assert_eq!(
+            kinds(&set, "literal-provider-key-5678"),
+            vec![FindingKind::OpencodeProviderKey]
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

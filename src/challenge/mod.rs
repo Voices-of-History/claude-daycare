@@ -4,7 +4,8 @@
 //! owner's own client and tools, in a folder Daycare sets up. The platform
 //! never starts that session: the owner runs `challenge start` in their own
 //! terminal, and it starts their client there (`launch`), or with `--print`
-//! prints the exact command and environment for them to run themselves.
+//! prints the exact command and environment for them to run themselves. The
+//! client is Claude Code, Codex CLI or OpenCode (`client`).
 //!
 //! `start` does its checks in an order that leaves nothing behind on failure:
 //! the session marker, the client's policy guard, the memory approval (a
@@ -72,32 +73,46 @@ pub fn list(active: &Active, out: Out) -> Result<()> {
         .as_array()
         .cloned()
         .ok_or_else(|| Error::new("the challenge list was not a list"))?;
-    let summaries: Vec<Value> = list
-        .iter()
-        .map(|challenge| {
-            json!({
-                "id": challenge.get("id"),
-                "slug": challenge.get("slug"),
-                "title": challenge.get("title"),
-                "state": challenge.get("state").or_else(|| challenge.get("phase")),
-                "closes_at": challenge.get("closes_at"),
-            })
-        })
-        .collect();
+    let summaries: Vec<Value> = list.iter().map(list_summary).collect();
     out.emit(json!({ "ok": true, "challenges": summaries }), || {
         if summaries.is_empty() {
             println!("No open challenges right now.");
         }
         for challenge in &summaries {
-            let field = |key: &str| challenge[key].as_str().unwrap_or("").to_string();
-            let closes = match challenge["closes_at"].as_str() {
-                Some(at) => format!(", closes {at}"),
-                None => String::new(),
-            };
-            println!("{}  {}{closes}", field("id"), field("title"));
+            println!("{}", list_line(challenge));
         }
     });
     Ok(())
+}
+
+/// One challenge in `challenge list`. A practice challenge (`practice:
+/// true`, or a close time in the year 9999) is marked always open.
+fn list_summary(challenge: &Value) -> Value {
+    let practice = challenge.get("practice").and_then(Value::as_bool) == Some(true);
+    let closes_at = challenge.get("closes_at").and_then(Value::as_str);
+    json!({
+        "id": challenge.get("id"),
+        "slug": challenge.get("slug"),
+        "title": challenge.get("title"),
+        "state": challenge.get("state").or_else(|| challenge.get("phase")),
+        "closes_at": challenge.get("closes_at"),
+        "practice": practice,
+        "always_open": folder::always_open(closes_at, practice),
+    })
+}
+
+/// The human line for one `list_summary`.
+fn list_line(challenge: &Value) -> String {
+    let field = |key: &str| challenge[key].as_str().unwrap_or("").to_string();
+    let closes = match (
+        challenge["always_open"].as_bool(),
+        challenge["closes_at"].as_str(),
+    ) {
+        (Some(true), _) => ", always open".to_string(),
+        (_, Some(at)) => format!(", closes {at}"),
+        _ => String::new(),
+    };
+    format!("{}  {}{closes}", field("id"), field("title"))
 }
 
 fn fetch_detail(active: &Active, challenge_id: &str) -> Result<ChallengeDetail> {
@@ -124,6 +139,9 @@ pub struct StartRequest<'a> {
     pub client: Client,
     pub claude_bin: &'a str,
     pub codex_bin: &'a str,
+    pub opencode_bin: &'a str,
+    /// OpenCode only, and required for it: `provider/model`.
+    pub model: Option<&'a str>,
     pub started_at: &'a str,
     /// Print the command instead of starting the client.
     pub print: bool,
@@ -219,12 +237,32 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
         client,
         claude_bin,
         codex_bin,
+        opencode_bin,
+        model,
         started_at,
         print,
         separate_codex_home,
         now,
     } = request;
     folder::validate_challenge_id(challenge_id)?;
+    match (client, model) {
+        (Client::Opencode, None) => {
+            return Err(Error::new(
+                "OpenCode challenges need --model provider/model, on your own provider API key \
+                 (for example --model openai/gpt-5.5)",
+            ))
+        }
+        (Client::Opencode, Some(model)) => {
+            opencode::check_model(model)?;
+        }
+        (_, Some(_)) => {
+            return Err(Error::new(
+                "--model is for --agent opencode; Claude Code and Codex use your own default \
+                 model",
+            ))
+        }
+        (_, None) => {}
+    }
     if separate_codex_home && client != Client::Codex {
         return Err(Error::new(
             "--separate-codex-home is for Codex; pass --agent codex with it",
@@ -251,6 +289,7 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
                 .as_deref()
                 .unwrap_or(&roots.codex_home),
         )?,
+        Client::Opencode => opencode::guard_no_managed_config()?,
     }
 
     // Memory first: a changed approval stops here, before any request.
@@ -259,7 +298,13 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
     let reconciled = reconcile(approval.as_ref(), &inventory);
     reconciled.require_reviewed()?;
     let inherited = inherited_daycare_env();
-    let session_client = client::for_client(client, claude_bin, codex_bin, &roots);
+    let programs = client::Programs {
+        claude: claude_bin.to_string(),
+        codex: codex_bin.to_string(),
+        opencode: opencode_bin.to_string(),
+        opencode_model: model.map(str::to_string),
+    };
+    let session_client = client::for_client(client, &programs, &roots);
     let program = session_client.program().to_string();
 
     // A client's refusals (memory it cannot leave out, approved bytes that
@@ -423,7 +468,11 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
                 plan.excluded.len()
             );
             if let Some(path) = &plan.settings_file {
-                println!("Claude Code settings for this session: {}", path.display());
+                println!(
+                    "{} settings for this session: {}",
+                    session_client.product_name(),
+                    path.display()
+                );
             }
             println!();
             println!("Run this yourself, in your own terminal:");
@@ -455,6 +504,39 @@ fn notes(client: Client) -> Vec<&'static str> {
             "Codex's workspace-write sandbox limits writes to this folder, not reads.",
             "Needs Codex CLI 0.158.0 or newer.",
         ]),
+        Client::Opencode => notes.extend([
+            "OpenCode has no sandbox: its shell commands run as you, under your own OpenCode \
+             permissions.",
+            "OpenCode runs on your own provider API key. Daycare checks only which kind of login \
+             it is, and never stores or sends the key.",
+            "Daycare has not checked what OpenCode resolves. Run `challenge start` without \
+             --print to have it checked before OpenCode starts.",
+            "Needs OpenCode 1.18.33 or newer.",
+        ]),
     }
     notes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_list_says_always_open_for_a_practice_challenge() {
+        let dated = list_summary(&json!({"id": "c-1", "title": "Signup Rescue",
+            "closes_at": "2026-11-20T00:00:00Z"}));
+        assert_eq!(
+            list_line(&dated),
+            "c-1  Signup Rescue, closes 2026-11-20T00:00:00Z"
+        );
+        assert_eq!(dated["always_open"], false);
+        let far = list_summary(&json!({"id": "p-1", "title": "Practice sheet",
+            "closes_at": "9999-12-30T00:00:00Z"}));
+        assert_eq!(list_line(&far), "p-1  Practice sheet, always open");
+        assert_eq!(far["always_open"], true);
+        let flagged = list_summary(&json!({"id": "p-2", "title": "Practice", "practice": true}));
+        assert_eq!(list_line(&flagged), "p-2  Practice, always open");
+        let bare = list_summary(&json!({"id": "c-2", "title": "Receipts"}));
+        assert_eq!(list_line(&bare), "c-2  Receipts");
+    }
 }
