@@ -340,7 +340,8 @@ enum ChallengeAction {
     ///
     /// OpenCode needs --model provider/model and runs on your own provider
     /// API key only: a subscription login for that provider stops the start.
-    /// Daycare never reads, stores or sends the key.
+    /// Daycare checks only which kind of login it is, and never stores or
+    /// sends the key.
     ///
     /// What it does not cover: deny rules bind Claude's file tools, not shell
     /// commands, Codex's sandbox limits writes, not reads, and OpenCode has

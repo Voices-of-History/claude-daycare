@@ -493,8 +493,8 @@ fn notes(client: Client) -> Vec<&'static str> {
         Client::Opencode => notes.extend([
             "OpenCode has no sandbox: its shell commands run as you, under your own OpenCode \
              permissions.",
-            "OpenCode runs on your own provider API key. Daycare never reads, stores or sends \
-             the key.",
+            "OpenCode runs on your own provider API key. Daycare checks only which kind of login \
+             it is, and never stores or sends the key.",
             "Daycare has not checked what OpenCode resolves. Run `challenge start` without \
              --print to have it checked before OpenCode starts.",
             "Needs OpenCode 1.18.33 or newer.",

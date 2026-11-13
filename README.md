@@ -379,7 +379,7 @@ approved.
 your own API key for that provider only. Before anything is set up, the
 runner reads the login type OpenCode stored for that provider (never the key)
 and stops on a subscription or organisation login; run `opencode auth login`
-and enter an API key, or set the provider's key variable. Daycare never reads,
+and enter an API key, or set the provider's key variable. Daycare never
 stores or sends the key. HOME is not redirected. The session runs with:
 
 - `OPENCODE_DISABLE_PROJECT_CONFIG`, `_CLAUDE_CODE`, `_EXTERNAL_SKILLS`,
