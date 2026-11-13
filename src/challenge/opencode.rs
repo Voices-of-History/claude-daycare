@@ -28,21 +28,30 @@
 //! custom tool (code OpenCode imports in every session), a change to
 //! OpenCode's own `build` agent, instruction files and skill folders listed
 //! in the owner's config (`instructions`, `skills`), and a managed config.
+//! It also refuses a name that has an approved item and a different
+//! unapproved one (an MCP server, agent, mode or skill in two places):
+//! OpenCode merges them into one, and Daycare switches off by name. And it
+//! refuses while any OpenCode config file could not be read or parsed, since
+//! what OpenCode loads from it was not seen.
 //!
 //! Before launch, `verify` proves what OpenCode resolved, with the session's
 //! own folder, environment and flags: `opencode debug config` (every source
 //! merged, including `~/.opencode/opencode.json`, which OpenCode reads after
-//! `OPENCODE_CONFIG` and so could undo it) and `opencode debug agent build`
-//! (the agent the session starts as, and its permission rules, against which
-//! every unapproved skill must evaluate to `deny`).
+//! `OPENCODE_CONFIG` and so could undo it) and `opencode debug agent <name>`
+//! for every agent that stays enabled (`build`, the agent the session starts
+//! as, `plan`, and every approved agent): under each one's own permission
+//! rules, which come after the top-level ones, every unapproved skill must
+//! evaluate to `deny`.
 //!
 //! Provider keys: a challenge runs on the owner's own API key only. The
-//! runner reads the login type for the chosen provider from OpenCode's
-//! `auth.json` (never the key) and refuses a subscription login (OAuth) or an
-//! organisation login. It never stores, prints or forwards a key: OpenCode
-//! reads its own logins, and the owner's environment is inherited as it is.
-//! The chosen provider's API-key variable is kept even where other challenge
-//! sessions drop it (`ANTHROPIC_API_KEY` for `anthropic/*`).
+//! runner reads login types from OpenCode's `auth.json` (never a key) and
+//! refuses a subscription login (OAuth) for the chosen provider, any
+//! organisation login (`wellknown`), and a provider that is a subscription
+//! by its id (`github-copilot*`). It never stores, prints or forwards a key:
+//! OpenCode reads its own logins. The chosen provider's API-key variables
+//! are kept even where other challenge sessions drop them
+//! (`ANTHROPIC_API_KEY` for `anthropic/*`); every other provider's in
+//! `PROVIDER_KEY_ENV` is removed from the session.
 //!
 //! Checked against the OpenCode 1.18.33 source and the captures in
 //! `tests/fixtures/opencode-1.18.33/`; the runner refuses an older OpenCode.
@@ -91,6 +100,90 @@ pub const MIN_VERSION: (u64, u64, u64) = (1, 18, 33);
 /// A skill name nobody has. It must evaluate to `deny` too, so a skill the
 /// scan did not see is hidden as well.
 pub const PROBE_SKILL: &str = "daycare-unlisted-skill-probe";
+
+/// OpenCode's own primary agents. Each stays enabled unless the owner's
+/// config changes it without approval, so each is checked before launch.
+pub const NATIVE_PRIMARY_AGENTS: [&str; 2] = [DEFAULT_AGENT, "plan"];
+
+/// The API-key variables OpenCode reads for model providers (the `env` names
+/// models.dev lists), by provider id. A challenge session keeps the chosen
+/// provider's and drops every other name here. General-purpose credentials
+/// that other tools use too (`GITHUB_TOKEN`, `AWS_*`, Google application
+/// credentials) are not listed: dropping them would break the owner's own
+/// tools, and `enabled_providers` keeps OpenCode off those providers anyway.
+pub const PROVIDER_KEY_ENV: [(&str, &[&str]); 31] = [
+    ("anthropic", &["ANTHROPIC_API_KEY"]),
+    ("openai", &["OPENAI_API_KEY"]),
+    (
+        "google",
+        &["GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"],
+    ),
+    ("openrouter", &["OPENROUTER_API_KEY"]),
+    ("opencode", &["OPENCODE_API_KEY"]),
+    ("groq", &["GROQ_API_KEY"]),
+    ("xai", &["XAI_API_KEY"]),
+    ("deepseek", &["DEEPSEEK_API_KEY"]),
+    ("mistral", &["MISTRAL_API_KEY"]),
+    ("zai", &["ZHIPU_API_KEY"]),
+    ("zhipuai", &["ZHIPU_API_KEY"]),
+    ("togetherai", &["TOGETHER_API_KEY"]),
+    ("fireworks-ai", &["FIREWORKS_API_KEY"]),
+    ("cerebras", &["CEREBRAS_API_KEY"]),
+    ("deepinfra", &["DEEPINFRA_API_KEY"]),
+    ("perplexity", &["PERPLEXITY_API_KEY"]),
+    ("cohere", &["COHERE_API_KEY"]),
+    ("moonshotai", &["MOONSHOT_API_KEY"]),
+    ("alibaba", &["DASHSCOPE_API_KEY"]),
+    ("huggingface", &["HF_TOKEN"]),
+    ("nvidia", &["NVIDIA_API_KEY"]),
+    ("vercel", &["AI_GATEWAY_API_KEY"]),
+    ("azure", &["AZURE_API_KEY"]),
+    ("baseten", &["BASETEN_API_KEY"]),
+    ("chutes", &["CHUTES_API_KEY"]),
+    ("venice", &["VENICE_API_KEY"]),
+    ("upstage", &["UPSTAGE_API_KEY"]),
+    ("minimax", &["MINIMAX_API_KEY"]),
+    ("inception", &["INCEPTION_API_KEY"]),
+    ("requesty", &["REQUESTY_API_KEY"]),
+    ("ollama-cloud", &["OLLAMA_API_KEY"]),
+];
+
+/// The chosen provider's API-key variables, where known.
+pub fn provider_key_env(provider: &str) -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = PROVIDER_KEY_ENV
+        .iter()
+        .filter(|(name, _)| *name == provider)
+        .flat_map(|(_, keys)| keys.iter().copied())
+        .chain(
+            crate::agent::opencode::provider_key_names(provider)
+                .iter()
+                .copied(),
+        )
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Every other provider's API-key variables: what a session for `provider`
+/// drops.
+pub fn other_provider_key_env(provider: &str) -> Vec<&'static str> {
+    let keep = provider_key_env(provider);
+    let mut names: Vec<&'static str> = PROVIDER_KEY_ENV
+        .iter()
+        .flat_map(|(_, keys)| keys.iter().copied())
+        .filter(|name| !keep.contains(name))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Provider ids that are a subscription with no API key of their own
+/// (GitHub Copilot signs in with the owner's GitHub account).
+pub fn is_subscription_provider(provider: &str) -> bool {
+    provider.starts_with("github-copilot")
+}
 
 fn refuse(what: impl std::fmt::Display) -> Error {
     Error::new(format!("Daycare did not start OpenCode: {what}"))
@@ -149,29 +242,52 @@ pub fn auth_file(home: &Path) -> PathBuf {
         .join("opencode/auth.json")
 }
 
-/// Challenges run on the owner's own API key. Reads only the login type
-/// OpenCode stored for `provider`: an API key, or none (a key from the
-/// environment or the owner's provider config), passes; a subscription
-/// (OAuth) or organisation login refuses. The key is never read out.
+/// Challenges run on the owner's own API key. Refuses a provider that is a
+/// subscription by its id (`github-copilot*`). Reads only the login types
+/// OpenCode stored in `auth.json`, never a key: any organisation login
+/// (`opencode auth login <url>`, stored as `wellknown`) refuses, because
+/// OpenCode loads that organisation's remote config and token in every
+/// session; for the chosen provider, an API key or none (a key from the
+/// environment or the owner's provider config) passes, and anything else (a
+/// subscription login, OAuth) refuses.
 pub fn check_api_key_login(auth_file: &Path, provider: &str) -> Result<()> {
+    if is_subscription_provider(provider) {
+        return Err(refuse(format!(
+            "{provider} is a subscription with no API key of its own, and challenges run on \
+             your own provider API key only. Choose another provider with --model"
+        )));
+    }
     let Ok(bytes) = std::fs::read(auth_file) else {
         return Ok(());
     };
     let Ok(logins) = serde_json::from_slice::<Value>(&bytes) else {
         return Ok(());
     };
-    let kind = logins
-        .get(provider)
-        .and_then(|login| login.get("type"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let kind_of = |login: &Value| {
+        login
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let organisation = logins.as_object().is_some_and(|all| {
+        all.values()
+            .any(|login| kind_of(login).as_deref() == Some("wellknown"))
+    });
+    let kind = logins.get(provider).and_then(kind_of);
     drop(logins);
+    if organisation {
+        return Err(refuse(
+            "OpenCode is signed in to an organisation (`opencode auth login <url>`), and \
+             OpenCode then loads that organisation's configuration and token in every session. \
+             Daycare cannot leave that out of a challenge. Run `opencode auth logout` and remove \
+             the organisation login, then start again",
+        ));
+    }
     match kind.as_deref() {
         None | Some("api") => Ok(()),
         Some(other) => {
             let what = match other {
                 "oauth" => "a subscription login (OAuth)",
-                "wellknown" => "an organisation login",
                 _ => "a login that is not an API key",
             };
             Err(refuse(format!(
@@ -229,7 +345,13 @@ pub struct Selection {
     pub unapproved_plugins: Vec<(String, String)>,
     pub unapproved_tools: Vec<PathBuf>,
     pub unapproved_instructions: Vec<PathBuf>,
-    /// Item ids of what the generated config switches off, and how.
+    /// A name with an approved item and a different, unapproved one (an MCP
+    /// server, agent or skill in two places). OpenCode merges them into one,
+    /// so neither a switch nor a deny rule can leave out only the unapproved
+    /// one: a refusal, one line each.
+    pub conflicts: Vec<String>,
+    /// Item ids of what the generated config (or `--pure`) switches off, and
+    /// how. Nothing else is listed.
     pub excluded: Vec<(String, &'static str)>,
 }
 
@@ -257,43 +379,73 @@ fn plugin_label(item: &Item) -> String {
     }
 }
 
-/// Sort the owner's OpenCode items by the approval.
+/// The names OpenCode merges same-named entries under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Space {
+    Mcp,
+    /// Agents and the old `mode` entries, which OpenCode turns into agents.
+    Agent,
+    Skill,
+}
+
+/// Where one item is, for a refusal: its file, and its key in a config file.
+fn place(item: &Item) -> String {
+    let key = ["agent", "mode"].into_iter().find(|key| {
+        item.id
+            .ends_with(&format!("#{key}.{}", item.name.as_deref().unwrap_or("")))
+    });
+    match key {
+        Some(key) => format!("{} (`{key}`)", item.path.display()),
+        None => item.path.display().to_string(),
+    }
+}
+
+fn conflict_line(space: Space, name: &str, approved: &[&Item], declined: &[&Item]) -> String {
+    let (what, merged) = match space {
+        Space::Mcp => ("MCP server", "merges same-named MCP servers into one"),
+        Space::Agent => ("agent", "merges same-named agents into one"),
+        Space::Skill => ("skill", "offers one skill per name"),
+    };
+    let places = |items: &[&Item]| items.iter().map(|item| place(item)).collect::<Vec<_>>();
+    format!(
+        "  the {what} {name:?}: you approved the one in {}, but not the one in {} (not \
+         approved; OpenCode {merged}, so Daycare cannot leave out only the one you did not \
+         approve)",
+        names(places(approved)),
+        names(places(declined))
+    )
+}
+
+/// Sort the owner's OpenCode items by the approval. Same-named MCP servers,
+/// agents (with modes) and skills are judged together, since OpenCode
+/// merges them: all approved, or an unapproved one with the same hash as an
+/// approved one (the same bytes, a symlinked `~/.opencode`), is approved; all
+/// unapproved is switched off by name; approved beside a different
+/// unapproved one is a conflict, which refuses.
 pub fn select(items: &[Item], reconciled: &Reconciled) -> Selection {
     let mut selection = Selection::default();
+    type Sides<'a> = (Vec<&'a Item>, Vec<&'a Item>);
+    let mut named: std::collections::BTreeMap<(Space, String), Sides<'_>> = Default::default();
     for item in items.iter().filter(|item| item.client == Client::Opencode) {
         let approved = reconciled.scope_of(&item.id).is_some();
-        let name = item.name.clone().unwrap_or_default();
+        let space = match item.kind {
+            Kind::McpServer => Some(Space::Mcp),
+            Kind::Agent => Some(Space::Agent),
+            Kind::Skill => Some(Space::Skill),
+            _ => None,
+        };
+        if let Some(space) = space {
+            let sides = named
+                .entry((space, item.name.clone().unwrap_or_default()))
+                .or_default();
+            if approved {
+                sides.0.push(item);
+            } else {
+                sides.1.push(item);
+            }
+            continue;
+        }
         match (item.kind, approved) {
-            (Kind::McpServer, true) => {
-                selection.approved_mcp.insert(name);
-            }
-            (Kind::McpServer, false) => {
-                selection.unapproved_mcp.insert(name);
-                selection.excluded.push((
-                    item.id.clone(),
-                    "enabled: false in Daycare's OpenCode config",
-                ));
-            }
-            (Kind::Agent, true) => {
-                selection.approved_agents.insert(name);
-            }
-            (Kind::Agent, false) => {
-                selection.unapproved_agents.insert(name);
-                selection.excluded.push((
-                    item.id.clone(),
-                    "disable: true in Daycare's OpenCode config",
-                ));
-            }
-            (Kind::Skill, true) => {
-                selection.approved_skills.insert(name);
-            }
-            (Kind::Skill, false) => {
-                selection.unapproved_skills.insert(name);
-                selection.excluded.push((
-                    item.id.clone(),
-                    "a skill deny rule in Daycare's OpenCode config",
-                ));
-            }
             (Kind::Plugin, true) => selection.approved_plugins.push(match &item.name {
                 None => ApprovedPlugin::File(item.path.clone()),
                 Some(spec) => ApprovedPlugin::Spec(
@@ -311,20 +463,44 @@ pub fn select(items: &[Item], reconciled: &Reconciled) -> Selection {
             _ => {}
         }
     }
-    // An approved name is never switched off, even if an unapproved item
-    // shares it (the same agent in two files).
-    let approved_agents = selection.approved_agents.clone();
-    selection
-        .unapproved_agents
-        .retain(|name| !approved_agents.contains(name));
-    let approved_skills = selection.approved_skills.clone();
-    selection
-        .unapproved_skills
-        .retain(|name| !approved_skills.contains(name));
-    let approved_mcp = selection.approved_mcp.clone();
-    selection
-        .unapproved_mcp
-        .retain(|name| !approved_mcp.contains(name));
+    for ((space, name), (approved, declined)) in named {
+        if !approved.is_empty() {
+            let hashes: BTreeSet<&str> = approved.iter().map(|item| item.sha256.as_str()).collect();
+            let different: Vec<&Item> = declined
+                .iter()
+                .copied()
+                .filter(|item| !hashes.contains(item.sha256.as_str()))
+                .collect();
+            if !different.is_empty() {
+                selection
+                    .conflicts
+                    .push(conflict_line(space, &name, &approved, &different));
+            }
+            match space {
+                Space::Mcp => selection.approved_mcp.insert(name),
+                Space::Agent => selection.approved_agents.insert(name),
+                Space::Skill => selection.approved_skills.insert(name),
+            };
+            continue;
+        }
+        let how = match space {
+            Space::Mcp => "enabled: false in Daycare's OpenCode config",
+            Space::Agent => "disable: true in Daycare's OpenCode config",
+            Space::Skill => "a skill deny rule in Daycare's OpenCode config",
+        };
+        // OpenCode's own build agent is never switched off: a change to it
+        // refuses instead (`refusals`), so it is not listed as left out.
+        if !(space == Space::Agent && name == DEFAULT_AGENT) {
+            for item in &declined {
+                selection.excluded.push((item.id.clone(), how));
+            }
+        }
+        match space {
+            Space::Mcp => selection.unapproved_mcp.insert(name),
+            Space::Agent => selection.unapproved_agents.insert(name),
+            Space::Skill => selection.unapproved_skills.insert(name),
+        };
+    }
     if selection.pure() {
         for (id, _) in &selection.unapproved_plugins {
             selection.excluded.push((
@@ -333,12 +509,13 @@ pub fn select(items: &[Item], reconciled: &Reconciled) -> Selection {
             ));
         }
     }
+    selection.excluded.sort();
     selection
 }
 
 /// What stops an OpenCode start before anything is set up, one line each.
 pub fn refusals(selection: &Selection) -> Vec<String> {
-    let mut lines = Vec::new();
+    let mut lines = selection.conflicts.clone();
     for path in &selection.unapproved_instructions {
         lines.push(format!(
             "  {} (not approved; OpenCode reads it in every session and has no setting to leave \
@@ -715,6 +892,70 @@ pub fn evaluate(rules: &[Value], permission: &str, pattern: &str) -> String {
         .to_string()
 }
 
+/// The agents to check with `opencode debug agent <name>`: OpenCode's own
+/// primary agents and every approved agent, unless the resolved config
+/// (`opencode debug config`) switches it off. `build` is always first and
+/// always checked: it is the agent the session starts as.
+pub fn agents_to_check(config_text: &str, selection: &Selection) -> Result<Vec<String>> {
+    let config: Value = serde_json::from_str(config_text)
+        .map_err(|_| refuse_after_setup("`opencode debug config` did not print JSON"))?;
+    let disabled = |name: &str| {
+        ["agent", "mode"].iter().any(|key| {
+            config
+                .get(*key)
+                .and_then(|entries| entries.get(name))
+                .and_then(|agent| agent.get("disable"))
+                .and_then(Value::as_bool)
+                == Some(true)
+        })
+    };
+    let mut names = vec![DEFAULT_AGENT.to_string()];
+    let others: BTreeSet<&str> = NATIVE_PRIMARY_AGENTS
+        .iter()
+        .copied()
+        .chain(selection.approved_agents.iter().map(String::as_str))
+        .filter(|name| *name != DEFAULT_AGENT && !disabled(name))
+        .collect();
+    names.extend(others.into_iter().map(str::to_string));
+    Ok(names)
+}
+
+/// Every skill the owner did not approve, and a made-up one, must evaluate
+/// to `deny` under one agent's resolved permission rules.
+fn check_skills_denied(agent: &Value, name: &str, selection: &Selection) -> Result<()> {
+    let rules = agent
+        .get("permission")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            refuse_after_setup(format!(
+                "OpenCode's report on the agent {name:?} lists no permission rules to check"
+            ))
+        })?;
+    let offered: Vec<String> = selection
+        .unapproved_skills
+        .iter()
+        .map(String::as_str)
+        .chain([PROBE_SKILL])
+        .filter(|skill| evaluate(&rules, "skill", skill) != "deny")
+        .map(|skill| {
+            if skill == PROBE_SKILL {
+                "any skill Daycare did not find".to_string()
+            } else {
+                skill.to_string()
+            }
+        })
+        .collect();
+    if !offered.is_empty() {
+        return Err(refuse_after_setup(format!(
+            "OpenCode's permission rules would still offer the agent {name:?} skills you did not \
+             approve ({}); your own OpenCode permissions allow them after Daycare's deny rule",
+            names(offered)
+        )));
+    }
+    Ok(())
+}
+
 /// `opencode debug agent build`: the agent the session starts as. It must be
 /// OpenCode's own (or a change to it the owner approved), and every skill
 /// the owner did not approve must be denied to it.
@@ -739,47 +980,41 @@ pub fn verify_default_agent(text: &str, expected: &Expected<'_>) -> Result<Vec<S
              did not approve"
         )));
     }
-    let rules = agent
-        .get("permission")
-        .and_then(Value::as_array)
-        .cloned()
-        .ok_or_else(|| {
-            refuse_after_setup("OpenCode's agent report lists no permission rules to check")
-        })?;
-    let offered: Vec<String> = selection
-        .unapproved_skills
-        .iter()
-        .map(String::as_str)
-        .chain([PROBE_SKILL])
-        .filter(|name| evaluate(&rules, "skill", name) != "deny")
-        .map(|name| {
-            if name == PROBE_SKILL {
-                "any skill Daycare did not find".to_string()
-            } else {
-                name.to_string()
-            }
-        })
-        .collect();
-    if !offered.is_empty() {
-        return Err(refuse_after_setup(format!(
-            "OpenCode's permission rules would still offer skills you did not approve ({}); \
-             your own OpenCode permissions allow them after Daycare's deny rule",
-            names(offered)
-        )));
-    }
-    let mut proven = vec![format!(
+    check_skills_denied(&agent, DEFAULT_AGENT, selection)?;
+    Ok(vec![format!(
         "the session starts as OpenCode's own {DEFAULT_AGENT:?} agent (opencode debug agent \
          {DEFAULT_AGENT})"
-    )];
-    proven.push(if selection.approved_skills.is_empty() {
-        "every skill is hidden from it: you approved none".to_string()
+    )])
+}
+
+/// `opencode debug agent <name>` for an agent other than `build` that stays
+/// enabled: every skill the owner did not approve must be denied to it too,
+/// since the session can switch to it or hand it a task.
+pub fn verify_agent_skills(text: &str, name: &str, expected: &Expected<'_>) -> Result<()> {
+    let agent: Value = serde_json::from_str(text)
+        .map_err(|_| refuse_after_setup("`opencode debug agent` did not print JSON"))?;
+    if agent.get("name").and_then(Value::as_str) != Some(name) {
+        return Err(refuse_after_setup(format!(
+            "OpenCode did not resolve the agent {name:?}"
+        )));
+    }
+    check_skills_denied(&agent, name, expected.selection)
+}
+
+/// The proven line for the skill checks over every agent that can run.
+pub fn skills_proven(agents: &[String], selection: &Selection) -> String {
+    if selection.approved_skills.is_empty() {
+        format!(
+            "every skill is hidden from the agents that can run ({}): you approved none",
+            names(agents)
+        )
     } else {
         format!(
-            "the only skills it is offered are ones you approved ({})",
+            "the only skills offered to the agents that can run ({}) are ones you approved ({})",
+            names(agents),
             names(&selection.approved_skills)
         )
-    });
-    Ok(proven)
+    }
 }
 
 /// The checks the owner makes once OpenCode starts.
@@ -840,7 +1075,7 @@ pub fn debug_output(launch: &LaunchSpec, args: &[&str], flags: &[String]) -> Res
         .args(flags)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .output()
         .map_err(|error| {
             Error::new(format!(
@@ -849,21 +1084,14 @@ pub fn debug_output(launch: &LaunchSpec, args: &[&str], flags: &[String]) -> Res
             ))
         })?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let last: String = stderr
-            .lines()
-            .rev()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("")
-            .trim()
-            .chars()
-            .take(300)
-            .collect();
+        // OpenCode's own error output is never repeated: it can quote the
+        // owner's configuration, keys included.
         return Err(refuse_after_setup(format!(
-            "`opencode {}` failed ({}){}{last}, so Daycare cannot check what OpenCode would load",
+            "`opencode {}` failed ({}), so Daycare cannot check what OpenCode would load. \
+             Its own message is not shown, since it can quote your configuration; run `opencode \
+             debug config` yourself to see it",
             args.join(" "),
-            output.status,
-            if last.is_empty() { "" } else { ": " }
+            output.status
         )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -1142,6 +1370,302 @@ mod tests {
         assert_eq!(parse_version("nothing"), None);
         assert!(parse_version("1.18.32").unwrap() < MIN_VERSION);
         assert_eq!(percent_decode("a%20b%zz%2"), "a b%zz%2");
+    }
+
+    fn item(kind: Kind, path: &str, key: Option<&str>, name: &str, sha: &str) -> Item {
+        let path = PathBuf::from(path);
+        let id_name = match key {
+            Some(key) => format!("{key}.{name}"),
+            None => name.to_string(),
+        };
+        Item {
+            id: crate::approval::scan::item_id(Client::Opencode, kind, &path, Some(&id_name)),
+            client: Client::Opencode,
+            kind,
+            path,
+            name: Some(name.to_string()),
+            bytes: 1,
+            sha256: sha.repeat(64),
+            origin: None,
+        }
+    }
+
+    fn approving(items: &[&Item]) -> Reconciled {
+        Reconciled {
+            approved: items
+                .iter()
+                .map(|item| ((*item).clone(), crate::approval::Scope::Private))
+                .collect(),
+            ..Reconciled::default()
+        }
+    }
+
+    #[test]
+    fn a_declined_item_sharing_an_approved_name_refuses_unless_it_is_the_same_bytes() {
+        let config = "/h/.config/opencode/opencode.json";
+        let dot = "/h/.opencode/opencode.json";
+        // An approved server, and a different declined one of the same name
+        // that OpenCode would merge over it.
+        let approved = item(Kind::McpServer, config, None, "docs", "a");
+        let declined = item(Kind::McpServer, dot, None, "docs", "b");
+        let selection = select(
+            &[approved.clone(), declined.clone()],
+            &approving(&[&approved]),
+        );
+        let lines = refusals(&selection).join("\n");
+        assert!(
+            lines.contains("MCP server \"docs\"") && lines.contains(dot),
+            "{lines}"
+        );
+        // It is not reported as left out: nothing switches it off.
+        assert!(selection.excluded.is_empty(), "{:?}", selection.excluded);
+        assert!(
+            !challenge_config(Path::new("/f/AGENTS.md"), "openai", &selection)
+                .to_string()
+                .contains("docs")
+        );
+
+        // The same bytes (a symlinked ~/.opencode) are one item: approved,
+        // not refused, not switched off.
+        let twin = item(Kind::McpServer, dot, None, "docs", "a");
+        let selection = select(&[approved.clone(), twin], &approving(&[&approved]));
+        assert!(refusals(&selection).is_empty());
+        assert!(selection.approved_mcp.contains("docs"));
+        assert!(selection.unapproved_mcp.is_empty());
+        assert!(selection.excluded.is_empty());
+
+        // An approved `agent.build` stanza beside a declined agents/build.md;
+        // a `mode` stanza beside an `agent` stanza of the same name; a skill
+        // in two folders.
+        let build = item(Kind::Agent, config, Some("agent"), "build", "c");
+        let build_md = item(
+            Kind::Agent,
+            "/h/.config/opencode/agents/build.md",
+            None,
+            "build",
+            "d",
+        );
+        let mode = item(Kind::Agent, config, Some("mode"), "focus", "e");
+        let agent = item(Kind::Agent, config, Some("agent"), "focus", "f");
+        let skill = item(
+            Kind::Skill,
+            "/h/.config/opencode/skills/notes",
+            None,
+            "notes",
+            "1",
+        );
+        let other_skill = item(Kind::Skill, "/h/.opencode/skills/notes", None, "notes", "2");
+        let all = [
+            build.clone(),
+            build_md,
+            mode.clone(),
+            agent,
+            skill.clone(),
+            other_skill,
+        ];
+        let selection = select(&all, &approving(&[&build, &mode, &skill]));
+        let lines = refusals(&selection);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        let text = lines.join("\n");
+        assert!(
+            text.contains("agent \"build\"") && text.contains("agents/build.md"),
+            "{text}"
+        );
+        assert!(
+            text.contains("agent \"focus\"")
+                && text.contains("(`mode`)")
+                && text.contains("(`agent`)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("skill \"notes\"") && text.contains("/h/.opencode/skills"),
+            "{text}"
+        );
+        assert!(selection.excluded.is_empty(), "{:?}", selection.excluded);
+    }
+
+    #[test]
+    fn excluded_lists_only_what_the_generated_config_switches_off() {
+        let config = "/h/.config/opencode/opencode.json";
+        let search = item(Kind::McpServer, config, None, "search", "a");
+        let reviewer = item(Kind::Agent, config, Some("agent"), "reviewer", "b");
+        let build = item(Kind::Agent, config, Some("agent"), "build", "c");
+        let notes = item(
+            Kind::Skill,
+            "/h/.config/opencode/skills/notes",
+            None,
+            "notes",
+            "d",
+        );
+        let selection = select(
+            &[search.clone(), reviewer.clone(), build, notes.clone()],
+            &Reconciled::default(),
+        );
+        let ids: Vec<&str> = selection
+            .excluded
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
+        // The build agent refuses instead of being switched off.
+        let mut wanted = vec![search.id.as_str(), reviewer.id.as_str(), notes.id.as_str()];
+        wanted.sort();
+        assert_eq!(ids, wanted);
+        assert!(refusals(&selection).join("\n").contains("\"build\""));
+        let generated = challenge_config(Path::new("/f/AGENTS.md"), "openai", &selection);
+        assert_eq!(generated["mcp"]["search"]["enabled"], false);
+        assert_eq!(generated["agent"]["reviewer"]["disable"], true);
+        assert_eq!(generated["permission"]["skill"]["notes"], "deny");
+    }
+
+    #[test]
+    fn every_agent_that_stays_enabled_is_checked_and_its_own_rules_count() {
+        let mut selection = selection();
+        selection.approved_agents.insert("reviewer".into());
+        selection.unapproved_agents.remove("reviewer");
+        selection.approved_agents.insert("gone".into());
+        let config = json!({"agent": {"plan": {"prompt": "x"}, "gone": {"disable": true}}});
+        assert_eq!(
+            agents_to_check(&config.to_string(), &selection).unwrap(),
+            ["build", "plan", "reviewer"]
+        );
+        let switched_off =
+            json!({"agent": {"gone": {"disable": true}}, "mode": {"plan": {"disable": true}}});
+        assert_eq!(
+            agents_to_check(&switched_off.to_string(), &selection).unwrap(),
+            ["build", "reviewer"]
+        );
+        // The top-level rules deny every skill but `keep`; the agent's own
+        // rules come after them and allow one back.
+        let top = vec![
+            json!({"permission": "*", "action": "allow", "pattern": "*"}),
+            json!({"permission": "skill", "action": "deny", "pattern": "*"}),
+            json!({"permission": "skill", "action": "deny", "pattern": "secret-notes"}),
+            json!({"permission": "skill", "action": "allow", "pattern": "keep"}),
+        ];
+        let agent =
+            |rules: Vec<Value>| json!({"name": "reviewer", "native": false, "permission": rules});
+        verify_agent_skills(
+            &agent(top.clone()).to_string(),
+            "reviewer",
+            &expected(&selection),
+        )
+        .unwrap();
+        let mut allowing = top.clone();
+        allowing.push(json!({"permission": "skill", "action": "allow", "pattern": "*"}));
+        let error = verify_agent_skills(
+            &agent(allowing).to_string(),
+            "reviewer",
+            &expected(&selection),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("\"reviewer\"") && error.contains("secret-notes"),
+            "{error}"
+        );
+        assert!(error.contains("did not find"), "{error}");
+        // A report for another agent is not this one's.
+        let error = verify_agent_skills(&agent(top).to_string(), "plan", &expected(&selection))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("\"plan\""), "{error}");
+        let line = skills_proven(&["build".into(), "plan".into()], &selection);
+        assert!(
+            line.contains("(build, plan)") && line.contains("approved (keep)"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn only_the_chosen_providers_key_variables_are_kept() {
+        assert_eq!(provider_key_env("openai"), ["OPENAI_API_KEY"]);
+        assert_eq!(
+            provider_key_env("google"),
+            ["GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"]
+        );
+        let dropped = other_provider_key_env("openai");
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "GROQ_API_KEY",
+            "GEMINI_API_KEY",
+            "XAI_API_KEY",
+        ] {
+            assert!(dropped.contains(&name), "{name}");
+        }
+        assert!(!dropped.contains(&"OPENAI_API_KEY"));
+        // A provider Daycare does not know keeps nothing extra and drops
+        // every known one.
+        assert!(provider_key_env("my-gateway").is_empty());
+        assert!(other_provider_key_env("my-gateway").contains(&"OPENAI_API_KEY"));
+        // The visit list is covered.
+        for (provider, _) in PROVIDER_KEY_ENV {
+            for name in crate::agent::opencode::provider_key_names(provider) {
+                assert!(
+                    provider_key_env(provider).contains(name),
+                    "{provider} {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_organisation_login_and_a_subscription_provider_refuse() {
+        let base = crate::testdir::unique_dir("daycare-opencode-wellknown");
+        let auth = base.join("auth.json");
+        // `opencode auth login https://...` stores this under the URL.
+        std::fs::write(
+            &auth,
+            r#"{"openai":{"type":"api","key":"sk-planted-2"},"https://opencode.example.test":{"type":"wellknown","key":"ORG_TOKEN","token":"org-planted-token-1"}}"#,
+        )
+        .unwrap();
+        for provider in ["openai", "anthropic"] {
+            let error = check_api_key_login(&auth, provider)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("organisation"), "{error}");
+            assert!(
+                !error.contains("org-planted-token-1") && !error.contains("example.test"),
+                "{error}"
+            );
+        }
+        std::fs::write(&auth, r#"{"openai":{"type":"api","key":"sk-planted-2"}}"#).unwrap();
+        check_api_key_login(&auth, "openai").unwrap();
+        for provider in ["github-copilot", "github-copilot-enterprise"] {
+            let error = check_api_key_login(&auth, provider)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("subscription"), "{error}");
+        }
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_failed_debug_command_says_its_exit_status_and_never_what_it_printed() {
+        let base = crate::testdir::unique_dir("daycare-opencode-debug-fail");
+        let program = base.join("opencode");
+        crate::testdir::write_executable(
+            &program,
+            "#!/bin/sh\necho 'parse error near: \"apiKey\": \"sk-planted-stderr-123456789\"' >&2\nexit 3\n",
+        );
+        let launch = LaunchSpec {
+            program: program.to_string_lossy().into_owned(),
+            args: vec![],
+            cwd: base.clone(),
+            env_set: Default::default(),
+            env_unset: vec![],
+        };
+        let error = debug_output(&launch, &["debug", "config"], &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("opencode debug config") && error.contains('3'),
+            "{error}"
+        );
+        assert!(
+            !error.contains("sk-planted") && !error.contains("apiKey"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(base).ok();
     }
 
     #[test]

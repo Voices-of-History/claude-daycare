@@ -243,6 +243,12 @@ fn absolute_env(name: &str) -> Option<PathBuf> {
 pub struct Inventory {
     pub items: Vec<Item>,
     pub warnings: Vec<String>,
+    /// OpenCode config files that exist but could not be read or parsed, or
+    /// that name a `{file:…}` that could not be read. What OpenCode loads
+    /// from them was not seen, so an OpenCode challenge refuses while any is
+    /// listed. The warnings say why, one line each.
+    #[serde(skip)]
+    pub opencode_unreadable: Vec<PathBuf>,
 }
 
 impl Inventory {
@@ -262,6 +268,7 @@ pub fn scan(roots: &Roots) -> Inventory {
         items: BTreeMap::new(),
         seen_files: std::collections::BTreeSet::new(),
         warnings: Vec::new(),
+        opencode_unreadable: std::collections::BTreeSet::new(),
     };
     scanner.claude();
     scanner.codex();
@@ -272,6 +279,7 @@ pub fn scan(roots: &Roots) -> Inventory {
     Inventory {
         items: scanner.items.into_values().collect(),
         warnings,
+        opencode_unreadable: scanner.opencode_unreadable.into_iter().collect(),
     }
 }
 
@@ -280,6 +288,7 @@ struct Scanner<'a> {
     items: BTreeMap<String, Item>,
     seen_files: std::collections::BTreeSet<(Client, PathBuf)>,
     warnings: Vec<String>,
+    opencode_unreadable: std::collections::BTreeSet<PathBuf>,
 }
 
 impl Scanner<'_> {
@@ -641,7 +650,12 @@ impl Scanner<'_> {
     }
 
     /// The `mcp`, `agent`, `mode` and `plugin` entries of one OpenCode config
-    /// file. Each entry is hashed as its canonical JSON and never shown.
+    /// file. Each entry is hashed as its canonical JSON, never shown. An
+    /// `agent` or `mode` entry's id carries its key (`#agent.<name>`,
+    /// `#mode.<name>`), so the two are separate items even where they share
+    /// a name. A plugin listed more than once is one item whose hash covers
+    /// every entry for it. A config that cannot be read or parsed is a
+    /// warning and is listed in `opencode_unreadable`.
     fn opencode_config_file(&mut self, path: &Path) {
         let text = match fs::read_to_string(path) {
             Ok(text) => text,
@@ -649,16 +663,18 @@ impl Scanner<'_> {
             Err(error) => {
                 self.warnings
                     .push(format!("could not read {}: {error}", path.display()));
+                self.opencode_unreadable.insert(path.to_path_buf());
                 return;
             }
         };
-        if text.trim().is_empty() {
+        if text.trim_start_matches('\u{feff}').trim().is_empty() {
             return;
         }
         let Some(value) = parse_jsonc(&text) else {
             // Never include the parse error: it can quote the file.
             self.warnings
                 .push(format!("{} is not valid JSON; skipped", path.display()));
+            self.opencode_unreadable.insert(path.to_path_buf());
             return;
         };
         for (key, kind) in [
@@ -670,17 +686,22 @@ impl Scanner<'_> {
                 continue;
             };
             for (name, stanza) in entries {
-                let canonical = stanza.to_string();
-                self.push(Item::new(
+                let (bytes, sha256) = self.opencode_digest(path, stanza);
+                let mut item = Item::new(
                     Client::Opencode,
                     kind,
                     path.to_path_buf(),
                     Some(name.clone()),
-                    canonical.len() as u64,
-                    sha256_hex(canonical.as_bytes()),
-                ));
+                    bytes,
+                    sha256,
+                );
+                if kind == Kind::Agent {
+                    item.id = item_id(Client::Opencode, kind, path, Some(&format!("{key}.{name}")));
+                }
+                self.push(item);
             }
         }
+        let mut plugins: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
         for entry in value
             .get("plugin")
             .and_then(serde_json::Value::as_array)
@@ -695,17 +716,119 @@ impl Scanner<'_> {
                 },
                 _ => continue,
             };
-            let canonical = entry.to_string();
+            plugins.entry(spec).or_default().push(entry.clone());
+        }
+        for (spec, mut entries) in plugins {
+            // One entry hashes as itself; a repeated spec, as all of them.
+            let stanza = if entries.len() == 1 {
+                entries.remove(0)
+            } else {
+                serde_json::Value::Array(entries)
+            };
+            let (bytes, sha256) = self.opencode_digest(path, &stanza);
             self.push(Item::new(
                 Client::Opencode,
                 Kind::Plugin,
                 path.to_path_buf(),
                 Some(spec),
-                canonical.len() as u64,
-                sha256_hex(canonical.as_bytes()),
+                bytes,
+                sha256,
             ));
         }
     }
+
+    /// One OpenCode stanza's size and hash: its canonical JSON, plus the
+    /// bytes of every file it names with `{file:…}`. OpenCode pastes those
+    /// files into the config text in every session, so an edit to one is an
+    /// edit to the stanza and needs a fresh review. `{env:…}` names are
+    /// hashed as written; their values are credentials, not memory.
+    fn opencode_digest(&mut self, config: &Path, stanza: &serde_json::Value) -> (u64, String) {
+        let canonical = stanza.to_string();
+        let references = opencode_file_references(stanza);
+        if references.is_empty() {
+            return (canonical.len() as u64, sha256_hex(canonical.as_bytes()));
+        }
+        let mut bytes = canonical.len() as u64;
+        let mut digest = canonical;
+        for reference in references {
+            let file = resolve_opencode_file(&reference, config, &self.roots.home);
+            match fs::read(&file) {
+                Ok(content) => {
+                    bytes += content.len() as u64;
+                    digest.push_str(&format!("\n{{file:{reference}}} {}", sha256_hex(&content)));
+                }
+                Err(error) => {
+                    digest.push_str(&format!("\n{{file:{reference}}} unreadable"));
+                    self.warnings.push(format!(
+                        "{} names {}, which could not be read: {error}",
+                        config.display(),
+                        file.display()
+                    ));
+                    self.opencode_unreadable.insert(config.to_path_buf());
+                }
+            }
+        }
+        (bytes, sha256_hex(digest.as_bytes()))
+    }
+}
+
+/// The references of one kind (`file` or `env`) in every string of a JSON
+/// value, keys included, sorted and unique: `{file:~/k.txt}` gives `~/k.txt`.
+/// OpenCode substitutes them in the config text before parsing it.
+fn opencode_references(value: &serde_json::Value, kind: &str) -> Vec<String> {
+    fn walk(value: &serde_json::Value, into: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(text) => into.push(text.clone()),
+            serde_json::Value::Array(items) => items.iter().for_each(|item| walk(item, into)),
+            serde_json::Value::Object(map) => {
+                for (key, item) in map {
+                    into.push(key.clone());
+                    walk(item, into);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut strings = Vec::new();
+    walk(value, &mut strings);
+    let open = format!("{{{kind}:");
+    let mut found = std::collections::BTreeSet::new();
+    for text in &strings {
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find(&open) {
+            let after = &rest[at + open.len()..];
+            let Some(close) = after.find('}') else { break };
+            if close > 0 {
+                found.insert(after[..close].to_string());
+            }
+            rest = &after[close + 1..];
+        }
+    }
+    found.into_iter().collect()
+}
+
+/// The `{file:…}` references in a stanza (see `opencode_references`).
+pub fn opencode_file_references(value: &serde_json::Value) -> Vec<String> {
+    opencode_references(value, "file")
+}
+
+/// The `{env:…}` variable names in a stanza (see `opencode_references`).
+pub fn opencode_env_references(value: &serde_json::Value) -> Vec<String> {
+    opencode_references(value, "env")
+}
+
+/// Where OpenCode reads a `{file:…}` reference from: `~/` is the home
+/// folder, an absolute path is itself, anything else is relative to the
+/// config file's folder.
+pub fn resolve_opencode_file(reference: &str, config: &Path, home: &Path) -> PathBuf {
+    if let Some(rest) = reference.strip_prefix("~/") {
+        return home.join(rest);
+    }
+    let path = Path::new(reference);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    config.parent().unwrap_or(Path::new("/")).join(path)
 }
 
 /// OpenCode's global config files, in the order it merges them: the global
@@ -824,6 +947,8 @@ fn walk_files_following(dir: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> 
 /// files. `None` when it does not parse; the error is never kept, since it
 /// can quote the file.
 pub fn parse_jsonc(text: &str) -> Option<serde_json::Value> {
+    // A byte order mark is not part of the JSON; OpenCode reads past it.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     let mut in_string = false;
@@ -1528,6 +1653,172 @@ x = 1
             serde_json::to_string(&scan(&roots)).unwrap(),
             serde_json::to_string(&after).unwrap()
         );
+        fs::remove_dir_all(base).ok();
+    }
+
+    fn opencode_item<'a>(inventory: &'a Inventory, id_suffix: &str) -> &'a Item {
+        inventory
+            .for_client(Client::Opencode)
+            .find(|item| item.id.ends_with(id_suffix))
+            .unwrap_or_else(|| panic!("no item ending {id_suffix}: {:?}", inventory.items))
+    }
+
+    #[test]
+    fn a_file_an_opencode_stanza_names_is_part_of_its_hash() {
+        let base = unique_dir("daycare-scan-opencode-file");
+        let roots = roots(&base);
+        let config = roots.opencode_config_dir.join("opencode.json");
+        write(
+            &config,
+            r#"{"mcp":{"docs":{"type":"remote","url":"https://x.test/mcp","headers":{"Authorization":"Bearer {file:~/.secrets/docs-token}","X-Team":"{env:TEAM_ID}"}}},
+               "agent":{"reviewer":{"prompt":"{file:./prompts/review.md}"}}}"#,
+        );
+        write(
+            &roots.home.join(".secrets/docs-token"),
+            "FILE-TOKEN-SECRET-1\n",
+        );
+        write(
+            &roots.opencode_config_dir.join("prompts/review.md"),
+            "REVIEW-PROMPT-FROM-FILE\n",
+        );
+        let before = scan(&roots);
+        assert!(
+            before.opencode_unreadable.is_empty(),
+            "{:?}",
+            before.warnings
+        );
+        let json = serde_json::to_string(&before).unwrap();
+        for secret in ["FILE-TOKEN-SECRET-1", "REVIEW-PROMPT-FROM-FILE"] {
+            assert!(!json.contains(secret), "{json}");
+        }
+        let docs = opencode_item(&before, "#docs").clone();
+        let reviewer = opencode_item(&before, "#agent.reviewer").clone();
+        // Not the stanza alone: the files it pulls in are hashed too.
+        let stanza_only = |name: &str, key: &str| {
+            let value = parse_jsonc(&fs::read_to_string(&config).unwrap()).unwrap();
+            sha256_hex(value[key][name].to_string().as_bytes())
+        };
+        assert_ne!(docs.sha256, stanza_only("docs", "mcp"));
+        assert_ne!(reviewer.sha256, stanza_only("reviewer", "agent"));
+        // Editing a referenced file changes the item, so the approval no
+        // longer covers it; the stanza and the id are unchanged.
+        write(
+            &roots.opencode_config_dir.join("prompts/review.md"),
+            "EDITED-PROMPT\n",
+        );
+        write(&roots.home.join(".secrets/docs-token"), "ROTATED\n");
+        let after = scan(&roots);
+        assert_eq!(opencode_item(&after, "#agent.reviewer").id, reviewer.id);
+        assert_ne!(
+            opencode_item(&after, "#agent.reviewer").sha256,
+            reviewer.sha256
+        );
+        assert_ne!(opencode_item(&after, "#docs").sha256, docs.sha256);
+        // A missing one is a warning, and the config is listed as one
+        // OpenCode could not load as Daycare saw it.
+        fs::remove_file(roots.home.join(".secrets/docs-token")).unwrap();
+        let missing = scan(&roots);
+        assert_eq!(missing.opencode_unreadable, vec![config.clone()]);
+        assert!(
+            missing
+                .warnings
+                .iter()
+                .any(|w| w.contains(".secrets/docs-token")),
+            "{:?}",
+            missing.warnings
+        );
+        assert_eq!(
+            opencode_file_references(
+                &serde_json::json!({"a": "{file:x} and {file:y}", "{file:k}": 1})
+            ),
+            ["k", "x", "y"]
+        );
+        assert_eq!(
+            resolve_opencode_file("./p.md", &config, &roots.home),
+            roots.opencode_config_dir.join("./p.md")
+        );
+        assert_eq!(
+            resolve_opencode_file("/abs/p.md", &config, &roots.home),
+            PathBuf::from("/abs/p.md")
+        );
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn agent_and_mode_entries_are_separate_items_and_a_repeated_plugin_is_one() {
+        let base = unique_dir("daycare-scan-opencode-keys");
+        let roots = roots(&base);
+        let config = roots.opencode_config_dir.join("opencode.json");
+        let text = |token: &str| {
+            format!(
+                r#"{{"agent":{{"focus":{{"prompt":"A"}}}},"mode":{{"focus":{{"prompt":"M"}}}},
+                    "plugin":["opencode-notify",["opencode-notify",{{"token":"{token}"}}]]}}"#
+            )
+        };
+        write(&config, &text("one"));
+        let before = scan(&roots);
+        let agent = opencode_item(&before, "#agent.focus").clone();
+        let mode = opencode_item(&before, "#mode.focus").clone();
+        assert_ne!(agent.id, mode.id);
+        assert_eq!(agent.name.as_deref(), Some("focus"));
+        assert_eq!(mode.name.as_deref(), Some("focus"));
+        assert_ne!(agent.sha256, mode.sha256);
+        let plugins: Vec<&Item> = before
+            .for_client(Client::Opencode)
+            .filter(|item| item.kind == Kind::Plugin)
+            .collect();
+        assert_eq!(plugins.len(), 1, "{plugins:?}");
+        // The second listing's options are part of the one item's hash.
+        write(&config, &text("two"));
+        let after = scan(&roots);
+        let plugin = |inventory: &Inventory| {
+            inventory
+                .for_client(Client::Opencode)
+                .find(|item| item.kind == Kind::Plugin)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(plugin(&before).id, plugin(&after).id);
+        assert_ne!(plugin(&before).sha256, plugin(&after).sha256);
+        assert_eq!(opencode_item(&after, "#mode.focus").sha256, mode.sha256);
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn an_opencode_config_that_cannot_be_parsed_is_listed_and_a_bom_is_read_past() {
+        let base = unique_dir("daycare-scan-opencode-broken");
+        let roots = roots(&base);
+        let config = roots.opencode_config_dir.join("opencode.json");
+        write(
+            &config,
+            "\u{feff}{\"mcp\":{\"docs\":{\"type\":\"remote\",\"url\":\"https://x.test\"}}}",
+        );
+        let inventory = scan(&roots);
+        assert!(
+            inventory.opencode_unreadable.is_empty(),
+            "{:?}",
+            inventory.warnings
+        );
+        opencode_item(&inventory, "#docs");
+        // OpenCode substitutes an unquoted {env:...} before parsing; Daycare
+        // cannot read the file as OpenCode will, so it is listed, quoting
+        // nothing.
+        let dot = roots.opencode_dot_dir.join("opencode.json");
+        write(
+            &dot,
+            r#"{"mcp":{"x":{"port": {env:PORT}, "k": "dot-secret-555"}}}"#,
+        );
+        let inventory = scan(&roots);
+        assert_eq!(inventory.opencode_unreadable, vec![dot.clone()]);
+        let text = inventory.warnings.join("\n");
+        assert!(
+            text.contains("not valid JSON") && !text.contains("dot-secret-555"),
+            "{text}"
+        );
+        // Not part of the scan's JSON: the warnings say it.
+        let json = serde_json::to_string(&inventory).unwrap();
+        assert!(!json.contains("opencode_unreadable"), "{json}");
+        assert!(parse_jsonc("\u{feff}{\"a\": 1}").is_some());
         fs::remove_dir_all(base).ok();
     }
 

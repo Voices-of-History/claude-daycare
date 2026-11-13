@@ -829,6 +829,7 @@ mod tests {
         Inventory {
             items,
             warnings: vec![],
+            ..Inventory::default()
         }
     }
 

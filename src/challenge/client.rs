@@ -14,8 +14,8 @@
 //! - `verify`: before launch. Codex renders its prompt with `codex debug
 //!   prompt-input`, and every part must be Codex's own or match something the
 //!   owner approved, by hash (`verify`). OpenCode shows its resolved config
-//!   and its starting agent (`opencode debug config`, `debug agent build`),
-//!   checked against the approval (`opencode`). Claude Code has no such
+//!   and each agent that stays enabled (`opencode debug config`, `debug agent
+//!   <name>`), checked against the approval (`opencode`). Claude Code has no such
 //!   command, so its verification is the checks the owner runs once it starts.
 //! - `interactive`: the launch itself, inheriting this terminal (`launch`).
 //! - `meter`: one weekly-allowance reading for `meter/start.json` and
@@ -667,12 +667,23 @@ impl ChallengeClient for OpencodeClient {
         let expected = self.expected(input, &provider, &selection);
         let config = opencode::debug_output(&plan.launch, &["debug", "config"], &plan.config_args)?;
         let mut proven = opencode::verify_challenge_config(&config, &expected)?;
-        let agent = opencode::debug_output(
-            &plan.launch,
-            &["debug", "agent", opencode::DEFAULT_AGENT],
-            &plan.config_args,
-        )?;
-        proven.extend(opencode::verify_default_agent(&agent, &expected)?);
+        // Every agent that stays enabled, not only the one it starts as: the
+        // session can switch to another or hand it a task, and an agent's own
+        // permission rules apply after the top-level ones.
+        let agents = opencode::agents_to_check(&config, &selection)?;
+        for name in &agents {
+            let text = opencode::debug_output(
+                &plan.launch,
+                &["debug", "agent", name.as_str()],
+                &plan.config_args,
+            )?;
+            if name == opencode::DEFAULT_AGENT {
+                proven.extend(opencode::verify_default_agent(&text, &expected)?);
+            } else {
+                opencode::verify_agent_skills(&text, name, &expected)?;
+            }
+        }
+        proven.push(opencode::skills_proven(&agents, &selection));
         Ok(Verification {
             proven,
             manual: opencode::manual_checks(),

@@ -514,6 +514,22 @@ pub fn opencode_plan(
 ) -> Result<OpencodePlan> {
     use super::opencode;
     let provider = opencode::check_model(model)?;
+    if !input.inventory.opencode_unreadable.is_empty() {
+        let files: Vec<String> = input
+            .inventory
+            .opencode_unreadable
+            .iter()
+            .map(|path| format!("  {}", path.display()))
+            .collect();
+        return Err(Error::new(format!(
+            "this challenge cannot start in OpenCode yet, because Daycare could not read these \
+             OpenCode config files, so it cannot tell what OpenCode would load from them:\n{}\n\
+             Each must be JSON (comments and trailing commas are fine), and every {{file:…}} it \
+             names must be readable. Fix them or move them aside for the challenge, then start \
+             again",
+            files.join("\n")
+        )));
+    }
     let selection = opencode::select(&input.inventory.items, input.reconciled);
     let refusals = opencode::refusals(&selection);
     if !refusals.is_empty() {
@@ -543,10 +559,13 @@ pub fn opencode_plan(
         env_set.insert(switch.to_string(), "1".to_string());
     }
     // The owner's own key for the chosen provider stays, even where other
-    // challenge sessions drop it (`ANTHROPIC_API_KEY`).
-    let keep = crate::agent::opencode::provider_key_names(&provider);
+    // challenge sessions drop it (`ANTHROPIC_API_KEY`). Every other
+    // provider's key is dropped.
+    let keep = opencode::provider_key_env(&provider);
+    let mut stripped: Vec<&str> = opencode::STRIPPED_OPENCODE_CHALLENGE_ENV.to_vec();
+    stripped.extend(opencode::other_provider_key_env(&provider));
     let env_unset: Vec<String> = input
-        .env_unset(&opencode::STRIPPED_OPENCODE_CHALLENGE_ENV)
+        .env_unset(&stripped)
         .into_iter()
         .filter(|name| !keep.contains(&name.as_str()))
         .collect();
@@ -645,6 +664,7 @@ mod tests {
         Inventory {
             items,
             warnings: vec![],
+            ..Inventory::default()
         }
     }
 

@@ -465,18 +465,26 @@ where
 
 /// A stand-in for `opencode` (1.18.33) for challenge tests. It never calls a
 /// model. `--version` prints `FAKE_OPENCODE_VERSION` (default 1.18.33).
-/// `debug config` and `debug agent build` merge the config the way OpenCode
+/// `debug config` and `debug agent <name>` merge the config the way OpenCode
 /// does, from the same places, under the same switches: the global folder's
 /// `config.json`, `opencode.json` and `opencode.jsonc`, then
 /// `OPENCODE_CONFIG`, then (unless `OPENCODE_DISABLE_PROJECT_CONFIG`) the
 /// folder's `opencode.json`, then `OPENCODE_CONFIG_CONTENT`, then each config
 /// folder (the global one, `~/.opencode` and `OPENCODE_CONFIG_DIR`) with its
-/// markdown agents and plugin files. Objects merge deeply, `instructions` and
-/// `plugin` lists concatenate, other lists are replaced. Each debug run
-/// records its argv and environment as `debug-config.*` or `debug-agent.*`
-/// in `record`. Anything else is the interactive session: it records
-/// `call.argv`, `call.env` and `call.cwd`, prints `OPENCODE-SCREEN`, and exits
-/// with `FAKE_OPENCODE_EXIT` (default 0).
+/// markdown agents and plugin files. A file may start with a byte order
+/// mark; `{env:NAME}` and then `{file:path}` are substituted in its text
+/// before it is parsed (`~/` is HOME, a relative path is the file's folder).
+/// Objects merge deeply, `instructions` and `plugin` lists concatenate, other
+/// lists are replaced. `debug agent <name>` answers for OpenCode's own agents
+/// (`build`, `plan`, `general`, `explore`) and every agent or mode in the
+/// config, unless it is `disable: true`: its rules are OpenCode's default
+/// `*: allow`, then the top-level `permission`, then the agent's own
+/// `permission` (and legacy `tools`). Each debug run records its argv and
+/// environment as `debug-config.*` or `debug-agent.*` in `record`, each
+/// agent check also as `debug-agent-<name>.argv` (`/` as `_`), and the agents
+/// asked about, in order, in `debug-agents`. Anything else is the
+/// interactive session: it records `call.argv`, `call.env` and `call.cwd`,
+/// prints `OPENCODE-SCREEN`, and exits with `FAKE_OPENCODE_EXIT` (default 0).
 pub fn fake_opencode(dir: &Path, record: &Path) -> PathBuf {
     std::fs::create_dir_all(record).unwrap();
     let script = dir.join("fake-opencode");
@@ -498,11 +506,19 @@ def dump(name):
 if args == ['--version']:
     print(os.environ.get('FAKE_OPENCODE_VERSION', '1.18.33')); sys.exit(0)
 home = pathlib.Path(os.environ['HOME'])
+import re
 def load(path):
     try:
-        text = pathlib.Path(path).read_text()
+        text = pathlib.Path(path).read_text(encoding='utf-8-sig')
     except (FileNotFoundError, NotADirectoryError):
         return {}
+    text = re.sub(r'\{env:([^}]+)\}', lambda m: os.environ.get(m.group(1), ''), text)
+    def file_ref(m):
+        ref = m.group(1)
+        ref = str(home / ref[2:]) if ref.startswith('~/') else ref
+        target = pathlib.Path(ref) if os.path.isabs(ref) else pathlib.Path(path).parent / ref
+        return json.dumps(target.read_text().strip())[1:-1]
+    text = re.sub(r'\{file:([^}]+)\}', file_ref, text)
     return json.loads(text) if text.strip() else {}
 def merge(target, source):
     for key, value in source.items():
@@ -553,7 +569,7 @@ for folder in dirs:
                         key, _, value = line.partition(':')
                         value = value.strip()
                         if key.strip():
-                            data[key.strip()] = json.loads(value) if value in ('true', 'false') else value
+                            data[key.strip()] = json.loads(value) if value in ('true', 'false') or value[:1] in ('{', '[') else value
                 merge(config['agent'], {name: dict(data, prompt=body.strip())})
     for sub in ['plugin', 'plugins']:
         root = folder / sub
@@ -577,14 +593,22 @@ def rules(permission):
         else:
             out.extend({'permission': key, 'action': action, 'pattern': pattern} for pattern, action in value.items())
     return out
+native = {'build': 'primary', 'plan': 'primary', 'general': 'subagent', 'explore': 'subagent'}
 if args[:2] == ['debug', 'agent']:
-    dump('debug-agent')
-    over = config['agent'].get(args[2], {})
-    if args[2] != 'build' or over.get('disable'):
-        print(f'agent {args[2]} not found', file=sys.stderr); sys.exit(1)
-    agent = {'name': 'build', 'options': {}, 'mode': 'primary', 'native': True,
+    name = args[2] if len(args) > 2 else ''
+    dump('debug-agent'); dump('debug-agent-' + name.replace('/', '_'))
+    with open(record / 'debug-agents', 'a') as asked:
+        asked.write(name + '\n')
+    over = merge(merge({}, config['mode'].get(name, {})), config['agent'].get(name, {}))
+    known = name in native or name in config['agent'] or name in config['mode']
+    if not known or over.get('disable'):
+        print(f'agent {name} not found', file=sys.stderr); sys.exit(1)
+    tools = [{'permission': key, 'action': 'allow' if on else 'deny', 'pattern': '*'}
+             for key, on in (over.get('tools') or {}).items()]
+    agent = {'name': name, 'options': {}, 'native': name in native,
+             'mode': over.get('mode', native.get(name, 'primary' if name in config['mode'] else 'all')),
              'permission': [{'permission': '*', 'action': 'allow', 'pattern': '*'}]
-                           + rules(config.get('permission')) + rules(over.get('permission'))}
+                           + rules(config.get('permission')) + rules(over.get('permission')) + tools}
     if over.get('prompt'):
         agent['prompt'] = over['prompt']
     print(json.dumps(agent, indent=2)); sys.exit(0)

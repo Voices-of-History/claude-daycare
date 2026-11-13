@@ -911,6 +911,7 @@ mod tests {
         let inventory = Inventory {
             items: vec![private.clone(), public.clone(), unreviewed.clone()],
             warnings: vec![],
+            ..Inventory::default()
         };
         let reconciled = Reconciled {
             approved: vec![(private, Scope::Private), (public, Scope::Public)],
@@ -979,6 +980,7 @@ mod tests {
         let inventory = Inventory {
             items: vec![skill_item.clone(), claude_md_item.clone()],
             warnings: vec![],
+            ..Inventory::default()
         };
         let reconciled = Reconciled {
             unreviewed: vec![skill_item, claude_md_item],
@@ -1039,6 +1041,7 @@ mod tests {
         let inventory = Inventory {
             items: vec![item.clone()],
             warnings: vec![],
+            ..Inventory::default()
         };
         let reconciled = Reconciled {
             unreviewed: vec![item],
@@ -1093,6 +1096,7 @@ mod tests {
         let inventory = Inventory {
             items: items.clone(),
             warnings: vec![],
+            ..Inventory::default()
         };
         let reconciled = Reconciled {
             unreviewed: items,

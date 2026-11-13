@@ -23,6 +23,15 @@ const TOKEN: &str = "dev_token_do_not_leak_9876";
 const ANTHROPIC_KEY: &str = "sk-ant-planted-api-key-4242";
 const OPENAI_KEY: &str = "sk-openai-planted-key-5353";
 const MCP_SECRET: &str = "oc-mcp-secret-777";
+/// Other providers' keys, planted in the runner's environment: a session
+/// for one provider must carry none of them.
+const OTHER_KEYS: [(&str, &str); 5] = [
+    ("GROQ_API_KEY", "gsk_planted-groq-key-6161"),
+    ("GEMINI_API_KEY", "AIza-planted-gemini-key-7272"),
+    ("XAI_API_KEY", "xai-planted-key-8383"),
+    ("OPENROUTER_API_KEY", "sk-or-planted-key-9494"),
+    ("DEEPSEEK_API_KEY", "sk-deepseek-planted-key-1515"),
+];
 const MODEL: &str = "openai/gpt-5.5";
 const CSV: &str = "name,email\nAda,ada@example.test\n";
 
@@ -107,6 +116,7 @@ impl Machine {
             .env("DAYCARE_DEVICE_TOKEN", TOKEN)
             .env("ANTHROPIC_API_KEY", ANTHROPIC_KEY)
             .env("OPENAI_API_KEY", OPENAI_KEY)
+            .envs(OTHER_KEYS)
             .env(
                 "OPENCODE_CONFIG_CONTENT",
                 r#"{"instructions":["/planted.md"]}"#,
@@ -263,6 +273,14 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// The `error` of a refused `--json` run, as the owner reads it.
+fn error_text(output: &Output) -> String {
+    json_of(output)["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no error: {}", stdout(output)))
+        .to_string()
+}
+
 fn json_of(output: &Output) -> Value {
     serde_json::from_str(stdout(output).trim())
         .unwrap_or_else(|_| panic!("not one JSON value: {}", stdout(output)))
@@ -300,8 +318,9 @@ fn mode(path: &Path) -> u32 {
 }
 
 /// The session (or a check run with its environment) never sees a Daycare
-/// credential, a planted config source, or a key for another provider.
-fn assert_session_env(env: &HashMap<String, String>, what: &str, keep_anthropic: bool) {
+/// credential or a planted config source, and of the provider keys planted
+/// in the runner's environment it keeps only `provider`'s.
+fn assert_session_env(env: &HashMap<String, String>, what: &str, provider: &str) {
     for name in [
         "DAYCARE_DEVICE_TOKEN",
         "DAYCARE_TOKEN_FILE",
@@ -317,11 +336,38 @@ fn assert_session_env(env: &HashMap<String, String>, what: &str, keep_anthropic:
     for (name, value) in env {
         assert!(!value.contains(TOKEN), "{what} carries the token in {name}");
     }
-    assert_eq!(
-        env.get("ANTHROPIC_API_KEY").is_some(),
-        keep_anthropic,
-        "{what}: ANTHROPIC_API_KEY"
-    );
+    let kept = daycare_runner::challenge::opencode::provider_key_env(provider);
+    assert!(!kept.is_empty(), "{provider} has no known key variable");
+    let planted: Vec<(&str, &str)> = [
+        ("ANTHROPIC_API_KEY", ANTHROPIC_KEY),
+        ("OPENAI_API_KEY", OPENAI_KEY),
+    ]
+    .into_iter()
+    .chain(OTHER_KEYS)
+    .collect();
+    for (name, value) in planted {
+        if kept.contains(&name) {
+            assert_eq!(
+                env.get(name).map(String::as_str),
+                Some(value),
+                "{what}: {name}"
+            );
+        } else {
+            assert!(
+                !env.contains_key(name),
+                "{what} kept another provider's {name}"
+            );
+            assert!(
+                env.values().all(|text| !text.contains(value)),
+                "{what} carries {name}'s value"
+            );
+        }
+    }
+    // Every other provider's key variable the runner knows is dropped, set
+    // or not.
+    for name in daycare_runner::challenge::opencode::other_provider_key_env(provider) {
+        assert!(!env.contains_key(name), "{what} kept {name}");
+    }
     assert_eq!(
         env.get("DAYCARE_CHALLENGE_SESSION").map(String::as_str),
         Some("entry-1")
@@ -480,7 +526,7 @@ fn an_interactive_opencode_start_checks_what_opencode_resolved_then_runs_the_pri
         std::fs::canonicalize(machine.folder()).unwrap()
     );
     let env = env_file(&machine.recorded("call.env").unwrap());
-    assert_session_env(&env, "the OpenCode session", false);
+    assert_session_env(&env, "the OpenCode session", "openai");
     assert_eq!(
         env.get("OPENCODE_CONFIG").map(PathBuf::from),
         Some(config_file.clone())
@@ -500,16 +546,23 @@ fn an_interactive_opencode_start_checks_what_opencode_resolved_then_runs_the_pri
         let argv = lines(&machine.recorded(&format!("{name}.argv")).unwrap());
         assert!(argv.contains(&"--pure".to_string()), "{name}: {argv:?}");
         let env = env_file(&machine.recorded(&format!("{name}.env")).unwrap());
-        assert_session_env(&env, name, false);
+        assert_session_env(&env, name, "openai");
         assert_eq!(
             env.get("OPENCODE_CONFIG").map(PathBuf::from),
             Some(config_file.clone())
         );
     }
+    // Every agent that stays enabled was asked about: OpenCode's own
+    // primary agents (no agent of the owner's is approved here).
+    assert_eq!(
+        lines(&machine.recorded("debug-agents").unwrap()),
+        ["build", "plan"]
+    );
     let proven = strings(&result["verification"]["proven"]).join("\n");
     for needle in [
         "opencode debug config",
         "opencode debug agent build",
+        "(build, plan)",
         "approved (docs)",
         "the only provider it can use is openai",
         "--pure",
@@ -583,7 +636,7 @@ fn an_anthropic_model_keeps_the_owners_anthropic_key() {
     let out = machine.start("anthropic/claude-sonnet-5", &[]);
     assert!(out.status.success(), "{}{}", stdout(&out), stderr(&out));
     let env = env_file(&machine.recorded("call.env").unwrap());
-    assert_session_env(&env, "the OpenCode session", true);
+    assert_session_env(&env, "the OpenCode session", "anthropic");
     assert_eq!(
         env.get("ANTHROPIC_API_KEY").map(String::as_str),
         Some(ANTHROPIC_KEY)
@@ -639,6 +692,30 @@ fn what_opencode_cannot_leave_out_refuses_before_any_request() {
         "{}",
         stdout(&out)
     );
+
+    // An organisation login, stored under its URL, whatever the provider;
+    // and a provider that is a subscription by its id.
+    machine.write(
+        ".local/share/opencode/auth.json",
+        &json!({"openai": {"type": "api", "key": OPENAI_KEY},
+                "https://opencode.example.test": {"type": "wellknown", "key": "ORG_TOKEN",
+                                                  "token": "org-planted-token-2"}})
+        .to_string(),
+    );
+    for args in [&["--print"][..], &[]] {
+        let out = machine.start(MODEL, args);
+        assert!(!out.status.success());
+        let text = stdout(&out);
+        assert!(text.contains("organisation"), "{text}");
+        assert!(!text.contains("org-planted-token-2"), "{text}");
+    }
+    machine.write(
+        ".local/share/opencode/auth.json",
+        &json!({"openai": {"type": "api", "key": OPENAI_KEY}}).to_string(),
+    );
+    let out = machine.start("github-copilot/gpt-5.5", &["--print"]);
+    assert!(!out.status.success());
+    assert!(stdout(&out).contains("subscription"), "{}", stdout(&out));
 
     assert_eq!(platform_calls(&platform), 0);
     assert!(!machine.folder().exists());
@@ -745,4 +822,281 @@ fn plugins_stay_out_with_pure_or_refuse_beside_an_approved_one() {
     let result = json_of(&out);
     let proven = strings(&result["verification"]["proven"]).join("\n");
     assert!(!proven.contains("--pure"), "{proven}");
+}
+
+/// `opencode debug config` as the session would resolve it, from the
+/// generated config the last start wrote.
+fn resolved_config(machine: &Machine) -> Value {
+    let output = Command::new(&machine.opencode_bin)
+        .args(["--pure", "debug", "config"])
+        .current_dir(machine.folder())
+        .env("HOME", &machine.fake_home)
+        .env(
+            "OPENCODE_CONFIG",
+            machine
+                .daycare_home
+                .join("challenges/c-1/opencode-config.json"),
+        )
+        .env("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("OPENCODE_CONFIG_CONTENT")
+        .env_remove("OPENCODE_CONFIG_DIR")
+        .output()
+        .unwrap();
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn a_declined_item_with_an_approved_items_name_refuses_the_start() {
+    let machine = Machine::new("oc-same-name");
+    machine.populate();
+    let platform = platform();
+    machine.enroll(&platform);
+    // `docs` is approved in ~/.config/opencode; a different `docs` in
+    // ~/.opencode, which OpenCode merges over it, is not.
+    machine.write(
+        ".opencode/opencode.json",
+        &json!({"mcp": {"docs": {"type": "remote", "url": "https://declined.example.test/mcp",
+                                 "headers": {"Authorization": "Bearer declined-mcp-secret-4545"}}}})
+        .to_string(),
+    );
+    let approve_config_dir_only = |extra: &'static str| {
+        machine.approve(move |item| {
+            let opencode = item["client"] == "opencode";
+            let in_config = item["path"]
+                .as_str()
+                .unwrap()
+                .contains("/.config/opencode/");
+            let chosen = item["kind"] == "agents_md"
+                || item["name"] == "docs"
+                || item["name"] == "keep"
+                || item["name"] == extra;
+            (opencode && in_config && chosen).then_some("private")
+        })
+    };
+    approve_config_dir_only("docs");
+    for args in [&["--print"][..], &[]] {
+        let out = machine.start(MODEL, args);
+        assert!(!out.status.success(), "{}", stdout(&out));
+        let text = error_text(&out);
+        assert!(
+            text.contains("MCP server \"docs\"") && text.contains(".opencode/opencode.json"),
+            "{text}"
+        );
+        assert!(!text.contains("declined-mcp-secret-4545") && !text.contains("declined.example"));
+    }
+    std::fs::remove_file(machine.fake_home.join(".opencode/opencode.json")).unwrap();
+
+    // An approved change to the build agent beside a declined agents/build.md.
+    let global = machine.config_dir().join("opencode.json");
+    let mut config = read_json(&global);
+    config["agent"]["build"] = json!({"prompt": "APPROVED-BUILD-PROMPT"});
+    std::fs::write(&global, config.to_string()).unwrap();
+    machine.write(
+        ".config/opencode/agents/build.md",
+        "DECLINED-BUILD-PROMPT\n",
+    );
+    machine.approve(|item| {
+        let opencode = item["client"] == "opencode";
+        let chosen = item["kind"] == "agents_md"
+            || item["name"] == "docs"
+            || item["name"] == "keep"
+            || item["id"]
+                .as_str()
+                .unwrap()
+                .ends_with("opencode.json#agent.build");
+        (opencode && chosen).then_some("private")
+    });
+    let out = machine.start(MODEL, &[]);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let text = error_text(&out);
+    assert!(
+        text.contains("agent \"build\"") && text.contains("agents/build.md"),
+        "{text}"
+    );
+    assert!(!text.contains("DECLINED-BUILD-PROMPT"), "{text}");
+
+    assert_eq!(platform_calls(&platform), 0);
+    assert!(machine.recorded("call.argv").is_none());
+    assert!(machine.recorded("debug-config.argv").is_none());
+}
+
+#[test]
+fn a_symlinked_dot_opencode_is_the_same_items_and_excluded_is_what_is_switched_off() {
+    let machine = Machine::new("oc-twin");
+    machine.populate();
+    std::os::unix::fs::symlink(machine.config_dir(), machine.fake_home.join(".opencode")).unwrap();
+    let platform = platform();
+    machine.enroll(&platform);
+    // Approve from ~/.config/opencode only: the twins under ~/.opencode are
+    // the same bytes, so they are approved with them.
+    machine.approve(|item| {
+        let opencode = item["client"] == "opencode";
+        let in_config = item["path"].as_str().unwrap().contains("/.config/opencode");
+        let chosen =
+            item["kind"] == "agents_md" || item["name"] == "docs" || item["name"] == "keep";
+        (opencode && in_config && chosen).then_some("private")
+    });
+    let out = machine.start(MODEL, &[]);
+    assert!(out.status.success(), "{}{}", stdout(&out), stderr(&out));
+    let result = json_of(&out);
+    let config = read_json(
+        &machine
+            .daycare_home
+            .join("challenges/c-1/opencode-config.json"),
+    );
+    // What is listed as left out is exactly what the generated config (or
+    // --pure) switches off: never the approved docs server's twin.
+    let resolved = resolved_config(&machine);
+    for excluded in result["excluded"].as_array().unwrap() {
+        let id = excluded["id"].as_str().unwrap();
+        let name = id.rsplit('#').next().unwrap();
+        let how = excluded["how"].as_str().unwrap();
+        if how.starts_with("enabled: false") {
+            assert_eq!(config["mcp"][name]["enabled"], false, "{id}");
+            assert_eq!(resolved["mcp"][name]["enabled"], false, "{id}");
+        } else if how.starts_with("disable: true") {
+            let name = name.strip_prefix("agent.").unwrap_or(name);
+            assert_eq!(config["agent"][name]["disable"], true, "{id}");
+        } else if how.starts_with("a skill deny") {
+            assert_eq!(config["permission"]["skill"][name], "deny", "{id}");
+        } else {
+            assert!(how.starts_with("--pure"), "{id}: {how}");
+        }
+        assert!(
+            !id.ends_with("#docs"),
+            "the approved server's twin was listed: {id}"
+        );
+    }
+    assert_eq!(
+        resolved["mcp"]["docs"]["url"],
+        "https://docs.example.test/mcp"
+    );
+}
+
+#[test]
+fn an_approved_agents_own_rules_cannot_offer_an_unapproved_skill() {
+    let machine = Machine::new("oc-agent-skills");
+    machine.populate();
+    let platform = platform();
+    machine.enroll(&platform);
+    // The approved inline agent allows every skill after the top-level rules.
+    let global = machine.config_dir().join("opencode.json");
+    let mut config = read_json(&global);
+    config["agent"]["reviewer"]["permission"] = json!({"skill": "allow"});
+    std::fs::write(&global, config.to_string()).unwrap();
+    let approve_with = |agent: &'static str| {
+        machine.approve(move |item| {
+            let opencode = item["client"] == "opencode";
+            let chosen = item["kind"] == "agents_md"
+                || item["name"] == "docs"
+                || item["name"] == "keep"
+                || item["name"] == agent;
+            (opencode && chosen).then_some("private")
+        })
+    };
+    approve_with("reviewer");
+    let out = machine.start(MODEL, &[]);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let text = error_text(&out);
+    assert!(
+        text.contains("agent \"reviewer\"")
+            && text.contains("notes")
+            && text.contains("Nothing was launched"),
+        "{text}"
+    );
+    assert!(machine.recorded("call.argv").is_none());
+    let asked = lines(&machine.recorded("debug-agents").unwrap());
+    assert!(asked.contains(&"reviewer".to_string()), "{asked:?}");
+
+    // A markdown agent whose frontmatter allows one unapproved skill back.
+    config["agent"]["reviewer"]
+        .as_object_mut()
+        .unwrap()
+        .remove("permission");
+    std::fs::write(&global, config.to_string()).unwrap();
+    machine.write(
+        ".config/opencode/agents/helper.md",
+        "---\ndescription: Helps.\npermission: {\"skill\": {\"notes\": \"allow\"}}\n---\nHELPER-AGENT-PROMPT\n",
+    );
+    approve_with("helper");
+    let out = machine.start(MODEL, &[]);
+    assert!(!out.status.success(), "{}", stdout(&out));
+    let text = error_text(&out);
+    assert!(
+        text.contains("agent \"helper\"") && text.contains("notes"),
+        "{text}"
+    );
+    assert!(!text.contains("HELPER-AGENT-PROMPT"), "{text}");
+
+    // Without the agent's own rule, every agent that can run is checked and
+    // the start goes ahead.
+    machine.write(
+        ".config/opencode/agents/helper.md",
+        "---\ndescription: Helps.\n---\nHELPER-AGENT-PROMPT\n",
+    );
+    approve_with("helper");
+    std::fs::remove_file(machine.record.join("debug-agents")).ok();
+    let out = machine.start(MODEL, &[]);
+    assert!(out.status.success(), "{}{}", stdout(&out), stderr(&out));
+    assert_eq!(
+        lines(&machine.recorded("debug-agents").unwrap()),
+        ["build", "helper", "plan"]
+    );
+    let proven = strings(&json_of(&out)["verification"]["proven"]).join("\n");
+    assert!(proven.contains("(build, helper, plan)"), "{proven}");
+}
+
+#[test]
+fn an_edit_to_a_file_an_approved_stanza_names_needs_a_fresh_review() {
+    let machine = Machine::new("oc-file-ref");
+    machine.populate();
+    let global = machine.config_dir().join("opencode.json");
+    let mut config = read_json(&global);
+    config["mcp"]["docs"]["headers"] =
+        json!({"Authorization": "Bearer {file:~/.secrets/docs-token}"});
+    std::fs::write(&global, config.to_string()).unwrap();
+    machine.write(".secrets/docs-token", "docs-token-from-file-1\n");
+    let platform = platform();
+    machine.enroll(&platform);
+    machine.approve_some();
+    let out = machine.start(MODEL, &["--print"]);
+    assert!(out.status.success(), "{}{}", stdout(&out), stderr(&out));
+    // The file it names changes: the approval no longer covers the server.
+    machine.write(".secrets/docs-token", "docs-token-rotated-2\n");
+    let out = machine.start(MODEL, &["--print"]);
+    assert!(!out.status.success());
+    let text = error_text(&out);
+    assert!(text.contains("changed since you reviewed it"), "{text}");
+    assert!(!text.contains("docs-token"), "{text}");
+}
+
+#[test]
+fn an_opencode_config_daycare_cannot_read_refuses_even_with_print() {
+    let machine = Machine::new("oc-unreadable");
+    machine.populate();
+    let platform = platform();
+    machine.enroll(&platform);
+    machine.approve_some();
+    // OpenCode reads this (it substitutes {env:PORT} first); Daycare cannot.
+    let dot = machine.write(
+        ".opencode/opencode.json",
+        r#"{"mcp": {"local": {"type": "local", "command": ["x"], "port": {env:PORT}}}}"#,
+    );
+    for args in [&["--print"][..], &[]] {
+        let out = machine.start(MODEL, args);
+        assert!(!out.status.success(), "{}", stdout(&out));
+        let text = error_text(&out);
+        assert!(
+            text.contains("could not read these OpenCode config files")
+                && text.contains(".opencode/opencode.json"),
+            "{text}"
+        );
+    }
+    assert_eq!(platform_calls(&platform), 0);
+    // A byte order mark is fine: OpenCode and Daycare both read past it.
+    std::fs::write(&dot, "\u{feff}{\"mcp\": {}}").unwrap();
+    machine.approve_some();
+    let out = machine.start(MODEL, &[]);
+    assert!(out.status.success(), "{}{}", stdout(&out), stderr(&out));
 }
