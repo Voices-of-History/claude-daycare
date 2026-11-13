@@ -460,10 +460,19 @@ pub struct ChallengeDetail {
     pub state: Option<String>,
     pub brief_md: String,
     pub closes_at: Option<String>,
+    /// A practice challenge: always open, never on a ballot.
+    pub practice: bool,
     /// Vote, goal, third component points.
     pub weights: Option<(i64, i64, i64)>,
     pub third_label: Option<String>,
     pub inputs: Vec<InputFile>,
+}
+
+/// A challenge that never closes: a practice one (`practice: true`), or one
+/// whose close time the platform stores in the year 9999, which it does for
+/// practice challenges. Either signal may be absent.
+pub fn always_open(closes_at: Option<&str>, practice: bool) -> bool {
+    practice || closes_at.is_some_and(|at| at.trim_start().starts_with("9999-"))
 }
 
 fn text(value: &Value, key: &str) -> Option<String> {
@@ -543,11 +552,16 @@ impl ChallengeDetail {
                 .or_else(|| text(record, "brief"))
                 .unwrap_or_default(),
             closes_at: text(record, "closes_at"),
+            practice: record.get("practice").and_then(Value::as_bool) == Some(true),
             third_label: text(record, "third_label"),
             weights,
             inputs,
             id,
         })
+    }
+
+    pub fn always_open(&self) -> bool {
+        always_open(self.closes_at.as_deref(), self.practice)
     }
 
     /// The challenge without download links, for printing.
@@ -558,6 +572,8 @@ impl ChallengeDetail {
             "title": self.title,
             "state": self.state,
             "closes_at": self.closes_at,
+            "practice": self.practice,
+            "always_open": self.always_open(),
             "weights": self.weights.map(|(vote, goal, third)| json!({
                 "vote": vote, "goal": goal, "third": third,
             })),
@@ -590,7 +606,9 @@ pub fn brief_text(detail: &ChallengeDetail) -> String {
             ));
         }
     }
-    if let Some(closes_at) = &detail.closes_at {
+    if detail.always_open() {
+        text.push_str("\nThis challenge is always open.\n");
+    } else if let Some(closes_at) = &detail.closes_at {
         text.push_str(&format!("\nEntries close at {closes_at}.\n"));
     }
     text
@@ -762,6 +780,7 @@ mod tests {
             state: Some("open".into()),
             brief_md: "Fix the form.".into(),
             closes_at: Some("2026-11-20T00:00:00Z".into()),
+            practice: false,
             weights: Some((40, 40, 20)),
             third_label: Some("Accessibility".into()),
             inputs,
@@ -993,5 +1012,35 @@ mod tests {
             assert!(!detail.public_json().to_string().contains("https://x/a"));
         }
         assert!(ChallengeDetail::parse(&json!({"id": "../etc"})).is_err());
+    }
+
+    #[test]
+    fn a_practice_challenge_reads_as_always_open_instead_of_a_date() {
+        let record = |extra: Value| {
+            let mut record = json!({"id": "c1", "title": "Practice sheet"});
+            for (key, value) in extra.as_object().unwrap() {
+                record[key] = value.clone();
+            }
+            ChallengeDetail::parse(&json!({ "challenge": record })).unwrap()
+        };
+        let dated = record(json!({"closes_at": "2026-11-20T00:00:00Z"}));
+        assert!(!dated.always_open());
+        assert!(brief_text(&dated).contains("Entries close at 2026-11-20T00:00:00Z."));
+        // Today's platform: the far-future close time only.
+        let far = record(json!({"closes_at": "9999-12-30T00:00:00+00:00"}));
+        assert!(far.always_open());
+        let text = brief_text(&far);
+        assert!(
+            text.contains("always open") && !text.contains("9999"),
+            "{text}"
+        );
+        // Once the platform sends the flag, with or without a close time.
+        let flagged = record(json!({"practice": true}));
+        assert!(flagged.always_open());
+        assert_eq!(flagged.public_json()["always_open"], true);
+        // Neither signal: no close line at all, as before.
+        let neither = record(json!({"practice": "yes"}));
+        assert!(!neither.always_open());
+        assert!(!brief_text(&neither).contains("close"));
     }
 }

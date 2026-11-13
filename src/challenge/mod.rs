@@ -73,32 +73,46 @@ pub fn list(active: &Active, out: Out) -> Result<()> {
         .as_array()
         .cloned()
         .ok_or_else(|| Error::new("the challenge list was not a list"))?;
-    let summaries: Vec<Value> = list
-        .iter()
-        .map(|challenge| {
-            json!({
-                "id": challenge.get("id"),
-                "slug": challenge.get("slug"),
-                "title": challenge.get("title"),
-                "state": challenge.get("state").or_else(|| challenge.get("phase")),
-                "closes_at": challenge.get("closes_at"),
-            })
-        })
-        .collect();
+    let summaries: Vec<Value> = list.iter().map(list_summary).collect();
     out.emit(json!({ "ok": true, "challenges": summaries }), || {
         if summaries.is_empty() {
             println!("No open challenges right now.");
         }
         for challenge in &summaries {
-            let field = |key: &str| challenge[key].as_str().unwrap_or("").to_string();
-            let closes = match challenge["closes_at"].as_str() {
-                Some(at) => format!(", closes {at}"),
-                None => String::new(),
-            };
-            println!("{}  {}{closes}", field("id"), field("title"));
+            println!("{}", list_line(challenge));
         }
     });
     Ok(())
+}
+
+/// One challenge in `challenge list`. A practice challenge (`practice:
+/// true`, or a close time in the year 9999) is marked always open.
+fn list_summary(challenge: &Value) -> Value {
+    let practice = challenge.get("practice").and_then(Value::as_bool) == Some(true);
+    let closes_at = challenge.get("closes_at").and_then(Value::as_str);
+    json!({
+        "id": challenge.get("id"),
+        "slug": challenge.get("slug"),
+        "title": challenge.get("title"),
+        "state": challenge.get("state").or_else(|| challenge.get("phase")),
+        "closes_at": challenge.get("closes_at"),
+        "practice": practice,
+        "always_open": folder::always_open(closes_at, practice),
+    })
+}
+
+/// The human line for one `list_summary`.
+fn list_line(challenge: &Value) -> String {
+    let field = |key: &str| challenge[key].as_str().unwrap_or("").to_string();
+    let closes = match (
+        challenge["always_open"].as_bool(),
+        challenge["closes_at"].as_str(),
+    ) {
+        (Some(true), _) => ", always open".to_string(),
+        (_, Some(at)) => format!(", closes {at}"),
+        _ => String::new(),
+    };
+    format!("{}  {}{closes}", field("id"), field("title"))
 }
 
 fn fetch_detail(active: &Active, challenge_id: &str) -> Result<ChallengeDetail> {
@@ -501,4 +515,28 @@ fn notes(client: Client) -> Vec<&'static str> {
         ]),
     }
     notes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_list_says_always_open_for_a_practice_challenge() {
+        let dated = list_summary(&json!({"id": "c-1", "title": "Signup Rescue",
+            "closes_at": "2026-11-20T00:00:00Z"}));
+        assert_eq!(
+            list_line(&dated),
+            "c-1  Signup Rescue, closes 2026-11-20T00:00:00Z"
+        );
+        assert_eq!(dated["always_open"], false);
+        let far = list_summary(&json!({"id": "p-1", "title": "Practice sheet",
+            "closes_at": "9999-12-30T00:00:00Z"}));
+        assert_eq!(list_line(&far), "p-1  Practice sheet, always open");
+        assert_eq!(far["always_open"], true);
+        let flagged = list_summary(&json!({"id": "p-2", "title": "Practice", "practice": true}));
+        assert_eq!(list_line(&flagged), "p-2  Practice, always open");
+        let bare = list_summary(&json!({"id": "c-2", "title": "Receipts"}));
+        assert_eq!(list_line(&bare), "c-2  Receipts");
+    }
 }

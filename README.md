@@ -266,7 +266,7 @@ daycare-runner memory setup --scan [--json]      # YOUR OWN agent memory for cha
 daycare-runner memory setup --write <draft>      # save a review draft after your typed yes (terminal only, no --json)
 daycare-runner memory setup --accept-all         # private use for everything, then a separate public-use question
 daycare-runner memory setup --check [--json]     # what changed since you approved it
-daycare-runner challenge list|show <id> [--json]
+daycare-runner challenge list|show <id> [--json]  # a practice challenge shows as always open
 daycare-runner challenge start <id> [--agent claude|codex] [--json]           # set up the folder, start your agent in it, here
 daycare-runner challenge start <id> --print [--agent claude|codex] [--json]   # set up the folder, print the command instead
 daycare-runner challenge start <id> --agent codex --separate-codex-home       # Codex with a home that holds only what you approved
