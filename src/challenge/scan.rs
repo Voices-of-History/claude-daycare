@@ -1053,6 +1053,70 @@ mod tests {
     }
 
     #[test]
+    fn opencode_config_entries_are_matched_by_their_values_and_markdown_agents_whole() {
+        let dir = unique_dir("scan-opencode");
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        let config = dir.join("opencode.jsonc");
+        std::fs::write(
+            &config,
+            "{\n  // mine\n  \"mcp\": {\"search\": {\"environment\": {\"KEY\": \"planted-oc-secret-4444\"}},},\n  \"agent\": {\"reviewer\": {\"prompt\": \"Always cite the internal wiki page first\"}}\n}",
+        )
+        .unwrap();
+        let agent_file = dir.join("agents/helper.md");
+        std::fs::write(
+            &agent_file,
+            "Answer in the house voice of our team, always\n",
+        )
+        .unwrap();
+        let tool_file = dir.join("lookup.ts");
+        std::fs::write(
+            &tool_file,
+            "export const planted = 'tool-code-not-memory-5555'\n",
+        )
+        .unwrap();
+        let item = |kind: Kind, path: &Path, name: Option<&str>| Item {
+            id: item_id(Client::Opencode, kind, path, name),
+            client: Client::Opencode,
+            kind,
+            path: path.to_path_buf(),
+            name: name.map(str::to_string),
+            bytes: 1,
+            sha256: "0".repeat(64),
+            origin: None,
+        };
+        let items = vec![
+            item(Kind::McpServer, &config, Some("search")),
+            item(Kind::Agent, &config, Some("reviewer")),
+            item(Kind::Agent, &agent_file, Some("helper")),
+            item(Kind::Tool, &tool_file, None),
+        ];
+        let inventory = Inventory {
+            items: items.clone(),
+            warnings: vec![],
+        };
+        let reconciled = Reconciled {
+            unreviewed: items,
+            ..Reconciled::default()
+        };
+        let mut set = SecretSet::new();
+        add_memory(&mut set, &inventory, &reconciled, &dir.join(".claude.json"));
+        for text in [
+            "env: planted-oc-secret-4444",
+            "Always cite the internal wiki page first",
+            "Answer in the house voice of our team, always",
+        ] {
+            assert_eq!(
+                kinds(&set, text),
+                vec![FindingKind::DontUseMemory],
+                "{text}"
+            );
+        }
+        // A custom tool is code, used by reference, as a plugin is.
+        assert!(kinds(&set, "tool-code-not-memory-5555").is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn codex_stanza_values_are_read_from_quotes() {
         assert_eq!(
             quoted_values(

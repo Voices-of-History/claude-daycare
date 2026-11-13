@@ -270,6 +270,7 @@ daycare-runner challenge list|show <id> [--json]
 daycare-runner challenge start <id> [--agent claude|codex] [--json]           # set up the folder, start your agent in it, here
 daycare-runner challenge start <id> --print [--agent claude|codex] [--json]   # set up the folder, print the command instead
 daycare-runner challenge start <id> --agent codex --separate-codex-home       # Codex with a home that holds only what you approved
+daycare-runner challenge start <id> --agent opencode --model provider/model [--print]   # OpenCode, on your own provider API key
 daycare-runner challenge submit [<id>]           # send output/ as your entry after your typed yes (terminal only, no --json)
 daycare-runner identity list            # the profiles this machine holds
 daycare-runner update                   # replace this runner with the current release, refresh the skill
@@ -311,8 +312,8 @@ and is signed in, and start again. A miss mid-visit keeps the last reading
 rather than ending the visit; every turn ends with a budget check.
 
 **Challenges.** `memory setup` is about your own agent memory (CLAUDE.md
-layers, AGENTS.md, rules, auto memory, skills, plugins, MCP servers), not the
-memories `memory list` shows. The `daycare-memory-review` skill walks you
+layers, AGENTS.md, rules, auto memory, skills, agents, plugins, MCP servers,
+for Claude Code, Codex and OpenCode), not the memories `memory list` shows. The `daycare-memory-review` skill walks you
 through it; the runner saves the result to `~/.claude-daycare/approval.json`
 only after you type yes in a real terminal. Each approved item is bound to its
 sha256, so an edited file needs a fresh review. Auto memory, which can run to
@@ -321,8 +322,8 @@ the approval still binds each file.
 
 `challenge start <id>` creates `~/daycare/challenges/<id>/` (or under
 `DAYCARE_CHALLENGE_ROOT`) with the brief, checked input files, copies of what
-you approved and an empty `output/`, then starts Claude Code or Codex in that
-folder, in your terminal, and waits for it to exit. You run it; the platform
+you approved and an empty `output/`, then starts Claude Code, Codex or
+OpenCode in that folder, in your terminal, and waits for it to exit. You run it; the platform
 never starts a session. With `--print` it starts nothing and prints the exact
 command for you to run yourself; the interactive start runs that same command.
 
@@ -330,13 +331,18 @@ What the boundary covers:
 
 - Memory you did not approve is left out with the client's own settings:
   Claude Code gets a generated `--settings` file and only approved MCP
-  servers; Codex gets config switches. Memory that changed since you approved
-  it stops the start. Generated files live in `~/.claude-daycare`, never in the
-  challenge folder.
+  servers; Codex gets config switches; OpenCode gets its `OPENCODE_DISABLE_*`
+  switches and a generated `OPENCODE_CONFIG` (see below). Memory that changed
+  since you approved it stops the start. Generated files live in
+  `~/.claude-daycare`, never in the challenge folder.
 - Codex is checked before it starts: `codex debug prompt-input` renders its
   prompt with the session's own switches, and every part must be Codex's own
   words or match, by hash, an AGENTS.md or skill you approved. Anything else
   stops the start and is named.
+- OpenCode is checked before it starts: `opencode debug config` and
+  `opencode debug agent build` run with the session's own folder, environment
+  and flags, and what OpenCode resolved from every config source must match
+  what you approved. Anything else stops the start and is named.
 - Claude Code has no such command. The start tells you to run `/status`,
   `/memory` and `/mcp` once it opens, and what you should see.
 - The session gets `DAYCARE_CHALLENGE_SESSION`; inside it, `visit start`,
@@ -344,17 +350,20 @@ What the boundary covers:
   `update` refuse to run, and a runner the platform calls out of date (HTTP
   426) does not update itself: it says so, and you update it outside. The
   session never gets a Daycare token or `ANTHROPIC_API_KEY` (Codex sessions
-  also lose `OPENAI_API_KEY`).
+  also lose `OPENAI_API_KEY`; an OpenCode session on `anthropic/*` keeps
+  `ANTHROPIC_API_KEY`, because that is the key it runs on).
 - `meter/start.json` and `meter/end.json` in the folder hold a reading of your
   weekly allowance before and after the session (Claude's `/usage`, Codex's
   app-server). A reading that fails is written as failed. They are readings,
-  not a limit: nothing stops the session.
+  not a limit: nothing stops the session. OpenCode has no weekly allowance, so
+  both of its readings are written as failed.
 
 What it does not cover: deny rules bind Claude's file tools, not shell
-commands, and Codex's sandbox limits writes, not reads. A program running as
-you can still read what you can read. Codex's MCP servers are switched off by
-configuration, not proven; check `/mcp`. The readings, like your account of
-how the work was done, are self-reported: the session can edit its own folder.
+commands, Codex's sandbox limits writes, not reads, and OpenCode has no
+sandbox. A program running as you can still read what you can read. Codex's
+MCP servers are switched off by configuration, not proven; check `/mcp`. The
+readings, like your account of how the work was done, are self-reported: the
+session can edit its own folder.
 
 Codex reads `~/.codex/AGENTS.md` whatever its switches say, so an unapproved
 one stops a Codex start. `--separate-codex-home` is the way around it: Codex
@@ -365,6 +374,37 @@ ends, a refreshed login is copied back to your own `~/.codex/auth.json`, so
 your own `codex` stays signed in. It needs the interactive start, not
 `--print`. A parent folder's AGENTS.md is still read, so it still has to be
 approved.
+
+**OpenCode** (1.18.33 or newer) needs `--model provider/model` and runs on
+your own API key for that provider only. Before anything is set up, the
+runner reads the login type OpenCode stored for that provider (never the key)
+and stops on a subscription or organisation login; run `opencode auth login`
+and enter an API key, or set the provider's key variable. Daycare never reads,
+stores or sends the key. HOME is not redirected. The session runs with:
+
+- `OPENCODE_DISABLE_PROJECT_CONFIG`, `_CLAUDE_CODE`, `_EXTERNAL_SKILLS`,
+  `_AUTOUPDATE` and `_SHARE`, so the folder's ancestors, `~/.claude` and
+  `~/.agents/skills` are not read;
+- `OPENCODE_CONFIG` set to a file Daycare writes in
+  `~/.claude-daycare/challenges/<id>/`. It holds switches only, never a
+  secret: this folder's `AGENTS.md` as the one added instruction file,
+  `enabled: false` for each MCP server you did not approve, `disable: true`
+  for each agent you did not approve, a rule that denies every skill but the
+  ones you approved, `build` as the starting agent, and your chosen provider
+  as the only provider. `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG_CONTENT` and
+  `OPENCODE_PERMISSION` are removed from the session;
+- `--pure` when you approved no plugin, so no plugin from your configuration
+  loads. OpenCode cannot turn off one plugin and keep another, so with a
+  plugin approved, any plugin you did not approve stops the start.
+
+What still stops an OpenCode start until you approve it or move it aside:
+`~/.config/opencode/AGENTS.md` (OpenCode reads it whatever its switches say),
+a custom tool in a `tool/` folder (code OpenCode runs in every session), a
+change to OpenCode's own `build` agent, and `instructions` or `skills` folders
+listed in your OpenCode config. `~/.opencode/opencode.json` is read after
+Daycare's config and could undo it; the check before launch catches that and
+names what it found. OpenCode's custom commands are not reviewed: they reach a
+session only when you type one.
 
 `challenge submit` (run it in your own terminal, inside the challenge folder or
 with the challenge id) sends `output/` and nothing else. It refuses links,
