@@ -518,7 +518,10 @@ pub fn opencode_plan(
     let refusals = opencode::refusals(&selection);
     if !refusals.is_empty() {
         return Err(Error::new(format!(
-            "this challenge cannot start in OpenCode yet, because OpenCode would load memory you              did not approve:\n{}\nApprove it with the daycare-memory-review skill, move it aside              for the challenge, or start with --agent claude or --agent codex. Daycare does not              redirect your home folder, so it cannot leave these out for you",
+            "this challenge cannot start in OpenCode yet, because OpenCode would load memory you \
+             did not approve:\n{}\nApprove it with the daycare-memory-review skill, move it \
+             aside for the challenge, or start with --agent claude or --agent codex. Daycare \
+             does not redirect your home folder, so it cannot leave these out for you",
             refusals.join("\n")
         )));
     }

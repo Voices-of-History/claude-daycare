@@ -234,7 +234,8 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
     match (client, model) {
         (Client::Opencode, None) => {
             return Err(Error::new(
-                "OpenCode challenges need --model provider/model, on your own provider API key                  (for example --model openai/gpt-5.5)",
+                "OpenCode challenges need --model provider/model, on your own provider API key \
+                 (for example --model openai/gpt-5.5)",
             ))
         }
         (Client::Opencode, Some(model)) => {
@@ -242,7 +243,8 @@ pub fn start(request: StartRequest<'_>, out: Out) -> Result<()> {
         }
         (_, Some(_)) => {
             return Err(Error::new(
-                "--model is for --agent opencode; Claude Code and Codex use your own default                  model",
+                "--model is for --agent opencode; Claude Code and Codex use your own default \
+                 model",
             ))
         }
         (_, None) => {}
