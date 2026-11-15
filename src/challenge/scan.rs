@@ -18,7 +18,7 @@
 //!    ("don't use"). Lines of instruction files, skill files and MCP settings
 //!    values are matched verbatim, and so are OpenCode plugin options and the
 //!    text an OpenCode stanza pulls in with `{file:…}` or `{env:…}`. A skill's code is not: its fenced code
-//!    examples and its script files are mostly the skill author's boilerplate
+//!    examples, its script files and its licence or notice files are mostly the skill author's boilerplate
 //!    (a viewport `<meta>`, a labelled email field), which an entry writes on
 //!    its own, so they would refuse honest work. A skill's prose still counts,
 //!    and instruction files and auto memory are matched whole, code included.
@@ -617,7 +617,7 @@ fn add_item(
         Kind::Skill => {
             let mut budget = MAX_MEMORY_FILE_BYTES;
             for file in text_files_under(&item.path) {
-                if is_skill_script(&file) {
+                if is_skill_script(&file) || is_licence_file(&file) {
                     continue;
                 }
                 let Some(bytes) = read_small(&file, budget) else {
@@ -797,6 +797,26 @@ fn is_skill_script(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "sh" | "py" | "js" | "ts"))
+}
+
+/// A skill's licence or notice file (`LICENSE`, `LICENSE.txt`, `licence.md`,
+/// `NOTICE`, `COPYING`…) is the skill author's legal boilerplate, shared word
+/// for word by thousands of projects, not the owner's writing. Matching it
+/// would refuse an honest entry that quotes a project's licence, as a Receipts
+/// answer about a tool's licence must.
+fn is_licence_file(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| {
+            let stem = stem.to_ascii_lowercase();
+            ["license", "licence", "notice", "copying"]
+                .iter()
+                .any(|name| {
+                    stem == *name
+                        || stem.starts_with(&format!("{name}-"))
+                        || stem.starts_with(&format!("{name}_"))
+                })
+        })
 }
 
 /// Markdown without its fenced code blocks (``` or ~~~), fences included. An
@@ -1140,7 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn a_skills_code_examples_and_scripts_are_not_matched_but_its_prose_is() {
+    fn a_skills_code_examples_scripts_and_licence_are_not_matched_but_its_prose_is() {
         let dir = unique_dir("scan-skill-code");
         let skill = dir.join("web-quality");
         std::fs::create_dir_all(skill.join("references")).unwrap();
@@ -1157,6 +1177,11 @@ mod tests {
         std::fs::write(
             skill.join("check.py"),
             "print('a script line that is long enough')\n",
+        )
+        .unwrap();
+        std::fs::write(
+            skill.join("LICENSE.txt"),
+            "                                 Apache License\n                           Version 2.0, January 2004\n                        http://www.apache.org/licenses/\n",
         )
         .unwrap();
         let skill_item = Item {
@@ -1203,7 +1228,7 @@ mod tests {
             &dir,
         );
 
-        let entry = "<!doctype html><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<label for=\"email\">Email address</label>\nprint('a script line that is long enough')";
+        let entry = "<!doctype html><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<label for=\"email\">Email address</label>\nprint('a script line that is long enough')\n{\"excerpt\": \"Apache License Version 2.0, January 2004\"}";
         assert!(kinds(&set, entry).is_empty(), "boilerplate matched");
         for prose in [
             "Always check the owner's private launch checklist first.",
