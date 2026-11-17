@@ -116,7 +116,11 @@ pub const PROVIDER_KEY_ENV: [(&str, &[&str]); 31] = [
     ("openai", &["OPENAI_API_KEY"]),
     (
         "google",
-        &["GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"],
+        &[
+            "GOOGLE_GENERATIVE_AI_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+        ],
     ),
     ("openrouter", &["OPENROUTER_API_KEY"]),
     ("opencode", &["OPENCODE_API_KEY"]),
@@ -1581,13 +1585,18 @@ mod tests {
         assert_eq!(provider_key_env("openai"), ["OPENAI_API_KEY"]);
         assert_eq!(
             provider_key_env("google"),
-            ["GEMINI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"]
+            [
+                "GEMINI_API_KEY",
+                "GOOGLE_API_KEY",
+                "GOOGLE_GENERATIVE_AI_API_KEY"
+            ]
         );
         let dropped = other_provider_key_env("openai");
         for name in [
             "ANTHROPIC_API_KEY",
             "GROQ_API_KEY",
             "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
             "XAI_API_KEY",
         ] {
             assert!(dropped.contains(&name), "{name}");

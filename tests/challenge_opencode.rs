@@ -25,9 +25,10 @@ const OPENAI_KEY: &str = "sk-openai-planted-key-5353";
 const MCP_SECRET: &str = "oc-mcp-secret-777";
 /// Other providers' keys, planted in the runner's environment: a session
 /// for one provider must carry none of them.
-const OTHER_KEYS: [(&str, &str); 5] = [
+const OTHER_KEYS: [(&str, &str); 6] = [
     ("GROQ_API_KEY", "gsk_planted-groq-key-6161"),
     ("GEMINI_API_KEY", "AIza-planted-gemini-key-7272"),
+    ("GOOGLE_API_KEY", "AIza-planted-google-key-2626"),
     ("XAI_API_KEY", "xai-planted-key-8383"),
     ("OPENROUTER_API_KEY", "sk-or-planted-key-9494"),
     ("DEEPSEEK_API_KEY", "sk-deepseek-planted-key-1515"),
