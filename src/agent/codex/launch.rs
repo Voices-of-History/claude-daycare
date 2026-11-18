@@ -77,7 +77,7 @@ pub fn check_model_id(model: &str) -> Result<()> {
 pub const CODEX_UPGRADE: &str = "To upgrade Codex, use the method you installed it with: npm install -g @openai/codex@latest; or brew upgrade --cask codex. For a standalone install, rerun the official installer: curl -fsSL https://chatgpt.com/codex/install.sh | sh. Then run codex --version and confirm 0.158.0 or newer on PATH before retrying.";
 
 pub fn check_version(output: &str) -> Result<()> {
-    if parse_version(output).is_some_and(|version| version >= (0, 158, 0)) {
+    if version_at_least(output, (0, 158, 0)) {
         return Ok(());
     }
     Err(Error::new(format!("Daycare requires Codex CLI 0.158.0 or newer to disable multi-agent tools before launch. {CODEX_UPGRADE}")))
@@ -89,7 +89,7 @@ pub fn check_version(output: &str) -> Result<()> {
 pub const CODE_MODE_MIN_VERSION: (u64, u64, u64) = (0, 162, 1);
 
 pub fn check_code_mode_version(output: &str, model: &str) -> Result<()> {
-    if parse_version(output).is_some_and(|version| version >= CODE_MODE_MIN_VERSION) {
+    if version_at_least(output, CODE_MODE_MIN_VERSION) {
         return Ok(());
     }
     let (major, minor, patch) = CODE_MODE_MIN_VERSION;
@@ -98,16 +98,37 @@ pub fn check_code_mode_version(output: &str, model: &str) -> Result<()> {
     )))
 }
 
-/// `codex-cli 0.162.1` -> (0, 162, 1).
-fn parse_version(output: &str) -> Option<(u64, u64, u64)> {
-    let numbers: Vec<u64> = output
-        .trim()
-        .strip_prefix("codex-cli ")?
+/// Whether `codex --version` output is `min` or later. A prerelease comes
+/// before its own release, so `0.158.0-alpha.1` is not 0.158.0, but
+/// `0.165.0-alpha.1.2` (the build the ChatGPT desktop app ships) is past it.
+fn version_at_least(output: &str, min: (u64, u64, u64)) -> bool {
+    parse_version(output).is_some_and(|(version, prerelease)| {
+        if prerelease {
+            version > min
+        } else {
+            version >= min
+        }
+    })
+}
+
+/// `codex-cli 0.162.1` -> ((0, 162, 1), false);
+/// `codex-cli 0.165.0-alpha.1.2` -> ((0, 165, 0), true).
+fn parse_version(output: &str) -> Option<((u64, u64, u64), bool)> {
+    let text = output.trim().strip_prefix("codex-cli ")?;
+    let text = text
+        .split_once('+')
+        .map_or(text, |(version, _build)| version);
+    let (core, prerelease) = match text.split_once('-') {
+        Some((core, label)) if !label.is_empty() => (core, true),
+        Some(_) => return None,
+        None => (text, false),
+    };
+    let numbers: Vec<u64> = core
         .split('.')
         .map(|n| n.parse().ok())
         .collect::<Option<_>>()?;
     match numbers[..] {
-        [major, minor, patch] => Some((major, minor, patch)),
+        [major, minor, patch] => Some(((major, minor, patch), prerelease)),
         _ => None,
     }
 }
@@ -705,6 +726,10 @@ mod tests {
             "codex-cli 0.158.0\n",
             "codex-cli 0.159.0",
             "codex-cli 1.0.0",
+            // The ChatGPT desktop app's bundled CLI: a prerelease past 0.158.0.
+            "codex-cli 0.165.0-alpha.1.2\n",
+            "codex-cli 0.158.1-alpha.1",
+            "codex-cli 0.160.0+build.7",
         ] {
             check_version(version).unwrap();
         }
@@ -712,6 +737,8 @@ mod tests {
             "codex-cli 0.154.0",
             "codex-cli 0.157.9",
             "codex-cli 0.158.0-alpha.1",
+            "codex-cli 0.157.9-alpha.1",
+            "codex-cli 0.165.0-",
             "codex-cli 0.158",
             "garbage",
         ] {
@@ -725,10 +752,16 @@ mod tests {
             "codex-cli 0.162.1\n",
             "codex-cli 0.163.0",
             "codex-cli 1.0.0",
+            "codex-cli 0.165.0-alpha.1.2",
         ] {
             check_code_mode_version(version, "gpt-6.1-sol").unwrap();
         }
-        for version in ["codex-cli 0.158.0", "codex-cli 0.162.0", "garbage"] {
+        for version in [
+            "codex-cli 0.158.0",
+            "codex-cli 0.162.0",
+            "codex-cli 0.162.1-alpha.3",
+            "garbage",
+        ] {
             let error = check_code_mode_version(version, "gpt-6-astra")
                 .unwrap_err()
                 .to_string();

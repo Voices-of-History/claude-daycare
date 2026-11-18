@@ -149,13 +149,42 @@ with tempfile.TemporaryDirectory(prefix="daycare-tools-check-") as scratch:
             assert "no file system, no network access" in described, described[:400]
             names["sealed_code_mode_top"] = top
             names["sealed_code_mode_nested"] = nested
-        prompt = subprocess.check_output([binary, "debug", "prompt-input", *args,
-                                          "-c", "agents.enabled=false", "-c", 'developer_instructions="Daycare test persona"',
-                                          "DAYCARE-SEAL-PROBE"], cwd=root / "workspace", env=env, text=True)
-        kinds = [kind for item in json.loads(prompt)
-                 for kind in item.get("internal_chat_message_metadata_passthrough", {}).get("content_item_kinds", [])]
-        assert kinds == ["generic.developer_instructions", "user.text"], kinds
-        names["prompt_kinds"] = kinds
+        # The preflight's rules (src/agent/codex/preflight.rs), per sealed model:
+        # messages hold only the persona, the probe and, from 0.165 for a
+        # code-mode model, base instructions equal to the private catalog's; an
+        # additional_tools item declares only functions.exec and functions.wait,
+        # and exec nests only the resource helpers inside its isolate.
+        helpers = {"list_mcp_resource_templates", "list_mcp_resources", "read_mcp_resource"}
+        for label, entry in [("prompt_kinds", {**model, "apply_patch_tool_type": None}),
+                             ("prompt_kinds_code_mode", code_mode)]:
+            if not entry:
+                continue
+            (root / "models.json").write_text(json.dumps({"models": [entry]}))
+            p_args = [f'model="{entry["slug"]}"' if a == 'model="gpt-5.5"' else a for a in args]
+            prompt = subprocess.check_output([binary, "debug", "prompt-input", *p_args,
+                                              "-c", "agents.enabled=false", "-c", 'developer_instructions="Daycare test persona"',
+                                              "DAYCARE-SEAL-PROBE"], cwd=root / "workspace", env=env, text=True)
+            kinds = []
+            for item in json.loads(prompt):
+                if item.get("type") == "additional_tools":
+                    assert [(ns["type"], ns["name"]) for ns in item["tools"]] == [("namespace", "functions")], item["tools"]
+                    declared = item["tools"][0]["tools"]
+                    assert {t["name"] for t in declared} <= {"exec", "wait"}, declared
+                    for tool in declared:
+                        if tool["name"] == "exec":
+                            assert "no file system, no network access" in tool["description"], tool["description"][:400]
+                            assert set(re.findall(r"(?m)^### `([^`]+)`", tool["description"])) <= helpers, tool["description"]
+                    kinds.append("additional_tools")
+                    continue
+                assert item.get("type") == "message", item.get("type")
+                meta = item.get("internal_chat_message_metadata_passthrough", {})
+                for kind, part in zip(meta.get("content_item_kinds", []), item["content"]):
+                    assert kind in ["generic.developer_instructions", "user.text", "model.base_instructions"], kind
+                    if kind == "model.base_instructions":
+                        assert part["text"] == entry.get("base_instructions"), "base instructions differ from the catalog"
+                    kinds.append(kind)
+            assert kinds.count("generic.developer_instructions") == 1 and kinds.count("user.text") == 1, kinds
+            names[label] = kinds
         print(json.dumps({"version": version, "synthetic_multi_agent_version": "v2", **names}, indent=2))
     finally:
         server.shutdown()

@@ -96,6 +96,22 @@ pub fn prepare(codex: &CodexCommand, model: &str, path: &Path) -> Result<()> {
     write_atomic(path, &serde_json::to_vec(&sealed)?, 0o600)
 }
 
+/// The base instructions the private catalog gives its one model, as Codex's
+/// bundled catalog carried them. From 0.165 Codex renders them as the
+/// prompt's `model.base_instructions` part for a code-mode model; the
+/// preflight accepts that part only when it is exactly this text.
+pub fn base_instructions(path: &Path) -> Option<String> {
+    let catalog: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    catalog
+        .get("models")?
+        .as_array()?
+        .first()?
+        .get("base_instructions")?
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +127,30 @@ mod tests {
             without_patch(&json!({"models":[model, {"slug":"unverified"}]}), "gpt-5.5").unwrap();
         assert_eq!(sealed, json!({"models":[expected]}));
         assert_eq!(without_patch(&sealed, "gpt-5.5").unwrap(), sealed);
+    }
+
+    #[test]
+    fn the_private_catalogs_base_instructions_are_read_back() {
+        let dir = std::env::temp_dir().join(format!("daycare-catalog-base-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("models.json");
+        std::fs::write(
+            &path,
+            r#"{"models":[{"slug":"gpt-6.1-sol","base_instructions":"You are Codex."}]}"#,
+        )
+        .unwrap();
+        assert_eq!(base_instructions(&path).as_deref(), Some("You are Codex."));
+        for text in [
+            r#"{"models":[{"slug":"m","base_instructions":""}]}"#,
+            r#"{"models":[{"slug":"m"}]}"#,
+            "{}",
+            "not json",
+        ] {
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(base_instructions(&path), None, "{text}");
+        }
+        assert_eq!(base_instructions(&dir.join("absent.json")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

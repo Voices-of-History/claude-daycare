@@ -183,3 +183,34 @@ description text. Both dev checks pass on 0.162.1 and 0.163.0.
 inspected, so the runner accepts code-mode models only from Codex 0.162.1.
 `.github/workflows/codex-canary.yml` runs both checks daily on 0.162.1 and
 on the latest npm release.
+
+## Code-mode prompt renders on Codex 0.165 and 0.166 (2026-11-09)
+
+From 0.165, `codex debug prompt-input` renders two more things for a
+code-mode-only model under the seal, so every Codex visit on the default
+model (gpt-6.1-sol) was refused before any model call. gpt-5.5 still renders
+only the persona and the user message.
+
+- An `additional_tools` item: the `functions` namespace with `exec` and
+  `wait`. With the private catalog, `exec` nests only the three MCP resource
+  helpers (the preflight renders without the Daycare server) and still says
+  "no file system, no network access". Without the private catalog it also
+  nests `apply_patch` and `clock__curr_time`, which is why every turn passes
+  that catalog.
+- A `model.base_instructions` message: Codex's base instructions, as the
+  private catalog carries them for the model (gpt-6.1-sol, 21,769
+  characters). `model_instructions_file` would put other text there under
+  the same kind and the same `harness` provenance, so the preflight compares
+  the text with the catalog's, exactly.
+
+`codex-prompt-input-sealed-0166.json` keeps a real 0.166.0-alpha.6 sealed
+render for gpt-6.1-sol: every item, kind, provenance and tool name, with the
+base instructions replaced by `{{BASE_INSTRUCTIONS}}`, the persona and probe
+replaced, and the long descriptions shortened (the `exec` headings and its
+isolate sentence are kept).
+
+On 0.166.0-alpha.6 (the CLI the ChatGPT desktop app ships), the preflight
+passes real sealed renders for gpt-6.1-sol, gpt-6-astra and gpt-5.5, and both
+dev checks pass. `dev/codex-tools-check.py` now applies the preflight's rules
+to the code-mode render too (`prompt_kinds_code_mode`), so the daily canary
+catches the next change of this kind.

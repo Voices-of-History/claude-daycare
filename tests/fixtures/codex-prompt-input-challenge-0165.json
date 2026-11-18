@@ -1,0 +1,255 @@
+[
+  {
+    "type": "additional_tools",
+    "id": "tools-0",
+    "role": "developer",
+    "tools": [
+      {
+        "type": "namespace",
+        "name": "functions",
+        "description": "",
+        "tools": [
+          {
+            "type": "custom",
+            "name": "exec",
+            "description": "Run JavaScript code to orchestrate/compose tool calls\n- Evaluates the provided JavaScript code in a fresh V8 isolate as "
+          },
+          {
+            "type": "function",
+            "name": "wait",
+            "description": "Waits on a yielded `exec` cell and returns new output or completion.\n- Use `wait` only after `exec` returns `Script runn"
+          },
+          {
+            "type": "function",
+            "name": "request_user_input",
+            "description": "Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode."
+          },
+          {
+            "type": "function",
+            "name": "request_user_input_async",
+            "description": "Ask the user one or more questions during ongoing work. Use this tool only to request missing information, preferences, "
+          }
+        ]
+      },
+      {
+        "type": "namespace",
+        "name": "clock",
+        "description": "Tools for reading and waiting on time.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "sleep",
+            "description": "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the e"
+          }
+        ]
+      },
+      {
+        "type": "namespace",
+        "name": "collaboration",
+        "description": "Tools for spawning and managing sub-agents.",
+        "tools": [
+          {
+            "type": "function",
+            "name": "followup_task",
+            "description": "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already ru"
+          },
+          {
+            "type": "function",
+            "name": "interrupt_agent",
+            "description": "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and "
+          },
+          {
+            "type": "function",
+            "name": "list_agents",
+            "description": "List live agents in the current root thread tree. Optionally filter by task-path prefix."
+          },
+          {
+            "type": "function",
+            "name": "send_message",
+            "description": "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn."
+          },
+          {
+            "type": "function",
+            "name": "spawn_agent",
+            "description": "\n        Available model overrides (optional; inherited parent model is preferred):\n- `gpt-6.1-sol`: Latest workhorse mo"
+          },
+          {
+            "type": "function",
+            "name": "wait_agent",
+            "description": "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also e"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "type": "message",
+    "id": "message-1",
+    "role": "developer",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "You are Codex, an agent based on GPT-6. You and the user share one workspace, and your job is to collaborate with them until their intended goal is completely handled.\n\n(Shortened for this fixture: the real part is about 21,000 characters of Codex's own instructions.)"
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "fixture",
+      "content_item_kinds": [
+        "model.base_instructions"
+      ],
+      "content_item_metadata": [
+        {
+          "provenance": {
+            "type": "harness",
+            "hook": false
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "message",
+    "id": "message-2",
+    "role": "developer",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `workspace-write`: The sandbox permits reading files, and editing files in `cwd` and `writable_roots`. Editing files in other directories requires approval. Network access is restricted.\n# Escalation Requests\n\nCommands are run outside the sandbox if they are approved by the user, or match\n(Shortened for this fixture.)\n</permissions instructions>"
+      },
+      {
+        "type": "input_text",
+        "text": "<collaboration_mode># Collaboration Mode: Default\n\nYou are now in Default mode. (Shortened for this fixture.)\n</collaboration_mode>"
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "fixture",
+      "content_item_kinds": [
+        "permissions.instructions",
+        "collaboration_mode.instructions"
+      ],
+      "content_item_metadata": [
+        {
+          "provenance": {
+            "type": "harness",
+            "hook": false
+          }
+        },
+        {
+          "provenance": {
+            "type": "harness",
+            "hook": false
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "message",
+    "id": "message-3",
+    "role": "developer",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "<multi_agent_role>You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals. (Shortened for this fixture.)</multi_agent_role>"
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "fixture",
+      "content_item_kinds": [
+        "multi_agent.role_instructions"
+      ],
+      "content_item_metadata": [
+        {
+          "provenance": {
+            "type": "tool",
+            "namespace": "collaboration"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "message",
+    "id": "message-4",
+    "role": "developer",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.</multi_agent_mode>"
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "fixture",
+      "content_item_kinds": [
+        "multi_agent.mode_instructions"
+      ],
+      "content_item_metadata": [
+        {
+          "provenance": {
+            "type": "tool",
+            "namespace": "collaboration"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "message",
+    "id": "message-5",
+    "role": "user",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "# AGENTS.md instructions for {{FOLDER}}\n\n<INSTRUCTIONS>\n{{AGENTS_MD}}\n\n</INSTRUCTIONS>"
+      },
+      {
+        "type": "input_text",
+        "text": "<environment_context>\n  <cwd>{{FOLDER}}</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-11-09</current_date>\n  <timezone>America/New_York</timezone>\n  <filesystem><workspace_roots><root>{{FOLDER}}</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry><entry access=\"write\"><path>{{FOLDER}}</path></entry><entry access=\"write\"><special>:slash_tmp</special></entry><entry access=\"write\"><special>:tmpdir</special></entry><entry access=\"read\"><path>{{FOLDER}}/.git</path></entry><entry access=\"read\"><path>{{FOLDER}}/.agents</path></entry><entry access=\"read\"><path>{{FOLDER}}/.codex</path></entry><entry access=\"read\"><path>{{FOLDER}}/.aws</path></entry></file_system></permission_profile></filesystem>\n</environment_context>"
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "fixture",
+      "content_item_kinds": [
+        "agents_md.instructions",
+        "environments.environment_context"
+      ],
+      "content_item_metadata": [
+        {
+          "provenance": {
+            "type": "agents_md"
+          }
+        },
+        {
+          "provenance": {
+            "type": "harness",
+            "hook": false
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "message",
+    "id": "message-6",
+    "role": "user",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "DAYCARE-CHALLENGE-PROBE"
+      }
+    ],
+    "internal_chat_message_metadata_passthrough": {
+      "turn_id": "fixture",
+      "content_item_kinds": [
+        "user.text"
+      ],
+      "content_item_metadata": [
+        {
+          "provenance": {
+            "type": "user"
+          }
+        }
+      ]
+    }
+  }
+]
