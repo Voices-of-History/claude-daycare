@@ -1,6 +1,6 @@
-//! The challenge clients (plan task N9): Claude Code and Codex CLI behind
-//! `ChallengeClient`, the one seam `challenge start` uses for both `--print`
-//! and the interactive launch.
+//! The challenge clients (plan tasks N9 and N18): Claude Code, Codex CLI and
+//! OpenCode behind `ChallengeClient`, the one seam `challenge start` uses for
+//! both `--print` and the interactive launch.
 //!
 //! This is deliberately not the visit `Agent` trait (`crate::agent`). A visit
 //! turn is headless, sealed, and reaches only the daycare server. A challenge
@@ -13,8 +13,10 @@
 //!   all written outside the challenge folder, and what was left out.
 //! - `verify`: before launch. Codex renders its prompt with `codex debug
 //!   prompt-input`, and every part must be Codex's own or match something the
-//!   owner approved, by hash (`verify`). Claude Code has no such command, so
-//!   its verification is the checks the owner runs once it starts.
+//!   owner approved, by hash (`verify`). OpenCode shows its resolved config
+//!   and each agent that stays enabled (`opencode debug config`, `debug agent
+//!   <name>`), checked against the approval (`opencode`). Claude Code has no such
+//!   command, so its verification is the checks the owner runs once it starts.
 //! - `interactive`: the launch itself, inheriting this terminal (`launch`).
 //! - `meter`: one weekly-allowance reading for `meter/start.json` and
 //!   `meter/end.json`. A reading, never a cap.
@@ -62,7 +64,8 @@ pub struct ExclusionPlan {
     pub client: Client,
     pub launch: LaunchSpec,
     pub excluded: Vec<Excluded>,
-    /// Claude Code's generated settings, shown by `--print`.
+    /// Claude Code's generated settings, or Daycare's OpenCode config, shown
+    /// by `--print`. Neither holds a secret.
     pub settings: Option<Value>,
     pub settings_file: Option<PathBuf>,
     pub mcp_config_file: Option<PathBuf>,
@@ -73,7 +76,8 @@ pub struct ExclusionPlan {
     /// Files written 0600 before launch. Never inside the challenge folder.
     pub files: Vec<(PathBuf, Vec<u8>)>,
     /// Codex: the switches `codex debug prompt-input` runs with, the same
-    /// ones the launch carries.
+    /// ones the launch carries. OpenCode: the flags its `debug` commands run
+    /// with (`--pure`, or none).
     pub config_args: Vec<String>,
     /// Codex with the opt-in: the separate `CODEX_HOME`.
     pub codex_home: Option<PathBuf>,
@@ -91,7 +95,7 @@ pub struct Verification {
 pub trait ChallengeClient {
     fn client(&self) -> Client;
 
-    /// The product name for people (`Claude Code`, `Codex`).
+    /// The product name for people (`Claude Code`, `Codex`, `OpenCode`).
     fn product_name(&self) -> &'static str;
 
     /// The binary the launch names.
@@ -115,22 +119,36 @@ pub trait ChallengeClient {
     fn meter(&self, layout: &Layout) -> Result<WeeklyUsageSnapshot>;
 }
 
+/// The binaries `challenge start` was told to run, and OpenCode's model.
+#[derive(Debug, Clone, Default)]
+pub struct Programs {
+    pub claude: String,
+    pub codex: String,
+    pub opencode: String,
+    /// OpenCode only: `provider/model`.
+    pub opencode_model: Option<String>,
+}
+
 /// The client for `client`, reading the owner's MCP settings from the same
 /// places the memory scan did.
 pub fn for_client(
     client: Client,
-    claude_bin: &str,
-    codex_bin: &str,
+    programs: &Programs,
     roots: &crate::approval::scan::Roots,
 ) -> Box<dyn ChallengeClient> {
     match client {
         Client::Claude => Box::new(ClaudeClient {
-            bin: claude_bin.to_string(),
+            bin: programs.claude.clone(),
             claude_json: roots.claude_json.clone(),
         }),
         Client::Codex => Box::new(CodexClient {
-            bin: codex_bin.to_string(),
+            bin: programs.codex.clone(),
             owner_codex_home: roots.codex_home.clone(),
+        }),
+        Client::Opencode => Box::new(OpencodeClient {
+            bin: programs.opencode.clone(),
+            model: programs.opencode_model.clone().unwrap_or_default(),
+            auth_file: super::opencode::auth_file(&roots.home),
         }),
     }
 }
@@ -564,6 +582,122 @@ impl ChallengeClient for CodexClient {
             .meter()
             .ok_or_else(|| Error::new("Codex has no usage meter"))?
             .sample("", layout)
+    }
+}
+
+// --- OpenCode --------------------------------------------------------------
+
+pub struct OpencodeClient {
+    bin: String,
+    /// `provider/model`, from `--model`.
+    model: String,
+    /// OpenCode's logins, read for the chosen provider's login type only.
+    auth_file: PathBuf,
+}
+
+impl OpencodeClient {
+    fn expected<'a>(
+        &'a self,
+        input: &PlanInput<'_>,
+        provider: &'a str,
+        selection: &'a super::opencode::Selection,
+    ) -> super::opencode::Expected<'a> {
+        super::opencode::Expected {
+            pointer: input
+                .folder
+                .join("AGENTS.md")
+                .to_string_lossy()
+                .into_owned(),
+            provider,
+            selection,
+        }
+    }
+}
+
+impl ChallengeClient for OpencodeClient {
+    fn client(&self) -> Client {
+        Client::Opencode
+    }
+
+    fn product_name(&self) -> &'static str {
+        "OpenCode"
+    }
+
+    fn program(&self) -> &str {
+        &self.bin
+    }
+
+    fn exclusion_plan(&self, input: &PlanInput<'_>, private: &Path) -> Result<ExclusionPlan> {
+        let provider = super::opencode::check_model(&self.model)?;
+        super::opencode::check_api_key_login(&self.auth_file, &provider)?;
+        let config_file = private.join(super::opencode::CONFIG_FILE);
+        let plan = exclusion::opencode_plan(input, &self.model, &config_file)?;
+        let text = format!("{}\n", serde_json::to_string_pretty(&plan.config)?);
+        Ok(ExclusionPlan {
+            client: Client::Opencode,
+            launch: plan.launch,
+            excluded: plan.excluded,
+            settings: Some(plan.config),
+            settings_file: Some(config_file.clone()),
+            mcp_config_file: None,
+            dirs: vec![],
+            remove: vec![],
+            files: vec![(config_file, text.into_bytes())],
+            config_args: plan.config_args,
+            codex_home: None,
+        })
+    }
+
+    fn verify(&self, plan: &ExclusionPlan, input: &PlanInput<'_>) -> Result<Verification> {
+        use super::opencode;
+        let provider = opencode::check_model(&self.model)?;
+        opencode::check_version(&plan.launch)?;
+        let selection = opencode::select(&input.inventory.items, input.reconciled);
+        if selection.pure()
+            != plan
+                .config_args
+                .iter()
+                .any(|arg| arg == opencode::PURE_FLAG)
+        {
+            return Err(Error::new(
+                "the plugin approval changed while the session was being set up; run \
+                 `challenge start` again",
+            ));
+        }
+        let expected = self.expected(input, &provider, &selection);
+        let config = opencode::debug_output(&plan.launch, &["debug", "config"], &plan.config_args)?;
+        let mut proven = opencode::verify_challenge_config(&config, &expected)?;
+        // Every agent that stays enabled, not only the one it starts as: the
+        // session can switch to another or hand it a task, and an agent's own
+        // permission rules apply after the top-level ones.
+        let agents = opencode::agents_to_check(&config, &selection)?;
+        for name in &agents {
+            let text = opencode::debug_output(
+                &plan.launch,
+                &["debug", "agent", name.as_str()],
+                &plan.config_args,
+            )?;
+            if name == opencode::DEFAULT_AGENT {
+                proven.extend(opencode::verify_default_agent(&text, &expected)?);
+            } else {
+                opencode::verify_agent_skills(&text, name, &expected)?;
+            }
+        }
+        proven.push(opencode::skills_proven(&agents, &selection));
+        Ok(Verification {
+            proven,
+            manual: opencode::manual_checks(),
+        })
+    }
+
+    fn interactive(&self, plan: &ExclusionPlan, stdout_to_stderr: bool) -> Result<SessionExit> {
+        launch::run_interactive(&plan.launch, stdout_to_stderr)
+    }
+
+    fn meter(&self, _layout: &Layout) -> Result<WeeklyUsageSnapshot> {
+        Err(Error::new(
+            "OpenCode has no weekly allowance to read: it runs on your own provider API key",
+        ))
     }
 }
 

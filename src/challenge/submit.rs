@@ -708,7 +708,20 @@ pub fn gather_secrets(sources: SecretSources<'_>) -> Result<SecretSet> {
     let inventory = crate::approval::scan::scan(roots);
     let approval = Approval::load(layout)?;
     let reconciled = reconcile(approval.as_ref(), &inventory);
-    secret_scan::add_memory(&mut set, &inventory, &reconciled, &roots.claude_json);
+    secret_scan::add_memory(
+        &mut set,
+        &inventory,
+        &reconciled,
+        &roots.claude_json,
+        &roots.home,
+    );
+    secret_scan::add_opencode_provider_keys(&mut set, roots);
+    secret_scan::add_provider_env_keys(
+        &mut set,
+        std::env::vars_os().filter_map(|(name, value)| {
+            Some((name.into_string().ok()?, value.into_string().ok()?))
+        }),
+    );
     Ok(set)
 }
 

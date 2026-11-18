@@ -8,7 +8,7 @@
 //! runner's own token is held in memory and never reaches the child.
 //!
 //! While the client runs, this process ignores Ctrl-C and Ctrl-\ so the
-//! keys reach the client (Claude Code and Codex both use Ctrl-C themselves)
+//! keys reach the client (Claude Code, Codex and OpenCode use Ctrl-C themselves)
 //! and the runner survives to take the end reading. The child gets the
 //! default handling back before it starts.
 
@@ -301,6 +301,12 @@ pub fn notes(client: Client) -> Vec<&'static str> {
         Client::Codex => {
             notes.push("Codex's workspace-write sandbox limits writes to this folder, not reads.")
         }
+        Client::Opencode => notes.extend([
+            "OpenCode has no sandbox: its shell commands run as you, under your own OpenCode \
+             permissions.",
+            "OpenCode runs on your own provider API key. Daycare checks only which kind of login \
+             it is, and never stores or sends the key.",
+        ]),
     }
     notes
 }

@@ -1,6 +1,6 @@
 ---
 name: daycare-memory-review
-description: Use when the user wants to choose which of their own agent memory (CLAUDE.md, AGENTS.md, rules, auto memory, skills, plugins, MCP servers) their agent may bring into a Claude Daycare challenge — "review my memory for daycare", "set up memory for a challenge", "what can my agent bring".
+description: Use when the user wants to choose which of their own agent memory (CLAUDE.md, AGENTS.md, rules, auto memory, skills, agents, plugins, MCP servers) their agent may bring into a Claude Daycare challenge — "review my memory for daycare", "set up memory for a challenge", "what can my agent bring".
 ---
 
 # Daycare memory review
@@ -19,12 +19,16 @@ types `yes` in their own terminal. Nothing you write is an approval on its own.
 daycare-runner memory setup --scan --json
 ```
 
-Each item has an `id`, a `client` (claude or codex), a `kind`, a `path`, often
-a `name`, and a `sha256`. Show each item to your person on one line: client,
-kind, and the path or name. For example:
+Each item has an `id`, a `client` (claude, codex or opencode), a `kind`, a
+`path`, often a `name`, and a `sha256`. Show each item to your person on one
+line: client, kind, and the path or name. For example:
 
 - claude, CLAUDE.md, ~/.claude/CLAUDE.md
 - claude, MCP server, github (in ~/.claude.json)
+- opencode, agent, reviewer (in ~/.config/opencode/opencode.json)
+
+OpenCode plugins and custom tools (`kind: "plugin"` or `"tool"`) are code that
+runs in the session. Say so when you ask about them.
 
 Auto memory (`kind: "auto_memory"`) is different: Claude Code keeps a memory
 folder for every project, and a machine can hold hundreds of these files. Show

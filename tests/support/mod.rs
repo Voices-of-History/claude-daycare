@@ -462,3 +462,158 @@ where
     }
     out
 }
+
+/// A stand-in for `opencode` (1.18.33) for challenge tests. It never calls a
+/// model. `--version` prints `FAKE_OPENCODE_VERSION` (default 1.18.33).
+/// `debug config` and `debug agent <name>` merge the config the way OpenCode
+/// does, from the same places, under the same switches: the global folder's
+/// `config.json`, `opencode.json` and `opencode.jsonc`, then
+/// `OPENCODE_CONFIG`, then (unless `OPENCODE_DISABLE_PROJECT_CONFIG`) the
+/// folder's `opencode.json`, then `OPENCODE_CONFIG_CONTENT`, then each config
+/// folder (the global one, `~/.opencode` and `OPENCODE_CONFIG_DIR`) with its
+/// markdown agents and plugin files. A file may start with a byte order
+/// mark; `{env:NAME}` and then `{file:path}` are substituted in its text
+/// before it is parsed (`~/` is HOME, a relative path is the file's folder).
+/// Objects merge deeply, `instructions` and `plugin` lists concatenate, other
+/// lists are replaced. `debug agent <name>` answers for OpenCode's own agents
+/// (`build`, `plan`, `general`, `explore`) and every agent or mode in the
+/// config, unless it is `disable: true`: its rules are OpenCode's default
+/// `*: allow`, then the top-level `permission`, then the agent's own
+/// `permission` (and legacy `tools`). Each debug run records its argv and
+/// environment as `debug-config.*` or `debug-agent.*` in `record`, each
+/// agent check also as `debug-agent-<name>.argv` (`/` as `_`), and the agents
+/// asked about, in order, in `debug-agents`. Anything else is the
+/// interactive session: it records `call.argv`, `call.env` and `call.cwd`,
+/// prints `OPENCODE-SCREEN`, and exits with `FAKE_OPENCODE_EXIT` (default 0).
+pub fn fake_opencode(dir: &Path, record: &Path) -> PathBuf {
+    std::fs::create_dir_all(record).unwrap();
+    let script = dir.join("fake-opencode");
+    testdir::write_executable(
+        &script,
+        &FAKE_OPENCODE.replace("@RECORD@", record.to_str().unwrap()),
+    );
+    script
+}
+
+const FAKE_OPENCODE: &str = r#"#!/usr/bin/env python3
+import copy, json, os, pathlib, sys
+record = pathlib.Path('@RECORD@')
+argv = sys.argv[1:]
+args = [arg for arg in argv if arg != '--pure']
+def dump(name):
+    (record / f'{name}.argv').write_text('\n'.join(argv) + '\n')
+    (record / f'{name}.env').write_text(''.join(f'{k}={v}\n' for k, v in sorted(os.environ.items())))
+if args == ['--version']:
+    print(os.environ.get('FAKE_OPENCODE_VERSION', '1.18.33')); sys.exit(0)
+home = pathlib.Path(os.environ['HOME'])
+import re
+def load(path):
+    try:
+        text = pathlib.Path(path).read_text(encoding='utf-8-sig')
+    except (FileNotFoundError, NotADirectoryError):
+        return {}
+    text = re.sub(r'\{env:([^}]+)\}', lambda m: os.environ.get(m.group(1), ''), text)
+    def file_ref(m):
+        ref = m.group(1)
+        ref = str(home / ref[2:]) if ref.startswith('~/') else ref
+        target = pathlib.Path(ref) if os.path.isabs(ref) else pathlib.Path(path).parent / ref
+        return json.dumps(target.read_text().strip())[1:-1]
+    text = re.sub(r'\{file:([^}]+)\}', file_ref, text)
+    return json.loads(text) if text.strip() else {}
+def merge(target, source):
+    for key, value in source.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            merge(target[key], value)
+        elif key in ('instructions', 'plugin') and isinstance(target.get(key), list) and isinstance(value, list):
+            seen, out = [], []
+            for item in target[key] + value:
+                if json.dumps(item) not in seen:
+                    seen.append(json.dumps(item)); out.append(item)
+            target[key] = out
+        else:
+            target[key] = copy.deepcopy(value)
+    return target
+xdg = os.environ.get('XDG_CONFIG_HOME') or str(home / '.config')
+global_dir = pathlib.Path(xdg) / 'opencode'
+project = not os.environ.get('OPENCODE_DISABLE_PROJECT_CONFIG')
+config = {}
+for name in ['config.json', 'opencode.json', 'opencode.jsonc']:
+    merge(config, load(global_dir / name))
+if os.environ.get('OPENCODE_CONFIG'):
+    merge(config, load(os.environ['OPENCODE_CONFIG']))
+if project:
+    merge(config, load('opencode.json'))
+if os.environ.get('OPENCODE_CONFIG_CONTENT'):
+    merge(config, json.loads(os.environ['OPENCODE_CONFIG_CONTENT']))
+config.setdefault('agent', {}); config.setdefault('mode', {}); config.setdefault('plugin', [])
+dirs = [global_dir]
+if project and pathlib.Path('.opencode').is_dir():
+    dirs.append(pathlib.Path(os.path.abspath('.opencode')))
+if (home / '.opencode').is_dir():
+    dirs.append(home / '.opencode')
+if os.environ.get('OPENCODE_CONFIG_DIR'):
+    dirs.append(pathlib.Path(os.environ['OPENCODE_CONFIG_DIR']))
+for folder in dirs:
+    if folder.name == '.opencode' or str(folder) == os.environ.get('OPENCODE_CONFIG_DIR'):
+        for name in ['opencode.json', 'opencode.jsonc']:
+            merge(config, load(folder / name))
+    for sub in ['agent', 'agents']:
+        root = folder / sub
+        if root.is_dir():
+            for md in sorted(root.rglob('*.md')):
+                name = str(md.relative_to(root).with_suffix(''))
+                text, data, body = md.read_text(), {}, md.read_text()
+                if text.startswith('---\n'):
+                    head, _, body = text[4:].partition('\n---\n')
+                    for line in head.splitlines():
+                        key, _, value = line.partition(':')
+                        value = value.strip()
+                        if key.strip():
+                            data[key.strip()] = json.loads(value) if value in ('true', 'false') or value[:1] in ('{', '[') else value
+                merge(config['agent'], {name: dict(data, prompt=body.strip())})
+    for sub in ['plugin', 'plugins']:
+        root = folder / sub
+        if root.is_dir():
+            for path in sorted(root.iterdir()):
+                url = pathlib.Path(os.path.abspath(path)).as_uri()
+                if path.suffix in ('.ts', '.js') and path.is_file() and url not in config['plugin']:
+                    config['plugin'].append(url)
+if os.environ.get('OPENCODE_PERMISSION'):
+    merge(config.setdefault('permission', {}), json.loads(os.environ['OPENCODE_PERMISSION']))
+if args[:2] == ['debug', 'config']:
+    dump('debug-config')
+    print(json.dumps(config, indent=2)); sys.exit(0)
+def rules(permission):
+    if isinstance(permission, str):
+        return [{'permission': '*', 'action': permission, 'pattern': '*'}]
+    out = []
+    for key, value in (permission or {}).items():
+        if isinstance(value, str):
+            out.append({'permission': key, 'action': value, 'pattern': '*'})
+        else:
+            out.extend({'permission': key, 'action': action, 'pattern': pattern} for pattern, action in value.items())
+    return out
+native = {'build': 'primary', 'plan': 'primary', 'general': 'subagent', 'explore': 'subagent'}
+if args[:2] == ['debug', 'agent']:
+    name = args[2] if len(args) > 2 else ''
+    dump('debug-agent'); dump('debug-agent-' + name.replace('/', '_'))
+    with open(record / 'debug-agents', 'a') as asked:
+        asked.write(name + '\n')
+    over = merge(merge({}, config['mode'].get(name, {})), config['agent'].get(name, {}))
+    known = name in native or name in config['agent'] or name in config['mode']
+    if not known or over.get('disable'):
+        print(f'agent {name} not found', file=sys.stderr); sys.exit(1)
+    tools = [{'permission': key, 'action': 'allow' if on else 'deny', 'pattern': '*'}
+             for key, on in (over.get('tools') or {}).items()]
+    agent = {'name': name, 'options': {}, 'native': name in native,
+             'mode': over.get('mode', native.get(name, 'primary' if name in config['mode'] else 'all')),
+             'permission': [{'permission': '*', 'action': 'allow', 'pattern': '*'}]
+                           + rules(config.get('permission')) + rules(over.get('permission')) + tools}
+    if over.get('prompt'):
+        agent['prompt'] = over['prompt']
+    print(json.dumps(agent, indent=2)); sys.exit(0)
+dump('call')
+(record / 'call.cwd').write_text(os.getcwd() + '\n')
+print('OPENCODE-SCREEN', flush=True)
+sys.exit(int(os.environ.get('FAKE_OPENCODE_EXIT', '0')))
+"#;
