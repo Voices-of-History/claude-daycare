@@ -12,9 +12,13 @@
 //! 1. Claude's structured cache (`cachedUsageUtilization` in `.claude.json`),
 //!    accepted only when it was fetched after `/usage` was typed, or when the
 //!    screen shows that refresh finished and the cache is minutes old at most.
+//!    Claude refetches on every `/usage` but rewrites the cache only once the
+//!    cached reading is a few minutes old, so a recent cache is checked
+//!    against the refreshed screen and never wins with a lower number.
 //! 2. The `/usage` screen itself, replayed through [`crate::terminal`] into
 //!    what a person would see, accepted only after it was seen refreshing and
-//!    the refresh has finished.
+//!    the refresh has finished. The terminal is `METER_ROWS` tall, because
+//!    Claude draws the "Refreshing…" line at the bottom of a long tab.
 //!
 //! Claude asks whether to trust a folder the first time it opens there, with
 //! "No, exit" selected. The sampler therefore runs in its own empty folder
@@ -61,6 +65,13 @@ const RETRY_PAUSE_SPAN_MS: u64 = 1_000;
 /// visit ends. One round is a full `SAMPLE_ATTEMPTS` sequence.
 pub const MAX_CONSECUTIVE_METER_MISSES: u32 = 3;
 const CACHE_METADATA_MAX_AGE: Duration = Duration::from_secs(5 * 60 + 30);
+/// The sampler's terminal is this tall. Claude Code 2.1.258's `/usage` tab
+/// runs well past the 24 rows a pseudo-terminal gets by default, and draws
+/// its "Refreshing…" line and any refresh notice below the bulky
+/// usage-breakdown section, so at 24 rows the sampler never saw them. The
+/// width stays at the 80 columns the screen readers were written against.
+const METER_ROWS: u32 = 150;
+const METER_COLUMNS: u32 = 80;
 
 /// Down arrow and Enter, as a terminal sends them.
 const KEY_DOWN: &[u8] = b"\x1b[B";
@@ -446,9 +457,33 @@ fn screen_weekly_usage(screen: &Screen, requested_model: &str) -> Result<WeeklyU
 
 /// Anthropic's per-model usage endpoint is itself rate limited now and then.
 /// Claude's `/usage` then says "rate limited — try again in a moment" and
-/// never draws a fresh weekly row, however long the sampler waits.
+/// never draws a fresh weekly row, however long the sampler waits. Claude
+/// Code 2.1.326 also says "requests temporarily limited — try again in a
+/// moment" and "Claude is temporarily limiting requests to the usage page".
 fn usage_screen_is_rate_limited(screen: &Screen) -> bool {
-    screen.contains("rate limited")
+    let text = screen.text().to_lowercase();
+    [
+        "rate limited",
+        "temporarily limited",
+        "temporarily limiting",
+    ]
+    .iter()
+    .any(|notice| text.contains(notice))
+}
+
+/// A refresh that failed for another reason. Claude keeps showing the numbers
+/// it had ("Showing last-known usage … (couldn't refresh)", "Could not
+/// refresh usage data"), so the screen is no newer than before `/usage` was
+/// typed. Only a fresh Claude, on the next attempt, can do better.
+fn usage_screen_refresh_failed(screen: &Screen) -> bool {
+    let text = screen.text().to_lowercase();
+    [
+        "could not refresh",
+        "couldn't refresh",
+        "showing last-known usage",
+    ]
+    .iter()
+    .any(|notice| text.contains(notice))
 }
 
 /// What one look at the child's screen and Claude's cache says.
@@ -469,6 +504,8 @@ struct Observation<'a> {
     cache: Option<&'a [u8]>,
     typed_at_ms: u64,
     now_ms: u64,
+    /// The attempt's last look before it gives up waiting.
+    last_look: bool,
 }
 
 fn read_usage(
@@ -490,25 +527,51 @@ fn read_usage(
         return Reading::RateLimited;
     }
     // The screen said it was refreshing after `/usage` was typed, and no
-    // longer does: the refresh finished. A cache written within the last few
-    // minutes then stands (Claude may not refetch a reading that fresh), and
-    // otherwise the refreshed screen answers for itself.
+    // longer does: the refresh finished, and the screen shows what Claude
+    // just fetched.
     let refreshed = compact_terminal_text(observation.since_typed).contains("refreshing")
         && !screen.contains("refreshing")
         && screen.contains("current week");
-    if !refreshed {
+    if !refreshed || usage_screen_refresh_failed(screen) {
         return Reading::Waiting;
     }
+    let shown = screen_weekly_usage(screen, requested_model).ok();
     if let Some(reading) = cached {
         if reading.fetched_at_ms + CACHE_METADATA_MAX_AGE.as_millis() as u64
             >= observation.typed_at_ms
         {
-            return Reading::Answered(reading.snapshot);
+            // Claude refetches on every `/usage` but rewrites its cache only
+            // when the cached reading is old enough (5 minutes in 2.1.258,
+            // 1 minute in 2.1.326). A recent cache can therefore trail the
+            // refreshed screen: after a short turn it still holds the reading
+            // from before the turn. The cache names the meter and its window,
+            // as the visit's other readings did, and the higher of the two
+            // percentages for that meter stands.
+            return match shown {
+                Some(shown)
+                    if shown.meter_key == reading.snapshot.meter_key
+                        && shown.resets_at == reading.snapshot.resets_at =>
+                {
+                    Reading::Answered(WeeklyUsageSnapshot {
+                        used_percentage: reading
+                            .snapshot
+                            .used_percentage
+                            .max(shown.used_percentage),
+                        ..reading.snapshot
+                    })
+                }
+                // The screen does not show the cache's meter: a redraw caught
+                // halfway, or a meter the tab does not list. The next look
+                // usually settles it; on the last one the cache stands alone,
+                // as it always did.
+                _ if observation.last_look => Reading::Answered(reading.snapshot),
+                _ => Reading::Waiting,
+            };
         }
     }
-    match screen_weekly_usage(screen, requested_model) {
-        Ok(snapshot) => Reading::Answered(snapshot),
-        Err(_) => Reading::Waiting,
+    match shown {
+        Some(snapshot) => Reading::Answered(snapshot),
+        None => Reading::Waiting,
     }
 }
 
@@ -935,6 +998,7 @@ fn await_reading(
 ) -> Result<WeeklyUsageSnapshot> {
     let started = Instant::now();
     loop {
+        let last_look = started.elapsed() >= SAMPLE_TIMEOUT;
         let bytes = fs::read(capture).unwrap_or_default();
         let screen = Screen::render(&bytes);
         let cache = fs::read(cache_path).ok();
@@ -945,6 +1009,7 @@ fn await_reading(
             cache: cache.as_deref(),
             typed_at_ms,
             now_ms,
+            last_look,
         };
         match read_usage(&observation, model, local_utc_offset_secs) {
             Reading::Answered(snapshot) => return Ok(snapshot),
@@ -965,7 +1030,7 @@ fn await_reading(
         if child.0.try_wait()?.is_some() {
             return Err(Error::new("Claude exited before /usage answered"));
         }
-        if started.elapsed() >= SAMPLE_TIMEOUT {
+        if last_look {
             return Err(Error::new(format!(
                 "Claude /usage did not answer within {} seconds",
                 SAMPLE_TIMEOUT.as_secs()
@@ -996,6 +1061,13 @@ fn rate_limited_fallback(
     Ok(reading.snapshot)
 }
 
+/// A POSIX shell line that sizes the pseudo-terminal and then replaces itself
+/// with the command that follows it. Sizing is best effort: if `stty` fails,
+/// Claude gets the default size, and only what it draws past row 24 is lost.
+fn size_then_exec() -> String {
+    format!("stty rows {METER_ROWS} cols {METER_COLUMNS} 2>/dev/null; exec")
+}
+
 fn configure_script_command(
     process: &mut Command,
     capture: &str,
@@ -1005,9 +1077,20 @@ fn configure_script_command(
     #[cfg(target_os = "macos")]
     {
         // BSD script accepts the output file followed by an argv vector. -F
-        // flushes each write so the sampler can inspect the live TUI.
+        // flushes each write so the sampler can inspect the live TUI. The
+        // shell sizes the terminal, then execs Claude with its words as
+        // positional parameters, so none of them is ever parsed by a shell.
+        let exec_claude = format!("{} \"$0\" \"$@\"", size_then_exec());
         process
-            .args(["-q", "-F", capture, claude_bin])
+            .args([
+                "-q",
+                "-F",
+                capture,
+                "/bin/sh",
+                "-c",
+                &exec_claude,
+                claude_bin,
+            ])
             .args(claude_args);
         return Ok(());
     }
@@ -1017,11 +1100,12 @@ fn configure_script_command(
         // util-linux script takes the child through --command instead of an
         // argv tail. Quote every word independently: claude_bin is supplied by
         // the caller and may contain spaces or shell metacharacters.
-        let command = std::iter::once(claude_bin)
+        let words = std::iter::once(claude_bin)
             .chain(claude_args.iter().copied())
             .map(crate::paths::shell_quote)
             .collect::<Vec<_>>()
             .join(" ");
+        let command = format!("{} {words}", size_then_exec());
         process
             .args(["-q", "-f", "-e", "-c", &command, capture])
             .env("SHELL", "/bin/sh");
@@ -1156,6 +1240,7 @@ mod tests {
                 cache: None,
                 typed_at_ms: 1_000,
                 now_ms: 2_000,
+                last_look: false,
             };
             match read_usage(&observation, "sonnet", edt) {
                 Reading::Answered(snapshot) => {
@@ -1276,6 +1361,7 @@ mod tests {
                 cache: Some(&cache),
                 typed_at_ms,
                 now_ms: typed_at_ms + 3_000,
+                last_look: false,
             };
             match read_usage(&observation, "sonnet", edt) {
                 Reading::Answered(snapshot) => Some(snapshot.used_percentage),
@@ -1303,6 +1389,259 @@ mod tests {
         assert_eq!(look(&redrawn_screen, &redrawn, old), Some(31.0));
         // A screen never seen refreshing after `/usage` is last week's.
         assert_eq!(look(&redrawn_screen, b"", old), None);
+    }
+
+    #[test]
+    fn a_recent_cache_never_hides_a_higher_refreshed_screen() {
+        // Claude rewrites its cache only once the cached reading is a few
+        // minutes old, so after a short turn the cache can still hold the
+        // reading from before the turn while the refreshed screen has the
+        // turn in it. The screen's higher number stands, on the cache's meter.
+        let limits = format!("{ALL_60},{SONNET_30}");
+        let cache = cache(10_000_000 - 60_000, &limits);
+        let mut screen = b"Current week (Sonnet)\r\n  \xe2\x96\x88 30% used\r\n  Resets Sep 30\r\n\r\n  Refreshing\xe2\x80\xa6\r\n".to_vec();
+        screen.extend_from_slice(b"\x1b[4A\x1b[5G32\x1b[3B\r\x1b[2K");
+        let rendered = Screen::render(&screen);
+        let observation = Observation {
+            screen: &rendered,
+            since_typed: &screen,
+            cache: Some(&cache),
+            typed_at_ms: 10_000_000,
+            now_ms: 10_003_000,
+            last_look: false,
+        };
+        let Reading::Answered(snapshot) = read_usage(&observation, "sonnet", edt) else {
+            panic!("a finished refresh answers");
+        };
+        assert_eq!(
+            snapshot,
+            WeeklyUsageSnapshot {
+                used_percentage: 32.0,
+                resets_at: "live:9:30".to_string(),
+                meter_key: "weekly_scoped:Sonnet".to_string(),
+            }
+        );
+        // A screen that does not show the cache's meter cannot speak for it:
+        // the sampler looks again, and only on its last look before giving
+        // up does the cache stand alone.
+        let other = Screen::render(
+            b"Current week (all models)\r\n  \xe2\x96\x88 99% used\r\n  Resets Sep 30\r\n",
+        );
+        let look = |last_look| {
+            let observation = Observation {
+                screen: &other,
+                since_typed: b"Refreshing",
+                cache: Some(&cache),
+                typed_at_ms: 10_000_000,
+                now_ms: 10_003_000,
+                last_look,
+            };
+            read_usage(&observation, "sonnet", edt)
+        };
+        assert!(matches!(look(false), Reading::Waiting));
+        let Reading::Answered(snapshot) = look(true) else {
+            panic!("the last look lets the cache stand");
+        };
+        assert_eq!(snapshot.used_percentage, 30.0);
+        assert_eq!(snapshot.meter_key, "weekly_scoped:Sonnet");
+    }
+
+    #[test]
+    fn a_refresh_that_kept_the_old_numbers_never_answers() {
+        // 2.1.258 and 2.1.326 word a failed refresh differently; neither
+        // screen is newer than the one before `/usage` was typed.
+        let limits = format!("{ALL_60},{SONNET_30}");
+        let cache = cache(10_000_000 - 60_000, &limits);
+        for notice in [
+            "Showing last-known usage as of 2m ago (could not refresh)",
+            "Showing last-known usage as of 2m ago (couldn't refresh)",
+            "Could not refresh usage data",
+            "Couldn't refresh usage data",
+        ] {
+            let bytes = format!(
+                "Current week (Sonnet)\r\n  \u{2588} 30% used\r\n  Resets Sep 30\r\n\r\n  {notice}\r\n"
+            );
+            let screen = Screen::render(bytes.as_bytes());
+            let observation = Observation {
+                screen: &screen,
+                since_typed: b"Refreshing",
+                cache: Some(&cache),
+                typed_at_ms: 10_000_000,
+                now_ms: 10_003_000,
+                last_look: false,
+            };
+            assert!(
+                matches!(read_usage(&observation, "sonnet", edt), Reading::Waiting),
+                "{notice}"
+            );
+        }
+        // 2.1.326's rate-limit wording falls back to the cache at once, as
+        // the older "rate limited" always did.
+        for notice in [
+            "Per-model breakdown unavailable (requests temporarily limited \u{2014} try again in a moment)",
+            "Showing last-known usage as of 2m ago (rate limited until 3pm)",
+            "Claude is temporarily limiting requests to the usage page (not your usage limit). Try again in a moment.",
+        ] {
+            let screen = Screen::render(format!("Current week (Sonnet)\r\n  {notice}\r\n").as_bytes());
+            assert!(usage_screen_is_rate_limited(&screen), "{notice}");
+        }
+    }
+
+    /// Claude Code 2.1.258 and 2.1.326 in the meter's terminal at its new
+    /// size. Recorded with `script -q -F` on 2026-11-18, with the runner's own
+    /// flags and sizing line, 31 and 16 seconds after another `/usage` had
+    /// rewritten the cache, so neither Claude rewrote it: the case that
+    /// stalled every visit start for five minutes. The folder path and the
+    /// usage breakdown are anonymized byte for byte.
+    const CAPTURE_2_1_258: &[u8] = include_bytes!("../tests/fixtures/usage-2.1.258-150-rows.log");
+    const CAPTURE_2_1_326: &[u8] = include_bytes!("../tests/fixtures/usage-2.1.326-150-rows.log");
+    /// The same 2.1.258 at the 24 rows the meter used to get, 47 seconds after
+    /// the cache was rewritten.
+    const CAPTURE_2_1_258_24_ROWS: &[u8] =
+        include_bytes!("../tests/fixtures/usage-2.1.258-24-rows.log");
+
+    /// Eastern standard time, where the November captures were taken.
+    fn est(_: u64) -> i64 {
+        -5 * 3600
+    }
+
+    /// The cache those Claudes held: 23% of the week, the Fable meter at 11%.
+    fn november_cache(fetched_at_ms: u64, weekly_percent: u32) -> Vec<u8> {
+        cache(
+            fetched_at_ms,
+            &format!(
+                r#"{{"kind":"weekly_all","group":"weekly","percent":{weekly_percent},"resets_at":"2026-11-22T21:00:00.387376+00:00","scope":null,"is_active":false}},{{"kind":"weekly_scoped","group":"weekly","percent":11,"resets_at":"2026-11-22T21:00:00.387586+00:00","scope":{{"model":{{"id":null,"display_name":"Fable"}}}},"is_active":true}}"#
+            ),
+        )
+    }
+
+    /// One place a 100 ms poll could have looked, after `/usage` was typed.
+    struct Poll {
+        end: usize,
+        /// "Refreshing…" was drawn after typing and is gone again.
+        refresh_finished: bool,
+        /// What each cache answered there.
+        answers: Vec<Option<WeeklyUsageSnapshot>>,
+    }
+
+    /// Every place a poll could have looked, from `/usage` being typed (at
+    /// byte `typed`, as recorded) to the end of the capture.
+    fn polls(capture: &[u8], typed: usize, caches: &[Vec<u8>], typed_at_ms: u64) -> Vec<Poll> {
+        assert!(
+            !Screen::render(&capture[..typed]).contains("current week"),
+            "the usage tab was not open before /usage was typed"
+        );
+        (typed + 1..=capture.len())
+            .filter(|&end| end == capture.len() || capture[end] == 0x1b)
+            .map(|end| {
+                let prefix = &capture[..end];
+                let screen = Screen::render(prefix);
+                let answers = caches
+                    .iter()
+                    .map(|cache| {
+                        let observation = Observation {
+                            screen: &screen,
+                            since_typed: &prefix[typed..],
+                            cache: Some(cache),
+                            typed_at_ms,
+                            now_ms: typed_at_ms + 3_000,
+                            last_look: false,
+                        };
+                        match read_usage(&observation, "sonnet", est) {
+                            Reading::Answered(snapshot) => Some(snapshot),
+                            Reading::RateLimited => panic!("the capture was never rate limited"),
+                            Reading::Waiting => None,
+                        }
+                    })
+                    .collect();
+                Poll {
+                    end,
+                    refresh_finished: compact_terminal_text(&prefix[typed..])
+                        .contains("refreshing")
+                        && !screen.contains("refreshing"),
+                    answers,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_cache_claude_did_not_rewrite_answers_once_the_tall_screen_refreshed() {
+        let expected = WeeklyUsageSnapshot {
+            used_percentage: 23.0,
+            resets_at: "live:11:22".to_string(),
+            meter_key: "weekly_all:account".to_string(),
+        };
+        for (version, capture, typed, typed_at_ms, cache_age_ms) in [
+            ("2.1.258", CAPTURE_2_1_258, 1331, 1_795_025_973_924, 31_500),
+            ("2.1.326", CAPTURE_2_1_326, 1709, 1_795_025_958_106, 15_600),
+        ] {
+            // The cache those Claudes really had, and one from before a turn
+            // that moved the meter: either way every answer is the refreshed
+            // 23%, and nothing answers before the refresh has finished.
+            let caches = [
+                november_cache(typed_at_ms - cache_age_ms, 23),
+                november_cache(typed_at_ms - 2 * 60_000, 20),
+            ];
+            let polls = polls(capture, typed, &caches, typed_at_ms);
+            let finished = polls
+                .iter()
+                .position(|poll| poll.refresh_finished)
+                .unwrap_or_else(|| panic!("{version} draws and clears Refreshing at 150 rows"));
+            for which in 0..caches.len() {
+                assert!(
+                    polls.iter().any(|poll| poll.answers[which].is_some()),
+                    "{version} answered with cache {which}"
+                );
+            }
+            for (index, poll) in polls.iter().enumerate() {
+                for snapshot in poll.answers.iter().flatten() {
+                    assert!(index >= finished, "{version} answered mid-refresh");
+                    assert_eq!(snapshot, &expected, "{version} at byte {}", poll.end);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn at_24_rows_2_1_258_never_shows_its_refresh_so_a_recent_cache_stalls() {
+        // Why the meter's terminal is tall: at 24 rows the tab's
+        // "Refreshing…" line falls below the last row, and a cache Claude did
+        // not rewrite can never be shown to be current.
+        let typed = 1323;
+        let since_typed = compact_terminal_text(&CAPTURE_2_1_258_24_ROWS[typed..]);
+        assert!(since_typed.contains("currentweek"));
+        assert!(!since_typed.contains("refreshing"));
+        let typed_at_ms = 1_795_025_989_636;
+        let caches = [november_cache(typed_at_ms - 47_200, 23)];
+        assert!(polls(CAPTURE_2_1_258_24_ROWS, typed, &caches, typed_at_ms)
+            .iter()
+            .all(|poll| poll.answers[0].is_none()));
+        assert!(compact_terminal_text(&CAPTURE_2_1_258[1331..]).contains("refreshing"));
+    }
+
+    #[test]
+    fn the_meter_terminal_is_tall_enough_for_the_whole_usage_tab() {
+        // The runner's own command line, with `stty size` standing in for
+        // Claude: what it prints is the size Claude would have been given.
+        let dir = crate::testdir::unique_dir("daycare-usage-meter-size");
+        let capture = dir.join("size.log");
+        let mut process = Command::new("/usr/bin/script");
+        configure_script_command(&mut process, capture.to_str().unwrap(), "stty", &["size"])
+            .unwrap();
+        let mut child = process
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        let shown = String::from_utf8_lossy(&fs::read(&capture).unwrap()).to_string();
+        assert!(
+            shown.contains(&format!("{METER_ROWS} {METER_COLUMNS}")),
+            "{shown:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1347,6 +1686,7 @@ mod tests {
             cache: Some(OTTO_CACHE),
             typed_at_ms: now_ms - 5_000,
             now_ms,
+            last_look: false,
         };
         assert!(matches!(
             read_usage(&observation, "sonnet", edt),
