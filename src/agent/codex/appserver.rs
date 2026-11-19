@@ -297,10 +297,9 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn stdio_requests_include_params_and_follow_initialization() {
-        use std::os::unix::fs::PermissionsExt;
         let root = crate::testdir::unique_dir("daycare-appserver");
         let script = root.join("codex");
-        std::fs::write(
+        crate::testdir::write_executable(
             &script,
             r#"#!/usr/bin/env python3
 import json, sys
@@ -318,9 +317,7 @@ assert req['method'] == 'account/read' and req['params'] == {}
 print(json.dumps({'method': 'notification'}), flush=True)
 reply(req, {'account': {'type': 'chatgpt', 'planType': 'pro'}})
 "#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let command = CodexCommand {
             program: script.to_string_lossy().into_owned(),
             env_remove: vec![],
