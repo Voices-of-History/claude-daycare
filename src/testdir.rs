@@ -82,3 +82,27 @@ pub fn write_executable(path: &std::path::Path, body: &str) {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 }
+
+/// Copy an executable (a built runner) for the same reason, the same way:
+/// `std::fs::copy` holds the copy's write handle in this process, where
+/// another test thread's `fork` can inherit it. On Nov 19 that failed a Linux
+/// release build: `self_update_cli` ran a runner it had just copied and got
+/// `ETXTBSY`. `/bin/cp` keeps the handle in a process that has exited first.
+pub fn copy_executable(from: &std::path::Path, to: &std::path::Path) {
+    let status = std::process::Command::new("/bin/cp")
+        .arg(from)
+        .arg(to)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "cp {} {} failed",
+        from.display(),
+        to.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}

@@ -3,7 +3,6 @@
 #![cfg(unix)]
 mod support;
 use serde_json::{json, Value};
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 fn usage(refresh_method: &str, failure: &str, model: &str) -> (std::process::Output, Value, Value) {
@@ -23,7 +22,9 @@ fn usage_version(
         "last_refresh":"2026-09-28T00:00:00Z", "tokens":{"account_id":"mock-account","access_token":"old-fake","refresh_token":"old-fake"}});
     std::fs::write(owner.join("auth.json"), auth.to_string()).unwrap();
     let script = root.join("codex");
-    std::fs::write(&script, r#"#!/usr/bin/env python3
+    support::testdir::write_executable(
+        &script,
+        r#"#!/usr/bin/env python3
 import json, os, pathlib, sys
 if sys.argv[1:] == ['--version']:
     print('codex-cli ' + os.environ['MOCK_CODEX_VERSION']); sys.exit(0)
@@ -61,8 +62,8 @@ for line in sys.stdin:
         'account/rateLimits/read': {'rateLimits':{'primary':{'usedPercent':20,'windowDurationMins':10080,'resetsAt':1791055017}}}
     }[method]
     print(json.dumps({'id':req['id'],'result':result}),flush=True)
-"#).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+    );
     let output = Command::new(env!("CARGO_BIN_EXE_daycare-runner"))
         .args(["usage", "--agent", "codex", "--codex-bin"])
         .arg(&script)

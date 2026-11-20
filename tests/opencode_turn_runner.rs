@@ -6,7 +6,6 @@ use daycare_runner::launch::SessionMode;
 use daycare_runner::paths::Layout;
 use daycare_runner::turn::{run_turn, TurnOutcome, TurnPurpose, TurnRequest};
 use daycare_runner::workspace::Workspace;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -26,7 +25,9 @@ impl Harness {
         std::fs::copy(fixtures.join(fixture), dir.join("stream.jsonl")).unwrap();
         std::fs::write(dir.join("scenario"), scenario).unwrap();
         let bin = dir.join("fake-opencode");
-        std::fs::write(&bin, r##"#!/usr/bin/env python3
+        support::testdir::write_executable(
+            &bin,
+            r##"#!/usr/bin/env python3
 import json, os, pathlib, sys, time
 root = pathlib.Path(__file__).parent
 scenario = (root / 'scenario').read_text()
@@ -61,8 +62,8 @@ elif args[0] == 'run':
     (root / 'finished').touch()
 else:
     sys.exit(2)
-"##).unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+"##,
+        );
         let agent = OpencodeAgent::new(bin.to_str().unwrap(), &Layout::at(&dir));
         Self {
             dir,

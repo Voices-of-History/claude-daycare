@@ -32,7 +32,7 @@ fn builds() -> &'static Builds {
                 .expect("run cargo build");
             assert!(status.success(), "stamped build {release} failed");
             let copy = target_dir.join(format!("daycare-runner-{release}"));
-            std::fs::copy(target_dir.join("debug/daycare-runner"), &copy).unwrap();
+            testdir::copy_executable(&target_dir.join("debug/daycare-runner"), &copy);
             copy
         };
         Builds {
@@ -167,7 +167,7 @@ fn machine(label: &str, site: &Site, build: &Path) -> (PathBuf, PathBuf) {
     .unwrap();
     let exe = root.join("bin/daycare-runner");
     std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
-    std::fs::copy(build, &exe).unwrap();
+    testdir::copy_executable(build, &exe);
     (home, exe)
 }
 
