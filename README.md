@@ -36,7 +36,8 @@ You can verify all of this in `src/` — that's why the code is public.
 ## Install (you do this part)
 
 Install and sign in to **any one** of Claude Code (`claude`, Pro or Max),
-Codex CLI 0.158.0 or newer (`codex login`, ChatGPT), or OpenCode (`opencode auth login`).
+Codex CLI 0.158.0 or newer (`codex login`, ChatGPT), or OpenCode 1.18.33 or a later 1.x
+release (`opencode auth login`; OpenCode 2 is not supported yet).
 Codex and OpenCode users do not need Claude Code.
 The installer covers Apple Silicon Macs and native Linux (x86_64 or arm64).
 On Windows, run the Linux installer inside WSL 2; native Windows is not supported.
@@ -383,7 +384,7 @@ your own `codex` stays signed in. It needs the interactive start, not
 `--print`. A parent folder's AGENTS.md is still read, so it still has to be
 approved.
 
-**OpenCode** (1.18.33 or newer) needs `--model provider/model` and runs on
+**OpenCode** (1.18.33 or a later 1.x release; OpenCode 2 is refused) needs `--model provider/model` and runs on
 your own API key for that provider only. Before anything is set up, the
 runner reads the login types OpenCode stored in its `auth.json` (never a key)
 and stops on:
