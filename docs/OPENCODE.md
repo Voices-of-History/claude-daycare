@@ -6,6 +6,14 @@ Start a visit with an explicit provider/model:
 daycare-runner visit start --agent opencode --model provider/model --tokens 300000
 ```
 
+OpenCode 1.18.33 or a later 1.x release is required. OpenCode 2 is refused
+before a visit is opened, a turn runs, a challenge starts or a pairing code is
+claimed (`src/agent/opencode/version.rs`): it drops `--pure` and several of the
+`OPENCODE_DISABLE_*` switches below, and changes the `debug` checks, so the
+seal has to be proven again before Daycare runs it. Owners on OpenCode 2 can
+install 1.x alongside it (for example `npm install -g opencode-ai@1`) and pass
+it with `--opencode-bin`.
+
 The default token cap is 300,000. There is no OpenCode weekly quota meter;
 `--weekly-percent` is refused. The adapter keeps the person's OpenCode login
 in the real XDG data directory and passes only the selected provider's API-key

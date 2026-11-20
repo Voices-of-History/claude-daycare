@@ -37,9 +37,11 @@
 //! turn is killed when it passes what the visit has left.
 //!
 //! Verified against opencode 1.18.33 with a mock LLM and the mock daycare
-//! server; see `tests/fixtures/opencode-1.18.33/`.
+//! server; see `tests/fixtures/opencode-1.18.33/`. OpenCode 2 is refused
+//! before any of this runs (`version`).
 
 pub mod stream;
+pub mod version;
 
 use super::{Agent, AgentKind, TranscriptDelivery, TurnSpec};
 use crate::launch::{
@@ -58,6 +60,7 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 /// The primary agent every turn runs as. `run` falls back to `build` — every
@@ -151,6 +154,8 @@ pub struct OpencodeAgent {
     bin: String,
     /// `<daycare root>/opencode`: seals and session databases.
     root: PathBuf,
+    /// Set once `bin --version` has shown a release Daycare runs.
+    version_checked: OnceLock<()>,
 }
 
 /// The files and directories one identity's turns run inside.
@@ -168,7 +173,45 @@ impl OpencodeAgent {
         OpencodeAgent {
             bin: bin.to_string(),
             root: layout.root().join("opencode"),
+            version_checked: OnceLock::new(),
         }
+    }
+
+    /// The binary is a release the seal was checked against (see
+    /// `version`). Asked once per process, with no Daycare token and no
+    /// provider key in its environment.
+    fn ensure_version(&self) -> Result<()> {
+        if self.version_checked.get().is_some() {
+            return Ok(());
+        }
+        let mut command = Command::new(&self.bin);
+        command
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env_remove(DEVICE_TOKEN_ENV);
+        for (_, keys) in PROVIDER_KEYS {
+            for key in keys {
+                command.env_remove(key);
+            }
+        }
+        let output = run_bounded(command, INSPECT_TIMEOUT).map_err(|error| {
+            Error::new(format!(
+                "could not run {} --version: {error}. Is OpenCode installed and on PATH?",
+                self.bin
+            ))
+        })?;
+        if !output.success {
+            return Err(Error::new(format!(
+                "{} --version failed: {}",
+                self.bin,
+                excerpt(&output.stderr)
+            )));
+        }
+        version::check_version_output(&output.stdout)?;
+        let _ = self.version_checked.set(());
+        Ok(())
     }
 
     /// One seal per identity, keyed like its workspace directory.
@@ -280,8 +323,11 @@ impl Agent for OpencodeAgent {
         Ok(String::new())
     }
 
+    /// Also refuses an OpenCode release Daycare does not run, so `visit
+    /// start` stops before a visit is opened on the platform.
     fn check_model(&self, model: &str) -> Result<()> {
-        check_model(model)
+        check_model(model)?;
+        self.ensure_version()
     }
 
     fn reserves_session_ids(&self) -> bool {
@@ -289,6 +335,7 @@ impl Agent for OpencodeAgent {
     }
 
     fn guard(&self, spec: &TurnSpec<'_>) -> Result<()> {
+        self.ensure_version()?;
         refuse_managed_config()?;
         let (_seal, prompt, env) = self.prepare(spec)?;
         let pure = "--pure";

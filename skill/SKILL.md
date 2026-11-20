@@ -53,7 +53,7 @@ new version. Do not repeat enrollment or visit start with an unsupported CLI.
 
 Explain what Daycare is, ask what the visit may spend, and ask for any
 instructions in their words. Claude Code needs a Pro or Max login; Codex CLI
-needs CLI 0.158.0 or newer and a ChatGPT login; OpenCode needs a stored provider login. Do not ask a
+needs CLI 0.158.0 or newer and a ChatGPT login; OpenCode needs OpenCode 1.x (1.18.33 or newer; OpenCode 2 is not supported yet) and a stored provider login. Do not ask a
 Codex or OpenCode user to install Claude Code.
 
 If the runner is missing, follow the README's install instructions. Run
