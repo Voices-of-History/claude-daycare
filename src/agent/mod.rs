@@ -10,6 +10,7 @@
 //! `AgentKind` is the data half: it is stored in visit records and keys
 //! `sessions.json`, because a Claude session id cannot be resumed by Codex.
 
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod opencode;
@@ -33,6 +34,8 @@ pub enum AgentKind {
     Claude,
     Codex,
     Opencode,
+    /// Google's Antigravity CLI (`agy`).
+    Antigravity,
 }
 
 impl AgentKind {
@@ -41,6 +44,7 @@ impl AgentKind {
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
             AgentKind::Opencode => "opencode",
+            AgentKind::Antigravity => "antigravity",
         }
     }
 
@@ -49,8 +53,9 @@ impl AgentKind {
             "claude" => Ok(AgentKind::Claude),
             "codex" => Ok(AgentKind::Codex),
             "opencode" => Ok(AgentKind::Opencode),
+            "antigravity" | "agy" => Ok(AgentKind::Antigravity),
             other => Err(Error::new(format!(
-                "--agent must be claude, codex, or opencode; got {other:?}"
+                "--agent must be claude, codex, opencode, or antigravity; got {other:?}"
             ))),
         }
     }
@@ -209,6 +214,7 @@ pub struct AgentBins {
     pub claude: String,
     pub codex: String,
     pub opencode: String,
+    pub antigravity: String,
 }
 
 impl Default for AgentBins {
@@ -217,6 +223,7 @@ impl Default for AgentBins {
             claude: "claude".into(),
             codex: "codex".into(),
             opencode: "opencode".into(),
+            antigravity: "agy".into(),
         }
     }
 }
@@ -228,6 +235,10 @@ pub fn agent(kind: AgentKind, bins: &AgentBins, layout: &Layout) -> Result<Box<d
         AgentKind::Claude => Box::new(claude::ClaudeAgent::new(&bins.claude)),
         AgentKind::Codex => Box::new(codex::CodexAgent::new(&bins.codex, layout)?),
         AgentKind::Opencode => Box::new(opencode::OpencodeAgent::new(&bins.opencode, layout)),
+        AgentKind::Antigravity => Box::new(antigravity::AntigravityAgent::new(
+            &bins.antigravity,
+            layout,
+        )),
     })
 }
 
@@ -240,7 +251,12 @@ mod tests {
         assert_eq!(AgentKind::parse(" Codex ").unwrap(), AgentKind::Codex);
         assert_eq!(AgentKind::parse("claude").unwrap(), AgentKind::Claude);
         let error = AgentKind::parse("gemini").unwrap_err().to_string();
-        assert!(error.contains("claude, codex, or opencode"), "{error}");
+        assert!(
+            error.contains("claude, codex, opencode, or antigravity"),
+            "{error}"
+        );
+        assert_eq!(AgentKind::parse("agy").unwrap(), AgentKind::Antigravity);
+        assert_eq!(AgentKind::Antigravity.as_str(), "antigravity");
         assert_eq!(AgentKind::default(), AgentKind::Claude);
         assert_eq!(
             serde_json::to_string(&AgentKind::Codex).unwrap(),

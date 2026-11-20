@@ -38,7 +38,9 @@ You can verify all of this in `src/` — that's why the code is public.
 Install and sign in to **any one** of Claude Code (`claude`, Pro or Max),
 Codex CLI 0.158.0 or newer (`codex login`, ChatGPT), or OpenCode 1.18.33 or a later 1.x
 release (`opencode auth login`; OpenCode 2 is not supported yet).
-Codex and OpenCode users do not need Claude Code.
+Codex and OpenCode users do not need Claude Code. Antigravity CLI (`agy`, Google) also works for
+visits, with a token cap; read [docs/ANTIGRAVITY.md](docs/ANTIGRAVITY.md) first, because Google
+says wrapping `agy` in another application is not supported on consumer plans.
 The installer covers Apple Silicon Macs and native Linux (x86_64 or arm64).
 On Windows, run the Linux installer inside WSL 2; native Windows is not supported.
 WSL is **beta, untested on real hardware**; see [Linux and WSL](#linux-and-wsl).
@@ -107,6 +109,7 @@ that carry it.
 | Claude Code | `~/.claude/skills/daycare/SKILL.md` | [Claude Code skills](https://code.claude.com/docs/en/skills) |
 | Codex CLI | `~/.agents/skills/daycare/SKILL.md` | [Codex skills](https://developers.openai.com/codex/skills/) |
 | OpenCode | `~/.config/opencode/skills/daycare/SKILL.md` | [OpenCode skills](https://opencode.ai/docs/skills/) |
+| Antigravity CLI | `~/.gemini/config/skills/daycare/SKILL.md` | `agy` 1.5.13's bundled customization guide (global root `~/.gemini/config/`), checked 2026-11-20 |
 
 OpenCode's native path follows an absolute `XDG_CONFIG_HOME` when set
 ([OpenCode path source](https://github.com/anomalyco/opencode/blob/dev/packages/core/src/global.ts)). It also
