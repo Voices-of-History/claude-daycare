@@ -378,13 +378,9 @@ impl Ledger {
                 if usage.is_empty() {
                     self.usage_incomplete = true;
                 }
-                // Cache reads are real tokens the account paid for; leaving
-                // them out would let a heavily-cached visit run past its cap.
-                let counted = usage.input_tokens.unwrap_or(0)
-                    + usage.output_tokens.unwrap_or(0)
-                    + usage.cache_read_input_tokens.unwrap_or(0)
-                    + usage.cache_creation_input_tokens.unwrap_or(0);
-                self.tokens_used += counted;
+                // Cache reads count too: see `TurnUsage::counted_tokens`, the
+                // same sum a same-turn follow-up is checked against.
+                self.tokens_used += usage.counted_tokens();
                 self.cost_usd += usage.total_cost_usd.unwrap_or(0.0);
                 if rate_limit_blocks(usage) {
                     self.rate_limited = true;
@@ -541,6 +537,11 @@ impl Ledger {
 /// opened a match the visit could not finish, and none of the three knew how
 /// many turns remained.
 ///
+/// The second-to-last turn used to add "start nothing new". With the last turn
+/// that left only the first turn of a 3-turn visit free to begin anything, and
+/// on 2026-11-20 two visits spent every turn looking around. It now says to
+/// finish what is open and otherwise make a move that fits in one turn.
+///
 /// Turns are stated only when the person bounded the visit by turns: the
 /// safety cap is a runaway guard, and quoting "197 turns left" to a visit the
 /// weekly meter will stop first would invite exactly the over-commitment this
@@ -553,7 +554,7 @@ pub fn budget_check(budget: &Budget, ledger: &Ledger, elapsed: Duration) -> Stri
         let left = limit.saturating_sub(ledger.turns_used);
         parts.push(match left {
             0 | 1 => "this is the last turn of this visit".to_string(),
-            2 => "2 turns left in this visit, counting this one; finish or close out what is open, start nothing new".to_string(),
+            2 => "2 turns left in this visit, counting this one; finish what is open first, and if nothing is, make a move that fits in one turn".to_string(),
             n => format!("{n} turns left in this visit, counting this one"),
         });
     }
@@ -833,6 +834,41 @@ impl VisitRecord {
         self.model
             .as_deref()
             .unwrap_or(crate::launch::DEFAULT_TURN_MODEL)
+    }
+
+    /// Whether the visit can still pay for a same-turn follow-up after a run
+    /// that spent `spent`, counted as the ledger will count it: not once the
+    /// token or cost cap is reached, and not when that run was rate-limited.
+    /// The follow-up costs no turn, so the turn bound never refuses it; the
+    /// weekly meter is read after the turn, as for any turn.
+    pub fn has_room_after(&self, spent: Option<&TurnUsage>) -> bool {
+        if spent.is_some_and(rate_limit_blocks) {
+            return false;
+        }
+        let tokens = spent.map_or(0, TurnUsage::counted_tokens);
+        if let Some(limit) = self.budget.tokens {
+            if self.ledger.tokens_used.saturating_add(tokens) >= limit {
+                return false;
+            }
+        }
+        let cost = spent.and_then(|usage| usage.total_cost_usd).unwrap_or(0.0);
+        if let Some(limit) = self.budget.cost_usd {
+            if self.ledger.cost_usd + cost >= limit {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The tokens a same-turn follow-up may spend under the visit's token cap,
+    /// with the run before it counted; `None` when the visit has no token cap.
+    pub fn tokens_left_after(&self, spent: Option<&TurnUsage>) -> Option<u64> {
+        let tokens = spent.map_or(0, TurnUsage::counted_tokens);
+        self.budget.tokens.map(|limit| {
+            limit
+                .saturating_sub(self.ledger.tokens_used)
+                .saturating_sub(tokens)
+        })
     }
 
     pub fn open(
@@ -2020,6 +2056,68 @@ mod tests {
         clear_recall(&layout, "v-1");
         assert!(!recall_requested(&layout, "v-1"));
     }
+
+    fn capped(tokens: Option<u64>, cost_usd: Option<f64>, turns: Option<u32>) -> VisitRecord {
+        VisitRecord::open(
+            "visit-1",
+            "identity-1",
+            "Pip",
+            Budget {
+                tokens,
+                cost_usd,
+                turns,
+                ..Budget::default()
+            },
+            None,
+            "2026-11-20T18:00:00Z",
+        )
+    }
+
+    /// A same-turn follow-up is paid from the same caps as any turn, counted
+    /// the way the ledger counts, with the run before it already spent.
+    #[test]
+    fn a_follow_up_fits_only_inside_the_token_and_cost_caps() {
+        let spent = TurnUsage {
+            input_tokens: Some(300),
+            cache_read_input_tokens: Some(200),
+            total_cost_usd: Some(0.5),
+            ..TurnUsage::default()
+        };
+        let mut record = capped(Some(1_000), Some(2.0), None);
+        record.ledger.tokens_used = 400;
+        record.ledger.cost_usd = 1.0;
+        assert!(record.has_room_after(Some(&spent)));
+        assert_eq!(record.tokens_left_after(Some(&spent)), Some(100));
+
+        record.ledger.tokens_used = 500;
+        assert!(!record.has_room_after(Some(&spent)));
+        assert_eq!(record.tokens_left_after(Some(&spent)), Some(0));
+
+        record.ledger.tokens_used = 0;
+        record.ledger.cost_usd = 1.5;
+        assert!(!record.has_room_after(Some(&spent)));
+
+        let uncapped = capped(None, None, None);
+        assert!(uncapped.has_room_after(None));
+        assert!(uncapped.has_room_after(Some(&spent)));
+        assert_eq!(uncapped.tokens_left_after(Some(&spent)), None);
+
+        let blocked = TurnUsage {
+            rate_limit_status: Some("rejected".into()),
+            ..TurnUsage::default()
+        };
+        assert!(!uncapped.has_room_after(Some(&blocked)));
+    }
+
+    /// The follow-up is part of the turn already counted, so the last turn of a
+    /// turn-bounded visit can still be asked for its move.
+    #[test]
+    fn the_turn_bound_never_refuses_a_follow_up() {
+        let mut last = capped(None, None, Some(1));
+        last.ledger.record_turn(true, None);
+        assert!(last.has_room_after(None));
+    }
+
     fn bounded(turns: Option<u32>, weekly_share: Option<f64>, secs: Option<u64>) -> Budget {
         Budget {
             turns,
@@ -2086,7 +2184,7 @@ mod tests {
         ledger.turns_used = 1;
         let penultimate = budget_check(&bounded(Some(3), None, None), &ledger, Duration::ZERO);
         assert!(
-            penultimate.starts_with("Budget check: 2 turns left in this visit, counting this one; finish or close out what is open, start nothing new;"),
+            penultimate.starts_with("Budget check: 2 turns left in this visit, counting this one; finish what is open first, and if nothing is, make a move that fits in one turn;"),
             "{penultimate}"
         );
         // Over-spent by a failed final turn still reads as the last turn, never a negative.
