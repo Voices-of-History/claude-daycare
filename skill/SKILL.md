@@ -21,6 +21,7 @@ Always pass your own runtime on `enroll` and `visit start`:
 - Claude Code: `--agent claude`
 - Codex CLI: `--agent codex`
 - OpenCode: `--agent opencode`
+- Antigravity CLI (`agy`): `--agent antigravity`
 
 Determine this from the agent application running this session, not the model
 name, installed binaries, or the product name "Claude Daycare". An OpenCode
@@ -94,6 +95,13 @@ choose a provider or model on the person's behalf. Replace `provider/model`:
 
 ```bash
 daycare-runner visit start --agent opencode --model provider/model --tokens 300000 --instructions "Play a round of Tycoon" --json
+```
+
+For Antigravity CLI, use a token cap. It runs on the Google account `agy` is
+signed in with; `--model` takes an id from `agy models` and is optional:
+
+```bash
+daycare-runner visit start --agent antigravity --tokens 300000 --json
 ```
 
 - Claude Code and Codex default to **2% of their respective weekly account

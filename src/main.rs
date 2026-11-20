@@ -902,6 +902,9 @@ struct AgentOpts {
     /// OpenCode binary to run.
     #[arg(long, default_value = "opencode")]
     opencode_bin: String,
+    /// Antigravity CLI binary to run.
+    #[arg(long, default_value = "agy")]
+    antigravity_bin: String,
 }
 
 impl AgentOpts {
@@ -914,6 +917,7 @@ impl AgentOpts {
             claude: self.claude_bin.clone(),
             codex: self.codex_bin.clone(),
             opencode: self.opencode_bin.clone(),
+            antigravity: self.antigravity_bin.clone(),
         }
     }
 
@@ -930,6 +934,8 @@ impl AgentOpts {
             self.codex_bin.clone(),
             "--opencode-bin".into(),
             self.opencode_bin.clone(),
+            "--antigravity-bin".into(),
+            self.antigravity_bin.clone(),
         ]
     }
 }
@@ -1068,8 +1074,17 @@ fn preflight_agents(
     let mut installed = Vec::new();
     let mut ready = Vec::new();
     let mut codex_version_error = None;
-    for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Opencode] {
-        let Some((true, version)) = local_probe(kind.as_str(), &["--version"]) else {
+    for kind in [
+        AgentKind::Claude,
+        AgentKind::Codex,
+        AgentKind::Opencode,
+        AgentKind::Antigravity,
+    ] {
+        let bin = match kind {
+            AgentKind::Antigravity => "agy",
+            other => other.as_str(),
+        };
+        let Some((true, version)) = local_probe(bin, &["--version"]) else {
             continue;
         };
         installed.push(kind);
@@ -1125,6 +1140,14 @@ fn preflight_agents(
                     })
                 })
             }
+            // A listing of models needs the Google sign-in and makes no model
+            // call.
+            AgentKind::Antigravity => {
+                agent::antigravity::check_version_output(&version).is_ok()
+                    && local_probe("agy", &["models"]).is_some_and(|(ok, text)| {
+                        ok && !agent::antigravity::model_ids(&text).is_empty()
+                    })
+            }
         };
         if signed_in {
             ready.push(kind);
@@ -1138,13 +1161,13 @@ fn preflight_agents(
         }
     }
     if ready.is_empty() {
-        return Err(Error::new("No supported agent is installed and signed in. Choose Claude Code (run `claude` and /login with Pro or Max), Codex CLI (`codex login` with ChatGPT), or OpenCode (`opencode auth login` for your provider), then retry. Login inspection must succeed; no pairing code was claimed."));
+        return Err(Error::new("No supported agent is installed and signed in. Choose Claude Code (run `claude` and /login with Pro or Max), Codex CLI (`codex login` with ChatGPT), OpenCode (`opencode auth login` for your provider), or Antigravity CLI (run `agy` and sign in), then retry. Login inspection must succeed; no pairing code was claimed."));
     }
     let selected = match choice {
         Some(kind) if ready.contains(&kind) => kind,
         Some(kind) => return Err(Error::new(format!("{kind} is not installed and signed in; choose a ready agent with --agent. Ready: {}", agent_names(&ready)))),
         None if ready.len() == 1 => ready[0],
-        None => return Err(Error::new(format!("Several agents are signed in: {}. Choose this machine's default by adding --agent claude, --agent codex, or --agent opencode. No pairing code was claimed.", agent_names(&ready)))),
+        None => return Err(Error::new(format!("Several agents are signed in: {}. Choose this machine's default by adding --agent claude, --agent codex, --agent opencode, or --agent antigravity. No pairing code was claimed.", agent_names(&ready)))),
     };
     Ok((installed, ready, selected))
 }
@@ -1450,9 +1473,12 @@ fn enroll(
             println!();
             println!("Default agent: {}. Ready: {}.", config.default_agent, agent_names(&config.ready_agents));
             println!("Next:");
-            let visit_budget = if default_agent == AgentKind::Opencode {
-                "--tokens 300000 --model provider/model"
-            } else { "--weekly-percent 2" };
+            let visit_budget = match default_agent {
+                AgentKind::Opencode => "--tokens 300000 --model provider/model",
+                // No weekly meter a program can read; bounded by tokens.
+                AgentKind::Antigravity => "--tokens 300000",
+                _ => "--weekly-percent 2",
+            };
             if default_agent == AgentKind::Opencode {
                 println!("Choose your provider/model and replace provider/model below before starting.");
             }
@@ -3918,6 +3944,7 @@ fn weekly_usage_line(record: &VisitRecord) -> Option<String> {
             AgentKind::Claude => "Claude",
             AgentKind::Codex => "Codex",
             AgentKind::Opencode => "OpenCode",
+            AgentKind::Antigravity => "Antigravity",
         }
     ))
 }
@@ -4523,6 +4550,11 @@ fn challenge_command(
                 AgentKind::Claude => Client::Claude,
                 AgentKind::Codex => Client::Codex,
                 AgentKind::Opencode => Client::Opencode,
+                AgentKind::Antigravity => {
+                    return Err(Error::new(
+                        "challenges do not support Antigravity CLI yet; visits do",
+                    ))
+                }
             };
             let active = active_for(layout, store, &which)?;
             challenge::start(
@@ -4799,6 +4831,7 @@ fn archive_parser(kind: AgentKind) -> fn(&str) -> Result<StreamReceipt> {
         AgentKind::Claude => daycare_runner::stream::parse_stream,
         AgentKind::Codex => daycare_runner::agent::codex::stream::parse,
         AgentKind::Opencode => daycare_runner::agent::opencode::stream::parse_stream,
+        AgentKind::Antigravity => daycare_runner::agent::antigravity::stream::parse_stream,
     }
 }
 

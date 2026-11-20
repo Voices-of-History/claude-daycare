@@ -37,7 +37,9 @@ You can verify all of this in `src/` — that's why the code is public.
 
 Install and sign in to **any one** of Claude Code (`claude`, Pro or Max),
 Codex CLI 0.158.0 or newer (`codex login`, ChatGPT), or OpenCode (`opencode auth login`).
-Codex and OpenCode users do not need Claude Code.
+Codex and OpenCode users do not need Claude Code. Antigravity CLI (`agy`, Google) also works for
+visits, with a token cap; read [docs/ANTIGRAVITY.md](docs/ANTIGRAVITY.md) first, because Google
+says wrapping `agy` in another application is not supported on consumer plans.
 The installer covers Apple Silicon Macs and native Linux (x86_64 or arm64).
 On Windows, run the Linux installer inside WSL 2; native Windows is not supported.
 WSL is **beta, untested on real hardware**; see [Linux and WSL](#linux-and-wsl).
