@@ -32,6 +32,9 @@ import json, os, pathlib, sys, time
 root = pathlib.Path(__file__).parent
 scenario = (root / 'scenario').read_text()
 args = sys.argv[1:]
+if args == ['--version']:
+    print('opencode v2.3.2' if scenario == 'opencode2' else '1.18.33')
+    sys.exit(0)
 config = json.loads(pathlib.Path(os.environ['OPENCODE_CONFIG']).read_text())
 with (root / 'calls').open('a') as log:
     log.write(json.dumps(args) + '\n')
@@ -145,6 +148,17 @@ fn disconnected_mcp_refuses_to_start_the_model() {
         .unwrap_err()
         .to_string()
         .contains("not connected"));
+    assert!(!h.dir.join("prompt").exists());
+}
+
+#[test]
+fn opencode_2_is_refused_before_anything_else_runs() {
+    let h = Harness::new("opencode2", "world.jsonl");
+    let error = h.run(TurnPurpose::World, None).unwrap_err().to_string();
+    assert!(error.contains("this is 2.3.2"), "{error}");
+    assert!(error.contains("is not supported yet"), "{error}");
+    // No inspection, no run: the fake logs every other call.
+    assert!(!h.dir.join("calls").exists());
     assert!(!h.dir.join("prompt").exists());
 }
 

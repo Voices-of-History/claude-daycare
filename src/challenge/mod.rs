@@ -511,7 +511,7 @@ fn notes(client: Client) -> Vec<&'static str> {
              it is, and never stores or sends the key.",
             "Daycare has not checked what OpenCode resolves. Run `challenge start` without \
              --print to have it checked before OpenCode starts.",
-            "Needs OpenCode 1.18.33 or newer.",
+            "Needs OpenCode 1.18.33 or a later 1.x release; OpenCode 2 is not supported yet.",
         ]),
     }
     notes

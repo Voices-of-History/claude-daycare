@@ -1078,6 +1078,7 @@ fn preflight_agents(
     let mut installed = Vec::new();
     let mut ready = Vec::new();
     let mut codex_version_error = None;
+    let mut opencode_version_error = None;
     for kind in [
         AgentKind::Claude,
         AgentKind::Codex,
@@ -1095,6 +1096,12 @@ fn preflight_agents(
         if kind == AgentKind::Codex {
             if let Err(error) = agent::codex::launch::check_version(&version) {
                 codex_version_error = Some(error);
+                continue;
+            }
+        }
+        if kind == AgentKind::Opencode {
+            if let Err(error) = agent::opencode::version::check_version_output(&version) {
+                opencode_version_error = Some(error);
                 continue;
             }
         }
@@ -1161,6 +1168,12 @@ fn preflight_agents(
     // may still enroll unless the person explicitly chose Codex.
     if ready.is_empty() || choice == Some(AgentKind::Codex) {
         if let Some(error) = codex_version_error {
+            return Err(Error::new(format!("{error}. No pairing code was claimed.")));
+        }
+    }
+    // The same for an OpenCode release Daycare does not run (OpenCode 2).
+    if ready.is_empty() || choice == Some(AgentKind::Opencode) {
+        if let Some(error) = opencode_version_error {
             return Err(Error::new(format!("{error}. No pairing code was claimed.")));
         }
     }

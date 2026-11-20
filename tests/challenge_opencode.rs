@@ -776,7 +776,18 @@ fn a_config_that_undoes_daycares_switches_refuses_the_launch_and_names_it() {
     let out = machine.start_with(&[("FAKE_OPENCODE_VERSION", "1.18.0")], MODEL, &[]);
     assert!(!out.status.success());
     assert!(
-        stdout(&out).contains("1.18.33 or newer"),
+        stdout(&out).contains("1.18.33 or a later 1.x release"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(machine.recorded("call.argv").is_none());
+
+    // OpenCode 2, which these checks were not written against.
+    machine.approve_some();
+    let out = machine.start_with(&[("FAKE_OPENCODE_VERSION", "opencode v2.3.2")], MODEL, &[]);
+    assert!(!out.status.success());
+    assert!(
+        stdout(&out).contains("is not supported yet"),
         "{}",
         stdout(&out)
     );

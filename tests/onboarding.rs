@@ -31,13 +31,21 @@ impl Machine {
         Self { root, platform }
     }
     fn agent(&self, name: &str, ready: bool) {
+        let version = if name == "opencode" {
+            "1.18.33"
+        } else {
+            "codex-cli 0.158.0"
+        };
+        self.agent_at(name, ready, version);
+    }
+    fn agent_at(&self, name: &str, ready: bool, version: &str) {
         let bin = self.root.join("bin").join(name);
         let auth = if ready {
             r#"{"loggedIn":true,"subscriptionType":"pro"}"#
         } else {
             r#"{"loggedIn":false}"#
         };
-        support::testdir::write_executable(&bin, &format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo codex-cli 0.158.0; else printf '%s\\n' '{auth}'; fi\n"));
+        support::testdir::write_executable(&bin, &format!("#!/bin/sh\nif [ \"$1\" = --version ]; then echo {version}; else printf '%s\\n' '{auth}'; fi\n"));
         if ready && name != "claude" {
             let (path, value) = if name == "codex" {
                 (
@@ -283,6 +291,22 @@ for line in sys.stdin:
         );
         assert_eq!(m.platform.requests().len(), before);
     }
+}
+
+#[test]
+fn opencode_2_is_refused_without_claiming_a_code() {
+    let m = Machine::new();
+    m.agent_at("opencode", true, "opencode v2.3.2");
+    let out = m.enroll(&["--agent", "opencode"]);
+    assert!(!out.status.success());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("is not supported yet"), "{text}");
+    assert!(text.contains("No pairing code was claimed"), "{text}");
+    assert!(m.platform.requests().is_empty());
 }
 
 #[test]

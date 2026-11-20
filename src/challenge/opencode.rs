@@ -58,6 +58,7 @@
 
 use super::exclusion::LaunchSpec;
 use super::launch::base_command;
+use crate::agent::opencode::version;
 use crate::approval::scan::{Client, Item, Kind};
 use crate::approval::Reconciled;
 use crate::{Error, Result};
@@ -95,7 +96,7 @@ pub const CONFIG_FILE: &str = "opencode-config.json";
 pub const PURE_FLAG: &str = "--pure";
 
 /// The oldest OpenCode these checks were written against.
-pub const MIN_VERSION: (u64, u64, u64) = (1, 18, 33);
+pub use crate::agent::opencode::version::MIN_VERSION;
 
 /// A skill name nobody has. It must evaluate to `deny` too, so a skill the
 /// scan did not see is hidden as well.
@@ -1030,20 +1031,9 @@ pub fn manual_checks() -> Vec<String> {
     ]
 }
 
-fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
-    let token = text
-        .split_whitespace()
-        .find(|word| word.starts_with(|c: char| c.is_ascii_digit()))?;
-    let core = token.split(['-', '+']).next()?;
-    let mut parts = core.split('.').map(|part| part.parse::<u64>().ok());
-    Some((
-        parts.next()??,
-        parts.next()??,
-        parts.next().flatten().unwrap_or(0),
-    ))
-}
-
-/// OpenCode 1.18.33 or newer: the version these checks were written against.
+/// OpenCode 1.18.33 or a later 1.x release: the releases these checks were
+/// written against. OpenCode 2 is refused (see
+/// `crate::agent::opencode::version`).
 pub fn check_version(launch: &LaunchSpec) -> Result<()> {
     let output = base_command(launch)
         .arg("--version")
@@ -1057,18 +1047,12 @@ pub fn check_version(launch: &LaunchSpec) -> Result<()> {
                 launch.program
             ))
         })?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let (major, minor, patch) = MIN_VERSION;
-    match parse_version(&text) {
-        Some(version) if output.status.success() && version >= MIN_VERSION => Ok(()),
-        Some((a, b, c)) if output.status.success() => Err(refuse(format!(
-            "challenges need OpenCode {major}.{minor}.{patch} or newer, and this is {a}.{b}.{c}. \
-             Run `opencode upgrade`"
-        ))),
-        _ => Err(refuse(format!(
-            "could not read OpenCode's version; challenges need {major}.{minor}.{patch} or newer"
-        ))),
-    }
+    let text = if output.status.success() {
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    } else {
+        String::new()
+    };
+    version::check_version_output(&text).map_err(refuse)
 }
 
 /// Run one `opencode debug` command with the session's own folder,
@@ -1369,10 +1353,6 @@ mod tests {
         assert_eq!(check_model("amazon-bedrock/x.y").unwrap(), "amazon-bedrock");
         assert!(check_model("gpt").is_err());
         assert!(check_model("openai/-x").is_err());
-        assert_eq!(parse_version("1.18.33\n"), Some((1, 18, 33)));
-        assert_eq!(parse_version("opencode 1.19.0-beta.2"), Some((1, 19, 0)));
-        assert_eq!(parse_version("nothing"), None);
-        assert!(parse_version("1.18.32").unwrap() < MIN_VERSION);
         assert_eq!(percent_decode("a%20b%zz%2"), "a b%zz%2");
     }
 
