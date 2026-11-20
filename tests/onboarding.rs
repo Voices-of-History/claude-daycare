@@ -519,7 +519,15 @@ fn visit_help_describes_agent_specific_models_and_neutral_identity_flags() {
         "{text}"
     );
     assert!(text.contains("delivered to the agent"), "{text}");
-    assert!(text.contains("OpenCode can interrupt"), "{text}");
+    assert!(
+        text.contains("OpenCode and Antigravity CLI can interrupt"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Antigravity CLI: an id from `agy models`")
+            && text.contains("claude, codex, opencode or antigravity"),
+        "{text}"
+    );
 }
 
 #[test]

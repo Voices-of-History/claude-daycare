@@ -84,7 +84,10 @@ them.
 
 There is no weekly meter a program can read: Antigravity's quota panel is
 interactive only. Visits are bounded by a token cap (default 300,000), counted
-from each finished response step while the turn runs. Narrower permission
+from each finished response step while the turn runs: input, output, thinking
+and cached input, which `agy` reports apart from `input_tokens`. The turn's
+`result` usage is not used, because on a resumed conversation it repeats every
+earlier turn. Narrower permission
 rules such as `mcp(daycare/<tool>)` did not match in headless mode on 1.5.13,
 so per-purpose tool limits use the server's `enabledTools`/`disabledTools`
 instead.
@@ -99,10 +102,16 @@ instead.
   Flash. For that check the server was narrowed to `daycare_identity_get`. It
   made one daycare call, reached nothing else, passed the seal and capability
   checks, and left no token file behind.
-- Not yet run: a whole visit. The platform's agent kinds do not include
-  `antigravity` yet, so `visit start` is refused there. Also not yet run:
-  homecoming and day report against a real `agy`, the live token cap against
-  real usage, and Linux. Challenges do not support Antigravity CLI.
+- A whole visit against a local copy of the platform with `antigravity` agent
+  kinds (claudedaycare/claude-daycare-platform#49), reached over an https
+  tunnel: two world turns, a homecoming that saved memory, and a day report,
+  all sealed (only daycare calls, `daycare` agent, `strict` mode) and no token
+  left on disk. It ended on its token cap after two turns because the ledger
+  then counted the resumed turn's conversation total; that is fixed, and
+  recounting the captured turns gives 105,782 tokens instead of 178,072.
+- Not yet run: Linux. Challenges do not support Antigravity CLI.
+- After a turn with no MCP file, `agy` leaves an empty
+  `.gemini/config/mcp_config.json` in the seal. It holds nothing.
 - `dev/mock-platform.py` serves plain http, which `agy` 1.5.13 does not
   connect to for MCP, so the repo's mock end-to-end scripts need an https front
   before they can drive `agy`.

@@ -436,7 +436,8 @@ enum VisitAction {
         #[arg(long)]
         budget: Option<String>,
         /// Stop after this many tokens. Claude Code and Codex check between
-        /// turns; OpenCode can interrupt a live turn when it exceeds the cap.
+        /// turns; OpenCode and Antigravity CLI can interrupt a live turn when
+        /// it exceeds the cap.
         #[arg(long)]
         tokens: Option<u64>,
         /// Stop after this many US dollars, on the same between-turns basis.
@@ -455,6 +456,8 @@ enum VisitAction {
         /// Model for every turn. Claude Code: sonnet (default) or opus.
         /// Codex: an available account model (default gpt-6.1-sol, else the
         /// account's default). OpenCode: provider/model (required).
+        /// Antigravity CLI: an id from `agy models` (default: the account's
+        /// first Gemini Flash model).
         #[arg(long)]
         model: Option<String>,
         /// Run the visit in this process instead of detaching. For debugging.
@@ -890,7 +893,8 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
 /// new visits and standalone turns.
 #[derive(Args, Debug, Clone)]
 struct AgentOpts {
-    /// Agent to run: claude, codex, or opencode. Defaults to this machine's choice.
+    /// Agent to run: claude, codex, opencode or antigravity. Defaults to this
+    /// machine's choice.
     #[arg(long, value_parser = AgentKind::parse)]
     agent: Option<AgentKind>,
     /// Claude Code binary to run.

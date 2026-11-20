@@ -166,11 +166,20 @@ pub fn parse_stream(stream: &str) -> Result<StreamReceipt> {
             .filter(|text| !text.is_empty())
             .map(str::to_string)
     });
-    let mut usage = Tokens::default();
-    match result.as_ref().map(|result| &result["usage"]) {
-        Some(reported) if reported.is_object() => usage.add(reported),
-        _ => usage = step_usage,
-    }
+    // The result's usage covers the whole conversation so far: on a resumed
+    // turn (agy 1.5.13) it repeats every earlier turn. The finished response
+    // steps carry this turn's own usage, so they are the count; the result is
+    // only a fallback for a stream with no step usage, where overcounting
+    // stops a visit early instead of letting it run past its cap.
+    let usage = if step_usage.is_empty() {
+        let mut reported = Tokens::default();
+        if let Some(usage) = result.as_ref().map(|result| &result["usage"]) {
+            reported.add(usage);
+        }
+        reported
+    } else {
+        step_usage
+    };
     let invented_tool_calls = result_text
         .as_deref()
         .is_some_and(looks_like_invented_tool_call);
@@ -419,9 +428,22 @@ impl Tokens {
         add_to(&mut self.cache_read, &usage["cache_read_tokens"]);
     }
 
-    /// Input, output and thinking. Cached input is already inside input.
+    /// Everything the visit ledger counts: input, output, thinking and cached
+    /// input. agy reports cache reads apart from `input_tokens` (a captured
+    /// turn had 25,375 input and 40,253 cache reads), and the ledger counts
+    /// them, so the live cap has to as well.
     fn counted(&self) -> u64 {
-        self.input.unwrap_or(0) + self.output.unwrap_or(0) + self.thinking.unwrap_or(0)
+        self.input.unwrap_or(0)
+            + self.output.unwrap_or(0)
+            + self.thinking.unwrap_or(0)
+            + self.cache_read.unwrap_or(0)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.input.is_none()
+            && self.output.is_none()
+            && self.thinking.is_none()
+            && self.cache_read.is_none()
     }
 
     fn into_turn_usage(self) -> TurnUsage {
@@ -551,8 +573,54 @@ mod tests {
     fn only_finished_response_steps_count_tokens_live() {
         let world = fixture("world.jsonl");
         let total: u64 = world.lines().map(tokens_in_line).sum();
-        assert_eq!(total, 9100 + 120);
+        assert_eq!(total, 9100 + 120 + 4000);
         assert_eq!(tokens_in_line("not json"), 0);
+    }
+
+    #[test]
+    fn the_live_count_matches_what_the_ledger_records() {
+        let world = fixture("world.jsonl");
+        let live: u64 = world.lines().map(tokens_in_line).sum();
+        let usage = parse_stream(&world).unwrap().usage;
+        // VisitLedger::record_turn counts input + output + cache reads, with
+        // thinking already inside output.
+        let ledger = usage.input_tokens.unwrap_or(0)
+            + usage.output_tokens.unwrap_or(0)
+            + usage.cache_read_input_tokens.unwrap_or(0);
+        assert_eq!(live, ledger);
+    }
+
+    #[test]
+    fn a_resumed_turn_counts_its_own_steps_not_the_conversation_total() {
+        // On a resumed conversation agy 1.5.13's result repeats the earlier
+        // turns' usage. Seen live: turn two's result said 33,627 input when
+        // its own steps used 8,252. Model that with a result far above the
+        // steps.
+        let world = fixture("world.jsonl");
+        let resumed = world.replace(
+            r#""usage": {"input_tokens": 9100, "output_tokens": 120, "thinking_tokens": 0, "cache_read_tokens": 4000, "total_tokens": 9220}"#,
+            r#""usage": {"input_tokens": 34100, "output_tokens": 620, "thinking_tokens": 300, "cache_read_tokens": 44000, "total_tokens": 34720}"#,
+        );
+        assert_ne!(resumed, world);
+        let usage = parse_stream(&resumed).unwrap().usage;
+        assert_eq!(usage.input_tokens, Some(9100));
+        assert_eq!(usage.output_tokens, Some(120));
+        assert_eq!(usage.cache_read_input_tokens, Some(4000));
+
+        // With no step usage at all, the result is still counted.
+        let result_only: String = world
+            .lines()
+            .map(|line| match line.find(r#", "usage": {"#) {
+                Some(start) if line.contains(r#""step_type": "agent_response""#) => {
+                    let end = line[start..].find('}').unwrap() + start + 1;
+                    format!("{}{}\n", &line[..start], &line[end..])
+                }
+                _ => format!("{line}\n"),
+            })
+            .collect();
+        assert!(!result_only.contains(r#""usage": {"input_tokens": 3000"#));
+        let usage = parse_stream(&result_only).unwrap().usage;
+        assert_eq!(usage.input_tokens, Some(9100));
     }
 
     #[test]
