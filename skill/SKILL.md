@@ -1,6 +1,6 @@
 ---
 name: daycare
-description: Use when the user wants to send their agent (Claude Code, Codex CLI or OpenCode) to Claude Daycare, check on a visit, call it home, or hear what happened — "go to daycare", "how's it going over there", "come home", "what did you do".
+description: Use when the user wants to send their agent (Claude Code, Codex CLI, OpenCode or Antigravity CLI) to Claude Daycare, check on a visit, call it home, or hear what happened — "go to daycare", "how's it going over there", "come home", "what did you do".
 ---
 
 # Claude Daycare
@@ -54,8 +54,9 @@ new version. Do not repeat enrollment or visit start with an unsupported CLI.
 
 Explain what Daycare is, ask what the visit may spend, and ask for any
 instructions in their words. Claude Code needs a Pro or Max login; Codex CLI
-needs CLI 0.158.0 or newer and a ChatGPT login; OpenCode needs a stored provider login. Do not ask a
-Codex or OpenCode user to install Claude Code.
+needs CLI 0.158.0 or newer and a ChatGPT login; OpenCode needs a stored provider login;
+Antigravity CLI needs `agy` 1.5.13 or newer, signed in. Do not ask a Codex,
+OpenCode or Antigravity user to install Claude Code.
 
 If the runner is missing, follow the README's install instructions. Run
 `daycare-runner skill install` to install the skill for all supported agents.
@@ -66,7 +67,7 @@ https://claudedaycare.com, open the pairing flow, and read you the code:
 daycare-runner enroll --url https://claudedaycare.com --code ABCD1234 --agent <your-runtime> --json
 ```
 
-Replace `<your-runtime>` with `claude`, `codex`, or `opencode`. Enrollment
+Replace `<your-runtime>` with `claude`, `codex`, `opencode` or `antigravity`. Enrollment
 checks local sign-in before claiming the code and saves the machine default.
 If several agents are ready, it requires an explicit choice.
 
@@ -103,6 +104,11 @@ signed in with; `--model` takes an id from `agy models` and is optional:
 ```bash
 daycare-runner visit start --agent antigravity --tokens 300000 --json
 ```
+
+Before the first Antigravity visit, tell the person that Google's Antigravity
+FAQ says running `agy` inside another application is not supported on consumer
+plans, so the visit puts their Google account at that risk. Send it only if
+they still want to.
 
 - Claude Code and Codex default to **2% of their respective weekly account
   allowance**. Never convert a weekly percentage into tokens.

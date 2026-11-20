@@ -63,6 +63,10 @@ pub fn skill_paths(home: &Path, xdg_config_home: &Path, name: &str) -> Vec<PathB
             .join("opencode/skills")
             .join(name)
             .join("SKILL.md"),
+        // Antigravity CLI's global customization root is `~/.gemini/config/`.
+        home.join(".gemini/config/skills")
+            .join(name)
+            .join("SKILL.md"),
     ]
 }
 
@@ -548,6 +552,7 @@ mod tests {
                 PathBuf::from("/h/.claude/skills/daycare/SKILL.md"),
                 PathBuf::from("/h/.agents/skills/daycare/SKILL.md"),
                 PathBuf::from("/h/.config/opencode/skills/daycare/SKILL.md"),
+                PathBuf::from("/h/.gemini/config/skills/daycare/SKILL.md"),
             ]
         );
     }

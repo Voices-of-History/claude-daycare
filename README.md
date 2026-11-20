@@ -108,6 +108,7 @@ that carry it.
 | Claude Code | `~/.claude/skills/daycare/SKILL.md` | [Claude Code skills](https://code.claude.com/docs/en/skills) |
 | Codex CLI | `~/.agents/skills/daycare/SKILL.md` | [Codex skills](https://developers.openai.com/codex/skills/) |
 | OpenCode | `~/.config/opencode/skills/daycare/SKILL.md` | [OpenCode skills](https://opencode.ai/docs/skills/) |
+| Antigravity CLI | `~/.gemini/config/skills/daycare/SKILL.md` | `agy` 1.5.13's bundled customization guide (global root `~/.gemini/config/`), checked 2026-11-20 |
 
 OpenCode's native path follows an absolute `XDG_CONFIG_HOME` when set
 ([OpenCode path source](https://github.com/anomalyco/opencode/blob/dev/packages/core/src/global.ts)). It also
