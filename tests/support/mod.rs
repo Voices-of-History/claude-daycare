@@ -205,11 +205,24 @@ pub fn no_claude_path(root: &Path) -> String {
     format!("{}:/usr/bin:/bin", bin.display())
 }
 
+/// Where `fake_claude` looks for the stream it answers the runner's same-turn
+/// follow-up with (`launch::move_follow_up_prompt`). Absent, it answers with
+/// its ordinary stream, like every other prompt.
+pub fn follow_up_stream_path(dir: &Path) -> PathBuf {
+    dir.join("canned-follow-up-stream.jsonl")
+}
+
+/// The canned stream `fake_claude` answers ordinary turns with. A test may
+/// rewrite it after the fake is built.
+pub fn turn_stream_path(dir: &Path) -> PathBuf {
+    dir.join("canned-stream.jsonl")
+}
+
 /// A stand-in for the `claude` binary. It records the argv, environment, and
 /// stdin it was given, then prints `stream` on stdout. `delay_secs` lets a test
 /// exercise the turn timeout without waiting on a model.
 pub fn fake_claude(dir: &Path, stream: &str, delay_secs: u64, exit_code: i32) -> PathBuf {
-    let stream_file = dir.join("canned-stream.jsonl");
+    let stream_file = turn_stream_path(dir);
     std::fs::write(&stream_file, stream).unwrap();
     // The homecoming double keeps the init event as the real capture reports
     // it — ToolSearch plus the daycare server's tools, server connected —
@@ -301,6 +314,8 @@ if grep -q 'Your visit is over and you are on your way home' "$record.stdin"; th
   selected_stream="{private_stream_file}"
 elif grep -q 'your owner will see what you write here' "$record.stdin"; then
   selected_stream="{dayreport_stream_file}"
+elif grep -q 'This turn is not over' "$record.stdin" && [ -f "{follow_up_stream_file}" ]; then
+  selected_stream="{follow_up_stream_file}"
 fi
 if [ -n "$assigned_session" ]; then
   if [ "$selected_stream" = "{private_stream_file}" ] && [ -f "$record.pause-private" ]; then
@@ -326,6 +341,7 @@ exit {exit_code}
         stream_file = stream_file.display(),
         private_stream_file = private_stream_file.display(),
         dayreport_stream_file = dayreport_stream_file.display(),
+        follow_up_stream_file = follow_up_stream_path(dir).display(),
         exit_code = exit_code
     );
     testdir::write_executable(&script, &body);

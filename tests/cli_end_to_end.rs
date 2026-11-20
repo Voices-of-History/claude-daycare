@@ -1800,6 +1800,125 @@ fn a_visit_runs_a_turn_comes_home_and_writes_a_private_account() {
     let mirror = install.home.join("memories/actor-1.json");
     assert_eq!(local["path"].as_str(), Some(mirror.to_str().unwrap()));
     assert!(mirror.is_file(), "homecoming wrote no local memory mirror");
+    // The captured turn made a move (a `say` to another visitor), so nothing
+    // asked it for another.
+    assert!(
+        !support::recorded_stdin_all(install.claude_bin.parent().unwrap())
+            .contains("This turn is not over")
+    );
+    assert!(!install.home.join("turns/cmd-v1-move.jsonl").exists());
+}
+
+/// Every visit turn makes a move. A turn whose run only looked around is asked
+/// once more inside the same command: the same session resumed, one completion
+/// carrying both runs' calls and usage, one turn on the ledger, and the
+/// homecoming reader sees the second run inside that turn.
+#[test]
+fn a_visit_turn_that_makes_no_move_is_asked_once_more_in_the_same_turn() {
+    let install = install("cli-visit-no-move");
+    let root = install.claude_bin.parent().unwrap().to_path_buf();
+    let full = support::fixture_stream_from(&install.home.join("workspaces/actor-1"));
+    // The turn's own run reaches nothing: it says its piece and stops.
+    let idle: String = full
+        .lines()
+        .filter(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            (event["type"] == "system" && event["subtype"] == "init") || event["type"] == "result"
+        })
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(support::turn_stream_path(&root), idle).unwrap();
+    // Asked again, it speaks to another visitor: the captured turn's `say`.
+    std::fs::write(support::follow_up_stream_path(&root), &full).unwrap();
+    let platform = visit_platform(root.clone());
+    install.run(&["enroll", "--url", &platform.base_url, "--code", "PAIR-1234"]);
+
+    let started = install.run(&[
+        "visit",
+        "start",
+        "--foreground",
+        "--turns",
+        "1",
+        "--interval",
+        "1",
+        "--claude-bin",
+        install.claude_bin.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_str(stdout(&started).trim()).unwrap();
+    // The agent ran twice inside the visit's one turn, and the visit was
+    // charged one turn.
+    assert_eq!(result["turns"], 1, "{result}");
+
+    // The follow-up was asked once, and it resumed the turn's own session.
+    let sent = support::recorded_stdin_all(&root);
+    assert_eq!(
+        sent.matches("This turn is not over, Pip.").count(),
+        1,
+        "{sent}"
+    );
+    let calls = std::fs::read_to_string(root.join("call.argv.all")).unwrap();
+    let runs: Vec<Vec<&str>> = calls
+        .split("-- call --\n")
+        .filter(|run| !run.is_empty())
+        .map(|run| run.lines().collect())
+        .collect();
+    let session = runs[0]
+        .windows(2)
+        .find(|pair| pair[0] == "--session-id")
+        .map(|pair| pair[1])
+        .unwrap_or_else(|| panic!("the turn did not start a session: {calls}"));
+    assert!(
+        runs[1]
+            .windows(2)
+            .any(|pair| pair[0] == "--resume" && pair[1] == session),
+        "the follow-up did not resume the turn's session: {calls}"
+    );
+
+    // One completion for the command, a move, and both runs' usage.
+    let completions: Vec<_> = platform
+        .requests()
+        .into_iter()
+        .filter(|request| request.path == "/api/daycare/commands/cmd-v1/complete")
+        .collect();
+    assert_eq!(completions.len(), 1);
+    let completion: serde_json::Value = serde_json::from_str(&completions[0].body).unwrap();
+    assert_eq!(completion["status"], "completed", "{completion}");
+    assert!(completion["result"].get("held").is_none(), "{completion}");
+    assert!(completion["result"].get("error").is_none(), "{completion}");
+    assert_eq!(
+        completion["result"]["usage"]["input_tokens"], 16,
+        "{completion}"
+    );
+    assert_eq!(
+        completion["result"]["usage"]["cache_read_input_tokens"], 42_084,
+        "{completion}"
+    );
+
+    // Both runs are on disk, and the homecoming reader read the second one
+    // inside the turn it belongs to.
+    assert!(install.home.join("turns/cmd-v1.jsonl").is_file());
+    assert!(install.home.join("turns/cmd-v1-move.jsonl").is_file());
+    let transcript = platform
+        .requests()
+        .into_iter()
+        .find(|request| request.path == "/api/daycare/visits/visit-1/transcript")
+        .expect("the transcript was never uploaded");
+    let transcript: serde_json::Value = serde_json::from_str(&transcript.body).unwrap();
+    let transcript = transcript["transcript"].as_str().unwrap();
+    let turn = transcript.find("## Turn 1 of 1 (command cmd-v1)").unwrap();
+    let asked = transcript
+        .find("[the runner asked again, in the same turn")
+        .unwrap();
+    let said = transcript
+        .find("[you called mcp__daycare__daycare_action_propose]")
+        .unwrap();
+    assert!(turn < asked && asked < said, "{transcript}");
 }
 
 #[test]

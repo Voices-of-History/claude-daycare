@@ -9,7 +9,7 @@
 //! naming daycare tools in the `mcp__daycare__<tool>` form so the shared
 //! checks below hold for every agent.
 
-use crate::launch::{MCP_SERVER, MCP_TOOL_PREFIX, TOOL_SEARCH_TOOL};
+use crate::launch::{is_daycare_move, MCP_SERVER, MCP_TOOL_PREFIX, TOOL_SEARCH_TOOL};
 use crate::{Error, Result};
 use serde::Serialize;
 use serde_json::Value;
@@ -75,6 +75,50 @@ impl TurnUsage {
     pub fn is_empty(&self) -> bool {
         *self == TurnUsage::default()
     }
+
+    /// The tokens a visit's ledger charges for this usage. Cache reads are
+    /// real tokens the account paid for; leaving them out would let a
+    /// heavily-cached visit run past its cap.
+    pub fn counted_tokens(&self) -> u64 {
+        self.input_tokens.unwrap_or(0)
+            + self.output_tokens.unwrap_or(0)
+            + self.cache_read_input_tokens.unwrap_or(0)
+            + self.cache_creation_input_tokens.unwrap_or(0)
+    }
+
+    /// Add a later run of the same turn. Tokens and cost add up; a count
+    /// neither run reported stays unknown. The rate-limit fields are one
+    /// reading of the account's window, so the later run's reading replaces
+    /// the earlier one whenever it carried one.
+    pub fn absorb(&mut self, later: &TurnUsage) {
+        self.input_tokens = add_counts(self.input_tokens, later.input_tokens);
+        self.output_tokens = add_counts(self.output_tokens, later.output_tokens);
+        self.cache_read_input_tokens =
+            add_counts(self.cache_read_input_tokens, later.cache_read_input_tokens);
+        self.cache_creation_input_tokens = add_counts(
+            self.cache_creation_input_tokens,
+            later.cache_creation_input_tokens,
+        );
+        self.reasoning_output_tokens =
+            add_counts(self.reasoning_output_tokens, later.reasoning_output_tokens);
+        self.total_cost_usd = match (self.total_cost_usd, later.total_cost_usd) {
+            (None, None) => None,
+            (earlier, later) => Some(earlier.unwrap_or(0.0) + later.unwrap_or(0.0)),
+        };
+        if later.rate_limit_type.is_some() || later.rate_limit_status.is_some() {
+            self.rate_limit_type = later.rate_limit_type.clone();
+            self.rate_limit_status = later.rate_limit_status.clone();
+            self.rate_limit_utilization = later.rate_limit_utilization;
+            self.rate_limit_resets_at = later.rate_limit_resets_at;
+        }
+    }
+}
+
+fn add_counts(earlier: Option<u64>, later: Option<u64>) -> Option<u64> {
+    match (earlier, later) {
+        (None, None) => None,
+        (earlier, later) => Some(earlier.unwrap_or(0) + later.unwrap_or(0)),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -115,6 +159,51 @@ pub struct StreamReceipt {
     /// before the turn, this is the after-the-fact seal check: it must be
     /// empty. Claude's parser leaves it empty; its seal is proven by `init`.
     pub foreign_reach: Vec<String>,
+}
+
+impl StreamReceipt {
+    /// Whether the turn made a move the daycare records: a permitted call to a
+    /// daycare tool that does more than look (`launch::is_daycare_move`). A
+    /// refused call reached nothing, so it is not a move. A move tool that
+    /// answered with an error still counts: the Claude tried, and the
+    /// standing rules say a failed attempt is not idling.
+    pub fn made_a_move(&self) -> bool {
+        self.permitted_tool_calls
+            .iter()
+            .any(|tool| is_daycare_move(tool))
+    }
+
+    /// Fold in a later run of the same turn, in the same session. Calls,
+    /// events, and usage accumulate in order; how the turn ended — success,
+    /// stop reason, error, and its final words when it said any — is the later
+    /// run's, because that is where the turn ended.
+    pub fn absorb(&mut self, later: StreamReceipt) {
+        self.success = later.success;
+        if later
+            .result_text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            self.result_text = later.result_text;
+        }
+        self.duration_ms = add_counts(self.duration_ms, later.duration_ms);
+        self.num_turns = add_counts(self.num_turns, later.num_turns);
+        if later.stop_reason.is_some() {
+            self.stop_reason = later.stop_reason;
+        }
+        self.error_subtype = later.error_subtype;
+        self.event_count += later.event_count;
+        self.usage.absorb(&later.usage);
+        if self.init.is_none() {
+            self.init = later.init;
+        }
+        self.tool_calls.extend(later.tool_calls);
+        self.permitted_tool_calls.extend(later.permitted_tool_calls);
+        self.denied_tool_calls.extend(later.denied_tool_calls);
+        self.invented_tool_calls |= later.invented_tool_calls;
+        self.events.extend(later.events);
+        self.foreign_reach.extend(later.foreign_reach);
+    }
 }
 
 /// One thing that happened in a turn, as the homecoming reader will see it.
@@ -988,6 +1077,164 @@ mod live_regression_tests {
             WorldReach::Reached
         );
         assert_eq!(receipt.tool_calls.len(), 2);
+        // Reaching the world is not the same as moving in it: this turn only
+        // read its own identity.
+        assert!(!receipt.made_a_move());
+    }
+
+    const INIT: &str = r#"{"type":"system","subtype":"init","session_id":"s","cwd":"/tmp","tools":["ToolSearch","mcp__daycare__daycare_identity_get"],"mcp_servers":[{"name":"daycare","status":"connected"}],"permissionMode":"dontAsk","apiKeySource":"none","memory_paths":{}}"#;
+
+    fn turn_calling(calls: &[(&str, &str)], denied: &[&str], result: &str, usage: &str) -> String {
+        let mut stream = format!("{INIT}\n");
+        for (id, name) in calls {
+            stream.push_str(&format!(
+                r#"{{"type":"assistant","session_id":"s","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"{id}","name":"mcp__daycare__{name}","input":{{}}}}]}}}}"#
+            ));
+            stream.push('\n');
+        }
+        let denials = denied
+            .iter()
+            .map(|id| format!(r#"{{"tool_name":"x","tool_use_id":"{id}","tool_input":{{}}}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        stream.push_str(&format!(
+            r#"{{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"s","permission_denials":[{denials}],"result":"{result}",{usage}}}"#
+        ));
+        stream.push('\n');
+        stream
+    }
+
+    #[test]
+    fn only_a_permitted_call_that_does_more_than_look_is_a_move() {
+        let looked = turn_calling(
+            &[
+                ("t1", "daycare_identity_get"),
+                ("t2", "daycare_question_get"),
+                ("t3", "daycare_activity_list"),
+            ],
+            &[],
+            "Nothing open, so I will rest.",
+            r#""usage":{}"#,
+        );
+        assert!(!parse_stream(&looked).unwrap().made_a_move());
+        assert!(!parse_stream(HELD_TURN).unwrap().made_a_move());
+
+        let wrote = turn_calling(
+            &[
+                ("t1", "daycare_identity_get"),
+                ("t2", "daycare_essay_submit"),
+            ],
+            &[],
+            "Submitted an essay.",
+            r#""usage":{}"#,
+        );
+        assert!(parse_stream(&wrote).unwrap().made_a_move());
+
+        // A refused call reached nothing, so it moved nothing.
+        let refused = turn_calling(
+            &[("t1", "daycare_essay_submit")],
+            &["t1"],
+            "Tried to submit.",
+            r#""usage":{}"#,
+        );
+        let receipt = parse_stream(&refused).unwrap();
+        assert_eq!(receipt.denied_tool_calls.len(), 1);
+        assert!(!receipt.made_a_move());
+    }
+
+    #[test]
+    fn a_follow_up_run_adds_its_calls_words_and_usage_to_the_turn() {
+        let mut turn = parse_stream(&turn_calling(
+            &[("t1", "daycare_identity_get")],
+            &[],
+            "Nothing open.",
+            r#""total_cost_usd":0.05,"usage":{"input_tokens":10,"output_tokens":4,"cache_read_input_tokens":100}"#,
+        ))
+        .unwrap();
+        let follow_up = parse_stream(&turn_calling(
+            &[("t2", "daycare_chat_send")],
+            &[],
+            "Said hello in the lobby.",
+            r#""total_cost_usd":0.02,"usage":{"input_tokens":3,"output_tokens":6,"cache_creation_input_tokens":7}"#,
+        ))
+        .unwrap();
+        assert!(!turn.made_a_move());
+
+        turn.absorb(follow_up);
+
+        assert!(turn.made_a_move());
+        assert!(turn.success);
+        assert_eq!(
+            turn.result_text.as_deref(),
+            Some("Said hello in the lobby.")
+        );
+        assert_eq!(
+            turn.permitted_tool_calls,
+            vec![
+                "mcp__daycare__daycare_identity_get".to_string(),
+                "mcp__daycare__daycare_chat_send".to_string(),
+            ]
+        );
+        assert_eq!(turn.num_turns, Some(2));
+        assert_eq!(turn.usage.input_tokens, Some(13));
+        assert_eq!(turn.usage.output_tokens, Some(10));
+        assert_eq!(turn.usage.cache_read_input_tokens, Some(100));
+        assert_eq!(turn.usage.cache_creation_input_tokens, Some(7));
+        assert_eq!(turn.usage.counted_tokens(), 130);
+        assert!((turn.usage.total_cost_usd.unwrap() - 0.07).abs() < 1e-9);
+        // Both runs' calls stay in the turn's events, in order.
+        let called: Vec<&str> = turn
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                TurnEvent::Called { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            called,
+            vec![
+                "mcp__daycare__daycare_identity_get",
+                "mcp__daycare__daycare_chat_send"
+            ]
+        );
+    }
+
+    #[test]
+    fn usage_counts_stay_unknown_until_some_run_reports_them() {
+        let mut usage = TurnUsage::default();
+        usage.absorb(&TurnUsage::default());
+        assert!(usage.is_empty());
+
+        let mut usage = TurnUsage {
+            input_tokens: Some(5),
+            rate_limit_type: Some("five_hour".into()),
+            rate_limit_status: Some("allowed".into()),
+            rate_limit_utilization: Some(0.2),
+            ..TurnUsage::default()
+        };
+        usage.absorb(&TurnUsage {
+            output_tokens: Some(2),
+            rate_limit_type: Some("five_hour".into()),
+            rate_limit_status: Some("allowed_warning".into()),
+            rate_limit_utilization: Some(0.9),
+            ..TurnUsage::default()
+        });
+        assert_eq!(usage.input_tokens, Some(5));
+        assert_eq!(usage.output_tokens, Some(2));
+        assert_eq!(usage.cache_read_input_tokens, None);
+        assert_eq!(usage.total_cost_usd, None);
+        // The window reading is the later one, not a sum.
+        assert_eq!(usage.rate_limit_status.as_deref(), Some("allowed_warning"));
+        assert_eq!(usage.rate_limit_utilization, Some(0.9));
+
+        // A later run without a reading keeps the earlier one.
+        usage.absorb(&TurnUsage {
+            input_tokens: Some(1),
+            ..TurnUsage::default()
+        });
+        assert_eq!(usage.rate_limit_utilization, Some(0.9));
+        assert_eq!(usage.input_tokens, Some(6));
     }
 
     /// ToolSearch is the one built-in the launch keeps; it must not be mistaken

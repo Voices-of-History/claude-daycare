@@ -19,8 +19,8 @@ use daycare_runner::identity::{
 use daycare_runner::keep_awake::{KeepAwake, HOLD_MESSAGE};
 use daycare_runner::keychain::{default_store, CredentialBackend, FileTokenStore, TokenStore};
 use daycare_runner::launch::{
-    match_turn_prompt, new_session_id, standalone_turn_prompt, visit_continuation_prompt,
-    visit_turn_prompt, SessionMode,
+    match_turn_prompt, move_follow_up_prompt, new_session_id, standalone_turn_prompt,
+    visit_continuation_prompt, visit_turn_prompt, SessionMode,
 };
 use daycare_runner::memory::{self as local_memory, LocalMemoryMirror};
 use daycare_runner::out::Out;
@@ -33,7 +33,7 @@ use daycare_runner::platform::{
 use daycare_runner::session::{activate, device_token, migrate_legacy, resolve, Active};
 use daycare_runner::stream::StreamReceipt;
 use daycare_runner::turn::{
-    run_turn, TurnOutcome, TurnPurpose, TurnRequest, DEFAULT_TIMEOUT_SECS,
+    move_follow_up_id, run_turn, TurnOutcome, TurnPurpose, TurnRequest, DEFAULT_TIMEOUT_SECS,
     PRE_INPUT_BROKEN_PIPE_ERROR,
 };
 use daycare_runner::usage_meter::{MeterMiss, MeterOutage, WeeklyUsageSnapshot};
@@ -2215,7 +2215,12 @@ that authoritative value.",
             .is_err_and(|error| error.message() == PRE_INPUT_BROKEN_PIPE_ERROR)
         && std::fs::metadata(&archive_path).is_ok_and(|metadata| metadata.len() == 0);
     if !should_start_fresh {
-        return first;
+        return match (first, visit) {
+            (Ok(outcome), Some(visit)) => Ok(ask_for_a_move(
+                layout, active, agent, timeout, command, visit, model, outcome,
+            )),
+            (first, _) => first,
+        };
     }
 
     if let Some(visit) = visit {
@@ -2241,6 +2246,59 @@ that authoritative value.",
         mcp_settle: agent.mcp_settle(),
         token_ceiling,
     })
+}
+
+/// Every visit turn makes a move the daycare records (the standing rule in
+/// `workspace::controller_prompt`). A run that ended having only looked
+/// around is asked once more, in the same session and inside the same command,
+/// before the turn is reported: the visit is charged one turn for both runs,
+/// and both runs' usage, so the tokens and cost caps still hold. Once is the
+/// limit. A follow-up that still makes no move is reported as it is, never
+/// retried in a loop, and a run that failed is left to the platform's own
+/// recovery turn.
+///
+/// No follow-up when the visit's token or cost cap is already spent, or the
+/// run hit a rate limit (`VisitRecord::has_room_after`).
+#[allow(clippy::too_many_arguments)]
+fn ask_for_a_move(
+    layout: &Layout,
+    active: &Active,
+    agent: &dyn Agent,
+    timeout: Duration,
+    command: &WorldCommand,
+    visit: &VisitRecord,
+    model: &str,
+    outcome: TurnOutcome,
+) -> TurnOutcome {
+    if !outcome.succeeded() || outcome.made_a_move() {
+        return outcome;
+    }
+    let Some(session_id) = outcome.session_id().map(str::to_string) else {
+        return outcome;
+    };
+    let spent = outcome.receipt.as_ref().map(|receipt| &receipt.usage);
+    if !visit.has_room_after(spent) {
+        return outcome;
+    }
+    let token_ceiling = visit.tokens_left_after(spent);
+    let follow_up = run_turn(TurnRequest {
+        agent,
+        actor_name: &active.identity.name,
+        workspace: &active.workspace,
+        mode: SessionMode::Resume { session_id },
+        message: &move_follow_up_prompt(&active.identity.name),
+        device_token: active.token(),
+        archive_path: &layout.turn_file(&move_follow_up_id(&command.id)),
+        timeout,
+        purpose: TurnPurpose::World,
+        model,
+        mcp_settle: agent.mcp_settle(),
+        token_ceiling,
+    });
+    match follow_up {
+        Ok(follow_up) => outcome.absorb_follow_up(follow_up),
+        Err(error) => outcome.follow_up_did_not_start(&error),
+    }
 }
 
 fn run_loop(
