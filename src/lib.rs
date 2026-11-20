@@ -20,6 +20,7 @@ pub mod keychain;
 pub mod launch;
 pub mod memory;
 pub mod meter;
+pub mod new_window;
 pub mod out;
 pub mod paths;
 pub mod platform;

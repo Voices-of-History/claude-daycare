@@ -85,6 +85,47 @@ pub fn list(active: &Active, out: Out) -> Result<()> {
     Ok(())
 }
 
+/// The id a person can type instead of looking one up: `practice` means the
+/// open practice challenge. Lets the setup prompt on the site and `quickstart`
+/// start a first challenge without a `challenge list` round trip in between.
+pub const PRACTICE_ALIAS: &str = "practice";
+
+/// Turn `practice` into the practice challenge's real id; any other id is
+/// returned unchanged.
+pub fn resolve_id(active: &Active, id: &str) -> Result<String> {
+    if id != PRACTICE_ALIAS {
+        return Ok(id.to_string());
+    }
+    let client = PlatformClient::new(&active.platform_url);
+    let value = client.list_challenges(active.token())?;
+    pick_practice(&value).ok_or_else(|| {
+        Error::new(
+            "there is no practice challenge open right now; run `daycare-runner challenge list` \
+             to see what is open",
+        )
+    })
+}
+
+/// The first practice (always-open) challenge in a list response, by id.
+fn pick_practice(value: &Value) -> Option<String> {
+    let list = value.get("challenges").unwrap_or(value).as_array()?;
+    list.iter()
+        .map(list_summary)
+        .find(|summary| summary["practice"].as_bool() == Some(true))
+        .or_else(|| {
+            list.iter()
+                .map(list_summary)
+                .find(|summary| summary["always_open"].as_bool() == Some(true))
+        })
+        .and_then(|summary| summary["id"].as_str().map(str::to_string))
+        .or_else(|| {
+            // Exact id match, for a platform that uses "practice" as an id.
+            list.iter()
+                .find(|c| c.get("id").and_then(Value::as_str) == Some(PRACTICE_ALIAS))
+                .map(|_| PRACTICE_ALIAS.to_string())
+        })
+}
+
 /// One challenge in `challenge list`. A practice challenge (`practice:
 /// true`, or a close time in the year 9999) is marked always open.
 fn list_summary(challenge: &Value) -> Value {
@@ -520,6 +561,19 @@ fn notes(client: Client) -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn practice_resolves_to_the_flagged_challenge_first() {
+        let value = json!({"challenges": [
+            {"id": "c-1", "title": "Real", "closes_at": "2026-12-01T00:00:00Z"},
+            {"id": "p-9", "title": "Sheet Rescue practice", "practice": true},
+        ]});
+        assert_eq!(pick_practice(&value).as_deref(), Some("p-9"));
+        let dated = json!([{"id": "p-7", "closes_at": "9999-01-01T00:00:00Z"}]);
+        assert_eq!(pick_practice(&dated).as_deref(), Some("p-7"));
+        let none = json!([{"id": "c-1", "closes_at": "2026-12-01T00:00:00Z"}]);
+        assert_eq!(pick_practice(&none), None);
+    }
 
     #[test]
     fn the_list_says_always_open_for_a_practice_challenge() {

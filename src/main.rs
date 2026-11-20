@@ -120,8 +120,8 @@ impl Which {
 enum Commands {
     /// Pair this machine with the platform using a one-time code from the hub.
     Enroll {
-        /// Platform base URL, e.g. https://claudedaycare.com
-        #[arg(long)]
+        /// Platform base URL.
+        #[arg(long, default_value = DEFAULT_PLATFORM_URL)]
         url: String,
         /// Pairing code shown in the Daycare hub.
         #[arg(long)]
@@ -132,6 +132,40 @@ enum Commands {
         /// Default agent for this machine; required when several are signed in.
         #[arg(long, value_parser = AgentKind::parse)]
         agent: Option<AgentKind>,
+    },
+    /// First run in one command: pair, install the skills, and open the
+    /// practice challenge in a new terminal window.
+    ///
+    /// Pairs with --code (the code the site put in your setup prompt; skipped
+    /// when this machine is already paired and no code is given), installs the
+    /// bundled skills, then opens a new terminal window that runs
+    /// `challenge start practice` and, when your agent session ends,
+    /// `challenge submit`, which still lists every file and waits for your
+    /// typed yes. No memory review is needed first: without one your agent
+    /// starts the challenge with none of your memory. Where no window can be
+    /// opened (WSL, no display), it prints the one line to paste instead.
+    Quickstart {
+        /// Pairing code from the site's setup prompt.
+        #[arg(long)]
+        code: Option<String>,
+        /// Platform base URL.
+        #[arg(long, default_value = DEFAULT_PLATFORM_URL)]
+        url: String,
+        /// Label for this device in the hub.
+        #[arg(long)]
+        device_name: Option<String>,
+        /// Agent to work in: claude, codex or opencode.
+        #[arg(long, value_parser = AgentKind::parse)]
+        agent: Option<AgentKind>,
+        /// OpenCode only, and required for it: provider/model.
+        #[arg(long, value_name = "PROVIDER/MODEL")]
+        model: Option<String>,
+        /// Challenge to open. Defaults to the practice challenge.
+        #[arg(long, default_value = "practice")]
+        challenge: String,
+        /// Pair and install, but do not open the challenge.
+        #[arg(long)]
+        no_start: bool,
     },
     /// Refresh installed agents and choose this machine's default after enrolling.
     Setup {
@@ -350,11 +384,17 @@ enum ChallengeAction {
     /// and Codex's MCP servers are switched off by configuration, not proven
     /// (check /mcp).
     Start {
-        /// The challenge id from `challenge list`.
+        /// The challenge id from `challenge list`, or `practice` for the open
+        /// practice challenge.
         id: String,
         /// Print the launch command instead of starting the client.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "new_window")]
         print: bool,
+        /// Open a new terminal window that runs this start and then
+        /// `challenge submit` (which still waits for your typed yes). For
+        /// when this is run by an agent whose shell is not a terminal.
+        #[arg(long)]
+        new_window: bool,
         /// Client to work in: claude, codex or opencode. Defaults to this
         /// machine's choice.
         #[arg(long, value_parser = AgentKind::parse)]
@@ -511,6 +551,7 @@ fn refused_inside_challenge(command: &Commands) -> Option<&'static str> {
         Commands::Run { .. } => Some("run"),
         Commands::RunOnce { .. } => Some("run-once"),
         Commands::Enroll { .. } => Some("enroll"),
+        Commands::Quickstart { .. } => Some("quickstart"),
         Commands::Update { .. } => Some("update"),
         Commands::Visit {
             action: VisitAction::Start { .. },
@@ -737,6 +778,32 @@ fn dispatch(command: Commands, as_json: bool) -> Result<()> {
                 &code,
                 device_name.as_deref(),
                 agent,
+                out,
+            )
+            .map_err(pairing_hint)
+        }
+        Commands::Quickstart {
+            code,
+            url,
+            device_name,
+            agent,
+            model,
+            challenge,
+            no_start,
+        } => {
+            let store = default_store(layout.fallback_token_file());
+            quickstart(
+                &layout,
+                store.as_ref(),
+                QuickstartRequest {
+                    code: code.as_deref(),
+                    url: &url,
+                    device_name: device_name.as_deref(),
+                    agent,
+                    model: model.as_deref(),
+                    challenge: &challenge,
+                    no_start,
+                },
                 out,
             )
         }
@@ -4549,11 +4616,13 @@ fn challenge_command(
         }
         ChallengeAction::Show { id, which } => {
             let active = active_for(layout, store, &which)?;
+            let id = challenge::resolve_id(&active, &id)?;
             challenge::show(&active, &id, out)
         }
         ChallengeAction::Start {
             id,
             print,
+            new_window,
             agent,
             model,
             separate_codex_home,
@@ -4563,7 +4632,8 @@ fn challenge_command(
             which,
         } => {
             challenge::refuse_inside_session("challenge start")?;
-            let client = match selected_agent(agent, layout)? {
+            let kind = selected_agent(agent, layout)?;
+            let client = match kind {
                 AgentKind::Claude => Client::Claude,
                 AgentKind::Codex => Client::Codex,
                 AgentKind::Opencode => Client::Opencode,
@@ -4574,6 +4644,19 @@ fn challenge_command(
                 }
             };
             let active = active_for(layout, store, &which)?;
+            let id = challenge::resolve_id(&active, &id)?;
+            if new_window {
+                return open_challenge_window(
+                    &ChallengeWindow {
+                        id: &id,
+                        agent: kind,
+                        model: model.as_deref(),
+                        separate_codex_home,
+                        which: &which,
+                    },
+                    out,
+                );
+            }
             challenge::start(
                 challenge::StartRequest {
                     layout,
@@ -4595,6 +4678,207 @@ fn challenge_command(
         ChallengeAction::Submit { id, which } => {
             challenge_submit(layout, store, id.as_deref(), &which, out)
         }
+    }
+}
+
+const DEFAULT_PLATFORM_URL: &str = "https://claudedaycare.com";
+
+/// What a challenge window should run.
+struct ChallengeWindow<'a> {
+    id: &'a str,
+    agent: AgentKind,
+    model: Option<&'a str>,
+    separate_codex_home: bool,
+    which: &'a Which,
+}
+
+impl ChallengeWindow<'_> {
+    /// argv for `challenge start` and `challenge submit` in the new window.
+    /// The window runs this same binary, by absolute path, so a PATH that
+    /// does not hold `~/.local/bin` yet still finds it.
+    fn argv(&self, exe: &str) -> (Vec<String>, Vec<String>) {
+        let mut identity = Vec::new();
+        if let Some(id) = &self.which.identity_id {
+            identity.extend(["--identity-id".to_string(), id.clone()]);
+        } else if let Some(name) = &self.which.identity {
+            identity.extend(["--identity".to_string(), name.clone()]);
+        } else if self.which.general {
+            identity.push("--general".to_string());
+        }
+        let mut start: Vec<String> = vec![
+            exe.into(),
+            "challenge".into(),
+            "start".into(),
+            self.id.into(),
+            "--agent".into(),
+            self.agent.to_string(),
+        ];
+        if let Some(model) = self.model {
+            start.extend(["--model".to_string(), model.to_string()]);
+        }
+        if self.separate_codex_home {
+            start.push("--separate-codex-home".into());
+        }
+        start.extend(identity.iter().cloned());
+        let mut submit: Vec<String> = vec![
+            exe.into(),
+            "challenge".into(),
+            "submit".into(),
+            self.id.into(),
+        ];
+        submit.extend(identity);
+        (start, submit)
+    }
+}
+
+/// `challenge start --new-window`: hand the start to a real terminal.
+fn open_challenge_window(window: &ChallengeWindow<'_>, out: Out) -> Result<()> {
+    let exe = std::env::current_exe()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "daycare-runner".to_string());
+    let (start, submit) = window.argv(&exe);
+    let script = daycare_runner::new_window::challenge_script(&start, &submit);
+    // A window that cannot be opened (Terminal automation refused, no
+    // launcher) falls back to the paste line, as on WSL or with no display,
+    // instead of failing the start: the setup prompt tells the agent to pass
+    // that line on.
+    let opened = match daycare_runner::new_window::open(&script) {
+        Ok(opened) => opened,
+        Err(error) => {
+            eprintln!("{error}");
+            None
+        }
+    };
+    out.emit(
+        json!({
+            "ok": true,
+            "challenge_id": window.id,
+            "agent": window.agent,
+            "opened_in": opened,
+            "command": script,
+        }),
+        || match opened {
+            Some(launcher) => {
+                println!("Opened a new {launcher} window for the challenge.");
+                println!(
+                    "Your agent starts there. When you exit it, the window shows what would be \
+                     sent and waits for your yes."
+                );
+            }
+            None => {
+                println!("No new window could be opened here. Paste this into a terminal:");
+                println!();
+                println!("  {script}");
+            }
+        },
+    );
+    Ok(())
+}
+
+struct QuickstartRequest<'a> {
+    code: Option<&'a str>,
+    url: &'a str,
+    device_name: Option<&'a str>,
+    agent: Option<AgentKind>,
+    model: Option<&'a str>,
+    challenge: &'a str,
+    no_start: bool,
+}
+
+/// `quickstart`: enroll (when given a code), install the bundled skills, and
+/// open the first challenge in its own window. Each step is the same command
+/// a person could run alone; this only saves the round trips between them.
+fn quickstart(
+    layout: &Layout,
+    store: &dyn TokenStore,
+    request: QuickstartRequest<'_>,
+    out: Out,
+) -> Result<()> {
+    let paired = layout.config_file().exists();
+    match (request.code, paired) {
+        (Some(code), _) => {
+            out.say("Pairing this machine...");
+            enroll(
+                layout,
+                store,
+                request.url,
+                code,
+                request.device_name,
+                request.agent,
+                out.inner(),
+            )
+            .map_err(pairing_hint)?;
+        }
+        (None, true) => out.say("Already paired; keeping this machine's pairing."),
+        (None, false) => {
+            return Err(Error::new(format!(
+                "this machine is not paired yet. Copy the setup prompt from {}/start \
+                 (it carries a fresh pairing code), or pass --code",
+                request.url.trim_end_matches('/')
+            )))
+        }
+    }
+
+    out.say("Installing the Daycare skills...");
+    skill_command(
+        layout,
+        SkillAction::Install {
+            skill: None,
+            force: false,
+            accept_sha256: None,
+            which: Which::default(),
+        },
+        out.inner(),
+    )?;
+
+    let agent = selected_agent(request.agent, layout)?;
+    if request.no_start {
+        out.emit(
+            json!({ "ok": true, "paired": true, "agent": agent, "challenge": null }),
+            || println!("Paired and ready. Run `daycare-runner quickstart` again to start."),
+        );
+        return Ok(());
+    }
+    if agent == AgentKind::Antigravity {
+        return Err(Error::new(
+            "challenges do not support Antigravity CLI yet; this machine is paired, so \
+             `daycare-runner quickstart --agent claude` (or codex) starts one",
+        ));
+    }
+    if agent == AgentKind::Opencode && request.model.is_none() {
+        return Err(Error::new(
+            "OpenCode needs --model provider/model to start a challenge",
+        ));
+    }
+    let which = Which::default();
+    let active = active_for(layout, store, &which)?;
+    let id = daycare_runner::challenge::resolve_id(&active, request.challenge)?;
+    open_challenge_window(
+        &ChallengeWindow {
+            id: &id,
+            agent,
+            model: request.model,
+            // A global ~/.codex/AGENTS.md would otherwise refuse the start
+            // until it is reviewed; a first run brings no memory at all.
+            separate_codex_home: agent == AgentKind::Codex,
+            which: &which,
+        },
+        out,
+    )
+}
+
+/// A refused pairing code is almost always an expired or used one; say what
+/// to do instead of only the status.
+fn pairing_hint(error: Error) -> Error {
+    match error.http_status() {
+        Some(status @ (400 | 404 | 409 | 410)) => Error::new(format!(
+            "{error}\nPairing codes work once and expire after a few minutes. Copy a fresh \
+             setup prompt from https://claudedaycare.com/daycare, or get a new code from \
+             the pairing page."
+        ))
+        .with_status(status),
+        _ => error,
     }
 }
 
