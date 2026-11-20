@@ -4739,7 +4739,17 @@ fn open_challenge_window(window: &ChallengeWindow<'_>, out: Out) -> Result<()> {
         .unwrap_or_else(|| "daycare-runner".to_string());
     let (start, submit) = window.argv(&exe);
     let script = daycare_runner::new_window::challenge_script(&start, &submit);
-    let opened = daycare_runner::new_window::open(&script)?;
+    // A window that cannot be opened (Terminal automation refused, no
+    // launcher) falls back to the paste line, as on WSL or with no display,
+    // instead of failing the start: the setup prompt tells the agent to pass
+    // that line on.
+    let opened = match daycare_runner::new_window::open(&script) {
+        Ok(opened) => opened,
+        Err(error) => {
+            eprintln!("{error}");
+            None
+        }
+    };
     out.emit(
         json!({
             "ok": true,
@@ -4864,8 +4874,8 @@ fn pairing_hint(error: Error) -> Error {
     match error.http_status() {
         Some(status @ (400 | 404 | 409 | 410)) => Error::new(format!(
             "{error}\nPairing codes work once and expire after a few minutes. Copy a fresh \
-             setup prompt from https://claudedaycare.com/start, or get a new code from the \
-             pairing page."
+             setup prompt from https://claudedaycare.com/daycare, or get a new code from \
+             the pairing page."
         ))
         .with_status(status),
         _ => error,
