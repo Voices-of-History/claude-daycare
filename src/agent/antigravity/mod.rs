@@ -351,6 +351,11 @@ impl Agent for AntigravityAgent {
         })
     }
 
+    /// The token is in the 0600 MCP config, not in the child's environment.
+    fn device_token_in_env(&self) -> bool {
+        false
+    }
+
     /// The token-bearing MCP config never outlives the child.
     fn after_turn(&self) -> Result<()> {
         self.forget_token_file()

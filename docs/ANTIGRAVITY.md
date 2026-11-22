@@ -58,7 +58,11 @@ MCP servers, hooks, settings) is never read. The only thing linked in is
 `${VAR}` in MCP headers: with a placeholder, the server silently failed to
 load. So the adapter writes the token (0600, in a 0700 seal) just before the
 child starts and removes the file when the child exits. This is the one place
-the runner puts a device token on disk outside its own token store.
+the runner puts a device token on disk outside its own token store. Unlike
+Claude Code and Codex, the child does not get the token in its environment
+(`DAYCARE_DEVICE_TOKEN`); the file is the only copy it sees. The file is
+removed however the turn ends: after the child exits, and also when the child
+cannot start or the turn's archive cannot be written.
 
 `run_turn` sends the message as one `--input-format stream-json` line on
 stdin, so it never appears in `ps`. A workspace that contains `AGENTS.md`,

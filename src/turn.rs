@@ -126,6 +126,10 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
     // give without a model call, before the child receives either the turn
     // prompt or the device token.
     agent.guard(&spec)?;
+    // From here an agent may have put something on disk for this turn (the
+    // token-bearing MCP file), so every way out, early returns included, ends
+    // with `after_turn`.
+    let after_turn = AfterTurn::new(agent);
     let plan = agent.launch_plan(&spec)?;
     // The plan preserves the established missing-file errors. This second check
     // adds the no-symlink property before the files reach the agent.
@@ -151,10 +155,12 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
     for (name, value) in &plan.env {
         command.env(name, value);
     }
-    // The only place the device token exists outside the keychain. The
-    // homecoming turn needs it too: it saves the visit's memories through the
-    // same MCP server the visit used. The day report has no server to reach.
-    if request.purpose != TurnPurpose::DayReport {
+    // The only place the device token exists outside the keychain, for agents
+    // that read it from here. The homecoming turn needs it too: it saves the
+    // visit's memories through the same MCP server the visit used. The day
+    // report has no server to reach. An agent that carries the token in its
+    // own config file (Antigravity) gets no copy in its environment.
+    if request.purpose != TurnPurpose::DayReport && agent.device_token_in_env() {
         command.env(DEVICE_TOKEN_ENV, request.device_token);
     }
 
@@ -293,7 +299,7 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
             .is_some_and(|ceiling| tokens_spent.load(Ordering::SeqCst) > ceiling);
     // Whatever the turn did, the agent may have state to settle (Codex hands a
     // refreshed login back to the owner's own home).
-    let after_turn = agent.after_turn();
+    let after_turn = after_turn.run();
 
     let mut failure = None;
     let mut held = false;
@@ -398,6 +404,35 @@ pub fn run_turn(request: TurnRequest<'_>) -> Result<TurnOutcome> {
     })
 }
 
+/// Runs `Agent::after_turn` once for the turn, on the normal path through
+/// `run` (which hands back its result) or, on any other exit (an early `?`
+/// return, a panic), when dropped.
+struct AfterTurn<'a> {
+    agent: &'a dyn Agent,
+    done: bool,
+}
+
+impl<'a> AfterTurn<'a> {
+    fn new(agent: &'a dyn Agent) -> Self {
+        AfterTurn { agent, done: false }
+    }
+
+    fn run(mut self) -> Result<()> {
+        self.done = true;
+        self.agent.after_turn()
+    }
+}
+
+impl Drop for AfterTurn<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            // The turn is already failing for another reason; that is the
+            // error the caller needs.
+            let _ = self.agent.after_turn();
+        }
+    }
+}
+
 fn exit_note(exit_code: Option<i32>, stderr: &str) -> String {
     let mut note = String::new();
     if let Some(code) = exit_code {
@@ -428,4 +463,105 @@ fn set_owner_only(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn set_owner_only(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::{AgentKind, TranscriptDelivery};
+    use crate::launch::LaunchPlan;
+    use crate::meter::WeeklyMeter;
+    use crate::stream::TurnEvent;
+    use std::cell::Cell;
+
+    /// Counts `after_turn`; nothing else of it is ever called.
+    struct Counting {
+        after_turn_calls: Cell<u32>,
+        fail: bool,
+    }
+
+    impl Agent for Counting {
+        fn kind(&self) -> AgentKind {
+            AgentKind::Claude
+        }
+        fn program(&self) -> &str {
+            unimplemented!()
+        }
+        fn product_name(&self) -> &'static str {
+            unimplemented!()
+        }
+        fn default_model(&self) -> Result<String> {
+            unimplemented!()
+        }
+        fn check_model(&self, _model: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn reserves_session_ids(&self) -> bool {
+            unimplemented!()
+        }
+        fn guard(&self, _spec: &crate::agent::TurnSpec<'_>) -> Result<()> {
+            unimplemented!()
+        }
+        fn launch_plan(&self, _spec: &crate::agent::TurnSpec<'_>) -> Result<LaunchPlan> {
+            unimplemented!()
+        }
+        fn after_turn(&self) -> Result<()> {
+            self.after_turn_calls.set(self.after_turn_calls.get() + 1);
+            if self.fail {
+                Err(Error::new("cleanup failed"))
+            } else {
+                Ok(())
+            }
+        }
+        fn parse_receipt(&self, _archive: &str) -> Result<StreamReceipt> {
+            unimplemented!()
+        }
+        fn transcript_events(&self, _archive: &str) -> Result<Vec<TurnEvent>> {
+            unimplemented!()
+        }
+        fn verify_seal(&self, _: &StreamReceipt, _: TurnPurpose, _: &Path) -> Result<()> {
+            unimplemented!()
+        }
+        fn verify_capability(&self, _: &StreamReceipt, _: TurnPurpose) -> Result<()> {
+            unimplemented!()
+        }
+        fn verify_archived(&self, _: &StreamReceipt, _: TurnPurpose, _: &Path) -> Result<()> {
+            unimplemented!()
+        }
+        fn transcript_delivery(&self) -> TranscriptDelivery {
+            unimplemented!()
+        }
+        fn meter(&self) -> Option<&dyn WeeklyMeter> {
+            unimplemented!()
+        }
+        fn reopen_command(&self, _: &Path, _: Option<&str>) -> String {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn after_turn_runs_once_whether_the_turn_finishes_or_leaves_early() {
+        let agent = Counting {
+            after_turn_calls: Cell::new(0),
+            fail: true,
+        };
+        // The normal path runs it once and hands back its result.
+        let guard = AfterTurn::new(&agent);
+        assert!(guard.run().is_err());
+        assert_eq!(agent.after_turn_calls.get(), 1);
+
+        // An early return (here, just a drop) runs it once, and says nothing.
+        agent.after_turn_calls.set(0);
+        drop(AfterTurn::new(&agent));
+        assert_eq!(agent.after_turn_calls.get(), 1);
+
+        // A panic unwinds through the guard.
+        agent.after_turn_calls.set(0);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = AfterTurn::new(&agent);
+            panic!("mid-turn");
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(agent.after_turn_calls.get(), 1);
+    }
 }

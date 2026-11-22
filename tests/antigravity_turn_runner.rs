@@ -47,9 +47,14 @@ assert 'DAYCARE_DEVICE_TOKEN' not in os.environ or args[:1] != ['models']
 if args == ['models']:
     if scenario == 'signed-out':
         print('Error: Please sign in to view available models.'); sys.exit(1)
-    print('gemini-3.8-flash-medium   Gemini 3.8 Flash (Medium)'); sys.exit(0)
+    print('gemini-3.8-flash-medium   Gemini 3.8 Flash (Medium)', flush=True)
+    if scenario == 'vanish':
+        # The last thing the guard asks of agy; the turn itself then cannot start.
+        os.remove(__file__)
+    sys.exit(0)
 with (root / 'calls').open('a') as log:
     log.write(json.dumps(args) + '\n')
+(root / 'token-env').write_text('set' if 'DAYCARE_DEVICE_TOKEN' in os.environ else 'unset')
 gemini = home / '.gemini'
 assert (home / 'Library' / 'Keychains').is_symlink()
 settings = json.loads((gemini / 'antigravity-cli' / 'settings.json').read_text())
@@ -89,6 +94,15 @@ for line in stream.splitlines():
     }
 
     fn run(&self, purpose: TurnPurpose, mode: SessionMode) -> daycare_runner::Result<TurnOutcome> {
+        self.run_archiving_to(purpose, mode, &self.dir.join("turn.jsonl"))
+    }
+
+    fn run_archiving_to(
+        &self,
+        purpose: TurnPurpose,
+        mode: SessionMode,
+        archive_path: &std::path::Path,
+    ) -> daycare_runner::Result<TurnOutcome> {
         run_turn(TurnRequest {
             agent: &self.agent,
             workspace: &self.workspace,
@@ -96,7 +110,7 @@ for line in stream.splitlines():
             message: "Look around.",
             actor_name: "Pip",
             device_token: "mock-device-token",
-            archive_path: &self.dir.join("turn.jsonl"),
+            archive_path,
             timeout: Duration::from_secs(20),
             purpose,
             model: "gemini-3.8-flash-medium",
@@ -180,6 +194,49 @@ fn a_world_turn_runs_sealed_and_the_token_file_is_gone_after() {
     assert!(!h.read("calls").contains("Look around."));
     // And the token did not outlive the turn.
     assert_eq!(h.token_files_left(), 0);
+}
+
+#[test]
+fn the_device_token_is_in_the_mcp_file_and_not_in_the_childs_environment() {
+    for purpose in [TurnPurpose::World, TurnPurpose::PrivateHomecoming] {
+        let h = Harness::new("world");
+        // The verdict does not matter here; what the child saw does.
+        h.run(purpose, Harness::new_session()).unwrap();
+        assert_eq!(h.read("token-env"), "unset", "{purpose:?}");
+        assert!(
+            h.read("saw-mcp").contains("mock-device-token"),
+            "{purpose:?}: the token must reach agy through its MCP file"
+        );
+    }
+}
+
+#[test]
+fn a_child_that_cannot_start_still_has_its_token_file_removed() {
+    let h = Harness::new("vanish");
+    let error = h
+        .run(TurnPurpose::World, Harness::new_session())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("could not start"), "{error}");
+    assert_eq!(h.token_files_left(), 0, "the MCP file kept the token");
+}
+
+#[test]
+fn an_archive_that_cannot_be_written_still_has_its_token_file_removed() {
+    let h = Harness::new("world");
+    // The archive's parent is a file, so the turn is refused after the plan
+    // wrote the token and before any child starts.
+    let blocker = h.dir.join("not-a-directory");
+    std::fs::write(&blocker, "x").unwrap();
+    assert!(h
+        .run_archiving_to(
+            TurnPurpose::World,
+            Harness::new_session(),
+            &blocker.join("turn.jsonl"),
+        )
+        .is_err());
+    assert!(h.read("calls").is_empty(), "a turn started");
+    assert_eq!(h.token_files_left(), 0, "the MCP file kept the token");
 }
 
 #[test]
