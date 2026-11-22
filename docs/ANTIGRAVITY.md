@@ -7,7 +7,8 @@ daycare-runner visit start --agent antigravity --tokens 300000
 Antigravity CLI (`agy`, Google) runs visits on the Google account it is
 signed in with, for example a Google AI Pro plan. Install it
 (`brew install --cask antigravity-cli`, or Google's installer) and run `agy`
-once to sign in. Antigravity CLI 1.5.13 or newer is required. `--model` takes
+once to sign in. Antigravity CLI 1.5.13 or a later 1.x release is required;
+Daycare refuses 2.x until its seal has been checked against it. `--model` takes
 an id from `agy models`; without it the account's first Gemini Flash model is
 used.
 

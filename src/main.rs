@@ -1146,6 +1146,7 @@ fn preflight_agents(
     let mut ready = Vec::new();
     let mut codex_version_error = None;
     let mut opencode_version_error = None;
+    let mut antigravity_version_error = None;
     let mut antigravity_sign_in_timed_out = false;
     for kind in [
         AgentKind::Claude,
@@ -1170,6 +1171,12 @@ fn preflight_agents(
         if kind == AgentKind::Opencode {
             if let Err(error) = agent::opencode::version::check_version_output(&version) {
                 opencode_version_error = Some(error);
+                continue;
+            }
+        }
+        if kind == AgentKind::Antigravity {
+            if let Err(error) = agent::antigravity::check_version_output(&version) {
+                antigravity_version_error = Some(error);
                 continue;
             }
         }
@@ -1221,13 +1228,11 @@ fn preflight_agents(
             }
             // A listing of models needs the Google sign-in and makes no model
             // call.
+            // The version was checked above, before anything else ran.
             AgentKind::Antigravity => {
-                agent::antigravity::check_version_output(&version).is_ok() && {
-                    let sign_in =
-                        probe_agy_sign_in("agy", AGY_SIGN_IN_TIMEOUT, AGY_SIGN_IN_ATTEMPTS);
-                    antigravity_sign_in_timed_out = sign_in == AgySignIn::TimedOut;
-                    sign_in == AgySignIn::SignedIn
-                }
+                let sign_in = probe_agy_sign_in("agy", AGY_SIGN_IN_TIMEOUT, AGY_SIGN_IN_ATTEMPTS);
+                antigravity_sign_in_timed_out = sign_in == AgySignIn::TimedOut;
+                sign_in == AgySignIn::SignedIn
             }
         };
         if signed_in {
@@ -1244,6 +1249,12 @@ fn preflight_agents(
     // The same for an OpenCode release Daycare does not run (OpenCode 2).
     if ready.is_empty() || choice == Some(AgentKind::Opencode) {
         if let Some(error) = opencode_version_error {
+            return Err(Error::new(format!("{error}. No pairing code was claimed.")));
+        }
+    }
+    // And for an Antigravity CLI release the seal was not checked against.
+    if ready.is_empty() || choice == Some(AgentKind::Antigravity) {
+        if let Some(error) = antigravity_version_error {
             return Err(Error::new(format!("{error}. No pairing code was claimed.")));
         }
     }

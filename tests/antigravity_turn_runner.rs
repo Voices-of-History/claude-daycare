@@ -34,7 +34,7 @@ root = pathlib.Path(__file__).parent
 scenario = (root / 'scenario').read_text()
 args = sys.argv[1:]
 if args == ['--version']:
-    print('1.5.12' if scenario == 'old' else '1.5.13'); sys.exit(0)
+    print({'old': '1.5.12', 'new-major': '2.0.0'}.get(scenario, '1.5.13')); sys.exit(0)
 home = pathlib.Path(os.environ['HOME'])
 assert 'DAYCARE_DEVICE_TOKEN' not in os.environ or args[:1] != ['models']
 if args == ['models']:
@@ -225,6 +225,7 @@ fn signed_out_old_or_forked_turns_never_start() {
     for (scenario, mode, expected) in [
         ("signed-out", Harness::new_session(), "not signed in"),
         ("old", Harness::new_session(), "1.5.13 or newer"),
+        ("new-major", Harness::new_session(), "is not supported yet"),
         (
             "world",
             SessionMode::Fork {

@@ -67,6 +67,9 @@ pub use stream::AGENT_NAME;
 /// The oldest `agy` the seal was checked against.
 pub const MIN_VERSION: (u64, u64, u64) = (1, 5, 13);
 
+/// The first major `agy` release the seal was not checked against.
+pub const UNSUPPORTED_MAJOR: u64 = 2;
+
 /// The memory tools a homecoming may see.
 const HOMECOMING_TOOLS: [&str; 2] = ["daycare_memory_list", "daycare_memory_save"];
 
@@ -618,10 +621,19 @@ fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
     ))
 }
 
-/// Refuse anything older than the release the seal was checked against.
+/// Refuse anything but the release the seal was checked against or a later
+/// 1.x one. The seal rests on `agy`'s settings, agent and MCP file formats and
+/// its stream shape, none of which is documented as stable, so a new major
+/// release is refused until it has been checked.
 pub fn check_version_output(text: &str) -> Result<()> {
     let (major, minor, patch) = MIN_VERSION;
     match parse_version(text) {
+        Some((a, b, c)) if a >= UNSUPPORTED_MAJOR => Err(Error::new(format!(
+            "Daycare runs Antigravity CLI {major}.{minor}.{patch} or a later {major}.x release, and this is {a}.{b}.{c}. \
+             Antigravity CLI {UNSUPPORTED_MAJOR} may have changed the settings Daycare uses to keep a visit sealed, so it \
+             is not supported yet. Update the runner (`daycare-runner update`) in case a newer one supports it, or wait \
+             for a release that does; until then use Claude Code, Codex or OpenCode"
+        ))),
         Some(version) if version >= MIN_VERSION => Ok(()),
         Some((a, b, c)) => Err(Error::new(format!(
             "Daycare needs Antigravity CLI {major}.{minor}.{patch} or newer, and this is {a}.{b}.{c}. Update it with `brew upgrade --cask antigravity-cli` or `agy update`"
@@ -798,10 +810,34 @@ mod tests {
             .to_string()
             .contains("1.5.13 or newer"));
         assert!(check_version_output("nothing").is_err());
+        check_version_output("agy 1.99.0").unwrap();
         check_model("gemini-3.8-flash-medium").unwrap();
         for bad in ["", "-x", "gemini 3", "a/b", "x;y"] {
             assert!(check_model(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_new_major_release_is_refused_until_it_is_checked() {
+        for two in ["2.0.0", "agy v2.0.1\n", "3.1.0", "2.0.0-beta.1", "10.0"] {
+            let error = check_version_output(two).unwrap_err().to_string();
+            assert!(error.contains("is not supported yet"), "{two}: {error}");
+            assert!(
+                error.contains("1.5.13 or a later 1.x release"),
+                "{two}: {error}"
+            );
+            assert!(error.contains("Update the runner"), "{two}: {error}");
+            assert!(error.contains("or wait"), "{two}: {error}");
+        }
+        assert!(check_version_output("2.0.0")
+            .unwrap_err()
+            .to_string()
+            .contains("this is 2.0.0"));
+        // The floor still reads as a floor.
+        assert!(check_version_output("1.5.12")
+            .unwrap_err()
+            .to_string()
+            .contains("1.5.13 or newer"));
     }
 
     #[test]
