@@ -3153,6 +3153,21 @@ fn run_visit(
                 consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
                 eprintln!("platform unavailable; visit remains active: {error}");
             }
+            // A platform that now demands a newer runner is not a failed turn:
+            // nothing ran wrong, and three of them in a row would end the
+            // visit as Failed. The visit stops here instead, keeps its local
+            // record, and finishes its homecoming once the runner is updated.
+            Err(RunOnceError::Turn(error))
+                if daycare_runner::self_update::is_update_required(&error) =>
+            {
+                eprintln!("error: {error}");
+                eprintln!(
+                    "The platform needs a newer daycare-runner, so this visit is stopping. \
+                     That is not a failed turn. Update the runner (`daycare-runner update`, \
+                     or run the command above if the platform gave one), then start a visit again."
+                );
+                break (LocalEndReason::Interrupted, None);
+            }
             Err(RunOnceError::Turn(error)) => {
                 completed_turn = true;
                 consecutive_poll_errors = 0;

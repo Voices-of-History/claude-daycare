@@ -273,3 +273,47 @@ fn a_retired_claude_is_reported_as_something_other_than_a_bad_code() {
          that was never the problem: {message}"
     );
 }
+
+#[test]
+fn a_426_keeps_the_servers_message_and_the_status() {
+    let platform = MockPlatform::start(|_| {
+        Response::json(
+            426,
+            r#"{"error":"runner_update_required","message":"Run: curl -fsSL https://daycare.test/install.sh | sh"}"#,
+        )
+    });
+    let client = PlatformClient::new(&platform.base_url);
+    let error = client.next_command("test-token").unwrap_err();
+    assert_eq!(error.http_status(), Some(426));
+    assert!(daycare_runner::self_update::is_update_required(&error));
+    assert_eq!(
+        error.message(),
+        "next command failed: runner_update_required: Run: curl -fsSL https://daycare.test/install.sh | sh (HTTP 426)"
+    );
+}
+
+#[test]
+fn a_refusal_without_a_message_keeps_its_old_wording() {
+    let platform =
+        MockPlatform::start(|_| Response::json(426, r#"{"error":"runner_update_required"}"#));
+    let client = PlatformClient::new(&platform.base_url);
+    let error = client.next_command("test-token").unwrap_err();
+    assert_eq!(
+        error.message(),
+        "next command failed: runner_update_required (HTTP 426)"
+    );
+    // A message that only repeats the error adds nothing.
+    let platform = MockPlatform::start(|_| {
+        Response::json(
+            426,
+            r#"{"error":"runner_update_required","message":"runner_update_required"}"#,
+        )
+    });
+    let error = PlatformClient::new(&platform.base_url)
+        .next_command("test-token")
+        .unwrap_err();
+    assert_eq!(
+        error.message(),
+        "next command failed: runner_update_required (HTTP 426)"
+    );
+}

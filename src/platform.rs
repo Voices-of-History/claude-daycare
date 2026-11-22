@@ -1262,9 +1262,19 @@ fn request_error(what: &str, error: ureq::Error) -> Error {
                 .ok()
                 .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
                 .filter(|text| !text.trim().is_empty());
-            let message = match sentence {
-                Some(text) => format!("{what} failed: {text} (HTTP {code})"),
-                None => {
+            // The platform's own `message` (a refusal's next step, such as the
+            // reinstall command for a 426) is kept when it adds to the error.
+            let detail = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| value.get("message")?.as_str().map(str::to_owned))
+                .map(|text| text.trim().chars().take(500).collect::<String>())
+                .filter(|text| !text.is_empty() && sentence.as_deref() != Some(text.as_str()));
+            let message = match (sentence, detail) {
+                (Some(text), Some(detail)) => {
+                    format!("{what} failed: {text}: {detail} (HTTP {code})")
+                }
+                (Some(text), None) => format!("{what} failed: {text} (HTTP {code})"),
+                (None, _) => {
                     let excerpt: String = body.chars().take(200).collect();
                     format!("{what} failed: HTTP {code} {excerpt}")
                 }
