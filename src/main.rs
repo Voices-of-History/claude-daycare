@@ -1146,6 +1146,7 @@ fn preflight_agents(
     let mut ready = Vec::new();
     let mut codex_version_error = None;
     let mut opencode_version_error = None;
+    let mut antigravity_sign_in_timed_out = false;
     for kind in [
         AgentKind::Claude,
         AgentKind::Codex,
@@ -1221,10 +1222,12 @@ fn preflight_agents(
             // A listing of models needs the Google sign-in and makes no model
             // call.
             AgentKind::Antigravity => {
-                agent::antigravity::check_version_output(&version).is_ok()
-                    && local_probe("agy", &["models"]).is_some_and(|(ok, text)| {
-                        ok && !agent::antigravity::model_ids(&text).is_empty()
-                    })
+                agent::antigravity::check_version_output(&version).is_ok() && {
+                    let sign_in =
+                        probe_agy_sign_in("agy", AGY_SIGN_IN_TIMEOUT, AGY_SIGN_IN_ATTEMPTS);
+                    antigravity_sign_in_timed_out = sign_in == AgySignIn::TimedOut;
+                    sign_in == AgySignIn::SignedIn
+                }
             }
         };
         if signed_in {
@@ -1243,6 +1246,9 @@ fn preflight_agents(
         if let Some(error) = opencode_version_error {
             return Err(Error::new(format!("{error}. No pairing code was claimed.")));
         }
+    }
+    if let Some(error) = agy_sign_in_timeout_error(antigravity_sign_in_timed_out, &ready, choice) {
+        return Err(error);
     }
     if ready.is_empty() {
         return Err(Error::new("No supported agent is installed and signed in. Choose Claude Code (run `claude` and /login with Pro or Max), Codex CLI (`codex login` with ChatGPT), OpenCode (`opencode auth login` for your provider), or Antigravity CLI (run `agy` and sign in), then retry. Login inspection must succeed; no pairing code was claimed."));
@@ -1280,8 +1286,36 @@ fn xdg_home(name: &str, home: &std::path::Path, fallback: &str) -> PathBuf {
         .unwrap_or_else(|| home.join(fallback))
 }
 
+/// How long a local login inspection may take.
+const LOCAL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long one `agy models` may take while pairing or setting up. It fetches
+/// the model list from Google, so it is slower than the other agents' login
+/// checks, and a slow fetch is not a sign-out (2026-11-22: one enroll was told
+/// a signed-in `agy` was not signed in, and the same command passed a moment
+/// later).
+const AGY_SIGN_IN_TIMEOUT: Duration = Duration::from_secs(15);
+/// One try and one retry.
+const AGY_SIGN_IN_ATTEMPTS: u32 = 2;
+
 /// Local CLI inspection with a deadline; stdout is private, stderr discarded.
 fn local_probe(bin: &str, args: &[&str]) -> Option<(bool, String)> {
+    match local_probe_within(bin, args, LOCAL_PROBE_TIMEOUT) {
+        Probe::Finished(success, text) => Some((success, text)),
+        Probe::TimedOut | Probe::Unavailable => None,
+    }
+}
+
+/// How a local inspection ended. A timeout is kept apart from a failure so a
+/// slow check is never reported as a missing login.
+#[derive(Debug)]
+enum Probe {
+    Finished(bool, String),
+    TimedOut,
+    Unavailable,
+}
+
+fn local_probe_within(bin: &str, args: &[&str], timeout: Duration) -> Probe {
     use std::io::Read;
     use std::process::{Command, Stdio};
     let mut command = Command::new(bin);
@@ -1294,8 +1328,14 @@ fn local_probe(bin: &str, args: &[&str]) -> Option<(bool, String)> {
         command.env_remove(key);
     }
     command.env_remove("CLAUDE_CODE_OAUTH_TOKEN");
-    let mut child = command.spawn().ok()?;
-    let mut pipe = child.stdout.take()?;
+    let Ok(mut child) = command.spawn() else {
+        return Probe::Unavailable;
+    };
+    let Some(mut pipe) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Probe::Unavailable;
+    };
     let (send, receive) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -1307,19 +1347,67 @@ fn local_probe(bin: &str, args: &[&str]) -> Option<(bool, String)> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let remaining = Duration::from_secs(5).saturating_sub(start.elapsed());
-                return Some((status.success(), receive.recv_timeout(remaining).ok()?));
+                let remaining = timeout.saturating_sub(start.elapsed());
+                return match receive.recv_timeout(remaining) {
+                    Ok(text) => Probe::Finished(status.success(), text),
+                    Err(_) => Probe::TimedOut,
+                };
             }
-            Ok(None) if start.elapsed() < Duration::from_secs(5) => {
-                std::thread::sleep(Duration::from_millis(20))
-            }
-            _ => {
+            Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Probe::TimedOut;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Probe::Unavailable;
             }
         }
     }
+}
+
+/// What `agy models` says about Antigravity CLI's Google sign-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgySignIn {
+    SignedIn,
+    NotSignedIn,
+    /// No answer in time on any try: unknown, not signed out.
+    TimedOut,
+}
+
+/// A listing of models needs the Google sign-in and makes no model call. Try
+/// again once if the first try doesn't show a sign-in; the last try decides.
+fn probe_agy_sign_in(bin: &str, timeout: Duration, attempts: u32) -> AgySignIn {
+    let mut verdict = AgySignIn::NotSignedIn;
+    for _ in 0..attempts.max(1) {
+        verdict = match local_probe_within(bin, &["models"], timeout) {
+            Probe::Finished(true, text) if !agent::antigravity::model_ids(&text).is_empty() => {
+                return AgySignIn::SignedIn
+            }
+            Probe::TimedOut => AgySignIn::TimedOut,
+            Probe::Finished(..) | Probe::Unavailable => AgySignIn::NotSignedIn,
+        };
+    }
+    verdict
+}
+
+/// When Antigravity was asked for (or nothing else is ready) and its sign-in
+/// check only ran out of time, say that, instead of calling it signed out.
+fn agy_sign_in_timeout_error(
+    timed_out: bool,
+    ready: &[AgentKind],
+    choice: Option<AgentKind>,
+) -> Option<Error> {
+    let asked_for =
+        choice == Some(AgentKind::Antigravity) || (choice.is_none() && ready.is_empty());
+    (timed_out && asked_for).then(|| {
+        Error::new(format!(
+            "Couldn't confirm Antigravity CLI's sign-in in time: `agy models`, which fetches the model list from Google, took longer than {} seconds on both tries. That is usually a slow connection, not a sign-out. Run the same command again. No pairing code was claimed.",
+            AGY_SIGN_IN_TIMEOUT.as_secs()
+        ))
+    })
 }
 
 /// What `claude auth status --json` output means for enrollment.
@@ -5975,5 +6063,112 @@ mod tests {
         assert!(Cli::try_parse_from(&argv).is_err());
         argv.extend(["--scan", "--check"]);
         assert!(Cli::try_parse_from(&argv).is_err());
+    }
+
+    /// A fake `agy` that counts its runs in `<script>.count`. Written beside
+    /// and copied into place, like the integration tests' fixtures, so Linux
+    /// never execs a file another thread still holds open for writing.
+    fn fake_agy(label: &str, body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "daycare-agy-probe-{label}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("agy");
+        let staged = dir.join("agy.staged");
+        std::fs::write(
+            &staged,
+            format!(
+                "#!/bin/sh\nn=$(cat \"$0.count\" 2>/dev/null || echo 0)\nn=$((n+1))\necho $n > \"$0.count\"\n{body}\n"
+            ),
+        )
+        .unwrap();
+        assert!(std::process::Command::new("/bin/cp")
+            .arg(&staged)
+            .arg(&script)
+            .status()
+            .unwrap()
+            .success());
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        script
+    }
+
+    fn runs(script: &std::path::Path) -> u32 {
+        std::fs::read_to_string(script.with_extension("count"))
+            .unwrap_or_default()
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    const MODELS: &str = "printf 'gemini-3.8-flash-medium\\tGemini 3.8 Flash (Medium)\\n'";
+    const SHORT: Duration = Duration::from_millis(1500);
+
+    #[test]
+    fn agy_sign_in_gets_longer_than_the_other_login_checks_and_one_retry() {
+        assert!(AGY_SIGN_IN_TIMEOUT > LOCAL_PROBE_TIMEOUT);
+        assert_eq!(AGY_SIGN_IN_ATTEMPTS, 2);
+    }
+
+    #[test]
+    fn a_listing_of_models_is_a_sign_in() {
+        let agy = fake_agy("listing", MODELS);
+        let sign_in = probe_agy_sign_in(agy.to_str().unwrap(), SHORT, 2);
+        assert_eq!(sign_in, AgySignIn::SignedIn);
+        assert_eq!(runs(&agy), 1);
+    }
+
+    #[test]
+    fn a_slow_first_listing_is_retried_and_then_counts() {
+        let agy = fake_agy(
+            "slow-first",
+            &format!("if [ \"$n\" -eq 1 ]; then exec /bin/sleep 5; fi\n{MODELS}"),
+        );
+        let sign_in = probe_agy_sign_in(agy.to_str().unwrap(), SHORT, 2);
+        assert_eq!(sign_in, AgySignIn::SignedIn);
+        assert_eq!(runs(&agy), 2);
+    }
+
+    #[test]
+    fn a_listing_that_never_answers_in_time_is_a_timeout_not_a_sign_out() {
+        let agy = fake_agy("never", "exec /bin/sleep 5");
+        let sign_in = probe_agy_sign_in(agy.to_str().unwrap(), SHORT, 2);
+        assert_eq!(sign_in, AgySignIn::TimedOut);
+        assert_eq!(runs(&agy), 2);
+    }
+
+    #[test]
+    fn a_signed_out_agy_is_not_signed_in() {
+        let agy = fake_agy(
+            "signed-out",
+            "echo 'Error: Please sign in to view available models.'; exit 1",
+        );
+        let sign_in = probe_agy_sign_in(agy.to_str().unwrap(), SHORT, 2);
+        assert_eq!(sign_in, AgySignIn::NotSignedIn);
+        assert_eq!(runs(&agy), 2);
+    }
+
+    #[test]
+    fn a_sign_in_timeout_is_reported_only_when_antigravity_was_wanted() {
+        let asked = agy_sign_in_timeout_error(true, &[], Some(AgentKind::Antigravity)).unwrap();
+        let text = asked.message();
+        assert!(
+            text.contains("Couldn't confirm Antigravity CLI's sign-in in time"),
+            "{text}"
+        );
+        assert!(text.contains("Run the same command again"), "{text}");
+        assert!(text.contains("No pairing code was claimed"), "{text}");
+        assert!(!text.contains("not installed and signed in"), "{text}");
+        // Nothing else ready and no choice: Antigravity was the only hope.
+        assert!(agy_sign_in_timeout_error(true, &[], None).is_some());
+        // Another ready agent and no choice, or another agent chosen: pair it.
+        assert!(agy_sign_in_timeout_error(true, &[AgentKind::Claude], None).is_none());
+        assert!(
+            agy_sign_in_timeout_error(true, &[AgentKind::Claude], Some(AgentKind::Claude))
+                .is_none()
+        );
+        // No timeout: the usual answers apply.
+        assert!(agy_sign_in_timeout_error(false, &[], Some(AgentKind::Antigravity)).is_none());
     }
 }

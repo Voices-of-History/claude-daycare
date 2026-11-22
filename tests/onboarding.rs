@@ -309,6 +309,21 @@ fn opencode_2_is_refused_without_claiming_a_code() {
     assert!(m.platform.requests().is_empty());
 }
 
+/// `agy models` fetches the model list from Google. On 2026-11-22 a fetch
+/// slower than the old five-second limit made a signed-in `agy` read as not
+/// signed in, and enroll refused it.
+#[test]
+fn a_slow_antigravity_model_list_still_enrolls() {
+    let m = Machine::new();
+    support::testdir::write_executable(
+        &m.root.join("bin/agy"),
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.5.13; exit 0; fi\n/bin/sleep 6\nprintf 'gemini-3.8-flash-medium\\tGemini 3.8 Flash (Medium)\\n'\n",
+    );
+    let out = m.enroll(&["--agent", "antigravity"]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(m.config()["default_agent"], "antigravity");
+}
+
 #[test]
 fn unavailable_choice_does_not_claim_or_overwrite_the_saved_default() {
     let m = Machine::new();
