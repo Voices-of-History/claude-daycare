@@ -528,12 +528,15 @@ impl PlatformClient {
     /// machine, for tests and a local platform) is refused here, whether it
     /// came from the base URL or from an absolute `path` the server supplied.
     pub fn url(&self, path: &str) -> Result<String> {
-        let url = if path.starts_with("http://") || path.starts_with("https://") {
-            path.to_string()
+        let (url, what) = if path.starts_with("http://") || path.starts_with("https://") {
+            (path.to_string(), "a URL the platform supplied")
         } else {
-            format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+            (
+                format!("{}/{}", self.base_url, path.trim_start_matches('/')),
+                "the platform URL",
+            )
         };
-        crate::self_update::require_https_or_loopback(&url, "the platform URL")?;
+        crate::self_update::require_https_or_loopback(&url, what)?;
         Ok(url)
     }
 
@@ -1249,6 +1252,14 @@ fn read_body(
 
 /// Errors must be safe to print and safe to send back to the platform, so this
 /// reports status and a short body excerpt — never the request headers.
+/// Server-supplied text is printed to the owner's terminal, so control
+/// characters (escape sequences, carriage returns) become spaces.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 fn request_error(what: &str, error: ureq::Error) -> Error {
     match error {
         ureq::Error::Status(401, response) => {
@@ -1270,13 +1281,13 @@ fn request_error(what: &str, error: ureq::Error) -> Error {
             // only a body without a sentence falls back to the status line.
             let sentence = serde_json::from_str::<serde_json::Value>(&body)
                 .ok()
-                .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
+                .and_then(|value| value.get("error")?.as_str().map(printable))
                 .filter(|text| !text.trim().is_empty());
             // The platform's own `message` (a refusal's next step, such as the
             // reinstall command for a 426) is kept when it adds to the error.
             let detail = serde_json::from_str::<serde_json::Value>(&body)
                 .ok()
-                .and_then(|value| value.get("message")?.as_str().map(str::to_owned))
+                .and_then(|value| value.get("message")?.as_str().map(printable))
                 .map(|text| text.trim().chars().take(500).collect::<String>())
                 .filter(|text| !text.is_empty() && sentence.as_deref() != Some(text.as_str()));
             let message = match (sentence, detail) {

@@ -3781,10 +3781,14 @@ fn enroll_refuses_plain_http_to_a_remote_host() {
         let out = install.run(&["enroll", "--url", url, "--code", "PAIR-1234"]);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{url}: {stderr}");
+        // The enroll-level guard speaks for `--url`; the client's own check
+        // says "the platform URL", so this fails if the guard is removed.
         assert!(
-            stderr.contains("must start with https://"),
+            stderr.contains("--url must start with https://"),
             "{url}: {stderr}"
         );
         assert!(stderr.contains("localhost"), "{url}: {stderr}");
+        // And it ran first: nothing was created on this machine.
+        assert!(!install.home.exists(), "{url}: the root layout was created");
     }
 }

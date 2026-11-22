@@ -339,10 +339,43 @@ fn the_client_refuses_plain_http_to_a_remote_host() {
         "{error}"
     );
     assert!(platform.requests().is_empty());
+    // A server-supplied URL is named as such, not blamed on the platform URL.
+    assert!(
+        error.message().contains("a URL the platform supplied"),
+        "{error}"
+    );
     // Loopback over plain HTTP still works, and so does HTTPS elsewhere.
     assert!(client.url("/api/daycare/commands/next").is_ok());
     assert!(client.url("https://other.test/mcp").is_ok());
     assert!(client.url("http://127.0.0.1:9/mcp").is_ok());
     assert!(client.url("http://[::1]:9/mcp").is_ok());
     assert!(client.url("http://localhost.evil.test/mcp").is_err());
+}
+
+/// Server text is printed to the owner's terminal, so an escape sequence or a
+/// carriage return in it must not reach the terminal as a control character.
+#[test]
+fn server_text_in_a_refusal_carries_no_control_characters() {
+    let platform = MockPlatform::start(|_| {
+        Response::json(
+            426,
+            r#"{"error":"runner_update_required","message":"Run:\u001b[2J\rcurl -fsSL https://daycare.test/install.sh | sh"}"#,
+        )
+    });
+    let error = PlatformClient::new(&platform.base_url)
+        .next_command("test-token")
+        .unwrap_err();
+    assert_eq!(error.http_status(), Some(426));
+    assert!(
+        !error.message().chars().any(char::is_control),
+        "{:?}",
+        error.message()
+    );
+    assert!(
+        error
+            .message()
+            .contains("curl -fsSL https://daycare.test/install.sh | sh"),
+        "{}",
+        error.message()
+    );
 }
