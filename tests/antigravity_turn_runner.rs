@@ -18,6 +18,11 @@ struct Harness {
 
 impl Harness {
     fn new(scenario: &str) -> Self {
+        Self::on_platform(scenario, None)
+    }
+
+    /// `os` makes the adapter believe it runs on that operating system.
+    fn on_platform(scenario: &str, os: Option<&str>) -> Self {
         let dir = support::scratch_dir("antigravity-turn");
         let workspace = Workspace::new(dir.join("workspace"));
         workspace.scaffold("Pip", "http://127.0.0.1:1/mcp").unwrap();
@@ -33,6 +38,8 @@ import json, os, pathlib, sys
 root = pathlib.Path(__file__).parent
 scenario = (root / 'scenario').read_text()
 args = sys.argv[1:]
+with (root / 'probes').open('a') as log:
+    log.write(json.dumps(args) + '\n')
 if args == ['--version']:
     print({'old': '1.5.12', 'new-major': '2.0.0'}.get(scenario, '1.5.13')); sys.exit(0)
 home = pathlib.Path(os.environ['HOME'])
@@ -70,7 +77,10 @@ for line in stream.splitlines():
     print(line, flush=True)
 "##,
         );
-        let agent = AntigravityAgent::new(bin.to_str().unwrap(), &Layout::at(&dir));
+        let mut agent = AntigravityAgent::new(bin.to_str().unwrap(), &Layout::at(&dir));
+        if let Some(os) = os {
+            agent = agent.on_platform(os);
+        }
         Self {
             dir,
             workspace,
@@ -239,5 +249,25 @@ fn signed_out_old_or_forked_turns_never_start() {
         assert!(error.contains(expected), "{scenario}: {error}");
         assert!(h.read("calls").is_empty(), "{scenario} started a turn");
         assert_eq!(h.token_files_left(), 0);
+    }
+}
+
+#[test]
+fn linux_and_windows_are_refused_before_agy_is_run_at_all() {
+    for os in ["linux", "windows"] {
+        let h = Harness::on_platform("world", Some(os));
+        let error = h
+            .run(TurnPurpose::World, Harness::new_session())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Antigravity visits are macOS-only for now"),
+            "{os}: {error}"
+        );
+        assert!(!error.contains("not signed in"), "{os}: {error}");
+        // Not even `agy --version` or `agy models` ran, and no seal was made.
+        assert!(h.read("probes").is_empty(), "{os} ran agy");
+        assert_eq!(h.token_files_left(), 0);
+        assert!(!h.dir.join("antigravity").exists(), "{os} made a seal");
     }
 }

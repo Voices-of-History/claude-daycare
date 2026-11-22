@@ -5,7 +5,7 @@ daycare-runner visit start --agent antigravity --tokens 300000
 ```
 
 Antigravity CLI (`agy`, Google) runs visits on the Google account it is
-signed in with, for example a Google AI Pro plan. Install it
+signed in with, for example a Google AI Pro plan. Visits run on macOS only. Install it
 (`brew install --cask antigravity-cli`, or Google's installer) and run `agy`
 once to sign in. Antigravity CLI 1.5.13 or a later 1.x release is required;
 Daycare refuses 2.x until its seal has been checked against it. `--model` takes
@@ -112,7 +112,9 @@ instead.
   left on disk. It ended on its token cap after two turns because the ledger
   then counted the resumed turn's conversation total; that is fixed, and
   recounting the captured turns gives 105,782 tokens instead of 178,072.
-- Not yet run: Linux. Challenges do not support Antigravity CLI.
+- Not run, and refused up front: Linux and WSL. The seal links only the macOS
+  login keychain, so Daycare stops with "Antigravity visits are macOS-only for
+  now" before it runs `agy`. Challenges do not support Antigravity CLI.
 - After a turn with no MCP file, `agy` leaves an empty
   `.gemini/config/mcp_config.json` in the seal. It holds nothing.
 - `dev/mock-platform.py` serves plain http, which `agy` 1.5.13 does not

@@ -1146,7 +1146,7 @@ fn preflight_agents(
     let mut ready = Vec::new();
     let mut codex_version_error = None;
     let mut opencode_version_error = None;
-    let mut antigravity_version_error = None;
+    let mut antigravity_error = None;
     let mut antigravity_sign_in_timed_out = false;
     for kind in [
         AgentKind::Claude,
@@ -1161,6 +1161,15 @@ fn preflight_agents(
         let Some((true, version)) = local_probe(bin, &["--version"]) else {
             continue;
         };
+        // Antigravity cannot work off macOS. Say so, when it is installed,
+        // instead of calling it not signed in; it is no use as an installed
+        // agent there.
+        if kind == AgentKind::Antigravity {
+            if let Err(error) = agent::antigravity::check_platform(std::env::consts::OS) {
+                antigravity_error = Some(error);
+                continue;
+            }
+        }
         installed.push(kind);
         if kind == AgentKind::Codex {
             if let Err(error) = agent::codex::launch::check_version(&version) {
@@ -1176,7 +1185,7 @@ fn preflight_agents(
         }
         if kind == AgentKind::Antigravity {
             if let Err(error) = agent::antigravity::check_version_output(&version) {
-                antigravity_version_error = Some(error);
+                antigravity_error = Some(error);
                 continue;
             }
         }
@@ -1252,9 +1261,9 @@ fn preflight_agents(
             return Err(Error::new(format!("{error}. No pairing code was claimed.")));
         }
     }
-    // And for an Antigravity CLI release the seal was not checked against.
+    // And for an Antigravity CLI the seal does not work on or was not checked against.
     if ready.is_empty() || choice == Some(AgentKind::Antigravity) {
-        if let Some(error) = antigravity_version_error {
+        if let Some(error) = antigravity_error {
             return Err(Error::new(format!("{error}. No pairing code was claimed.")));
         }
     }

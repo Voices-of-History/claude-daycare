@@ -67,6 +67,10 @@ pub use stream::AGENT_NAME;
 /// The oldest `agy` the seal was checked against.
 pub const MIN_VERSION: (u64, u64, u64) = (1, 5, 13);
 
+/// The only operating system Antigravity visits run on: the seal links the
+/// macOS login keychain, where `agy` keeps its Google sign-in.
+pub const SUPPORTED_OS: &str = "macos";
+
 /// The first major `agy` release the seal was not checked against.
 pub const UNSUPPORTED_MAJOR: u64 = 2;
 
@@ -100,6 +104,8 @@ const MCP_TIMEOUT_SECONDS: u64 = 120;
 
 pub struct AntigravityAgent {
     bin: String,
+    /// `std::env::consts::OS`, unless a test says otherwise.
+    os: String,
     /// `<daycare root>/antigravity`: one sealed home per identity.
     root: PathBuf,
     version_checked: OnceLock<()>,
@@ -112,11 +118,19 @@ impl AntigravityAgent {
     pub fn new(bin: &str, layout: &Layout) -> Self {
         AntigravityAgent {
             bin: bin.to_string(),
+            os: std::env::consts::OS.to_string(),
             root: layout.root().join("antigravity"),
             version_checked: OnceLock::new(),
             login_checked: OnceLock::new(),
             token_file: Mutex::new(None),
         }
+    }
+
+    /// Run as if on operating system `os` (`std::env::consts::OS` names), so a
+    /// test can see the refusal on a machine where Antigravity does run.
+    pub fn on_platform(mut self, os: &str) -> Self {
+        self.os = os.to_string();
+        self
     }
 
     /// One sealed home per identity, keyed like its workspace directory.
@@ -133,6 +147,7 @@ impl AntigravityAgent {
     /// The release on PATH (or `--antigravity-bin`) is one the seal was
     /// checked against. Asked once per process.
     fn ensure_version(&self) -> Result<()> {
+        check_platform(&self.os)?;
         if self.version_checked.get().is_some() {
             return Ok(());
         }
@@ -579,6 +594,21 @@ fn read_mcp_url(path: &Path) -> Result<String> {
         .ok_or_else(|| Error::new("MCP config has no daycare server URL"))
 }
 
+/// Refuse an operating system the seal does not work on, before `agy` is run
+/// at all. `os` is a `std::env::consts::OS` name. Without it a Linux or WSL
+/// owner would be told they are not signed in: the sealed home links only
+/// `~/Library/Keychains` and drops the DBus and XDG variables a Linux `agy`
+/// needs for its sign-in, so the login check could never pass.
+pub fn check_platform(os: &str) -> Result<()> {
+    if os == SUPPORTED_OS {
+        return Ok(());
+    }
+    Err(Error::new(format!(
+        "Antigravity visits are macOS-only for now (this machine is {os}): the sealed home reaches \
+         the Google sign-in through the macOS login keychain. Use Claude Code, Codex or OpenCode here"
+    )))
+}
+
 /// A model id `agy --model` accepts: letters, digits, `-`, `_` and `.`.
 pub fn check_model(model: &str) -> Result<()> {
     let ok = !model.is_empty()
@@ -814,6 +844,23 @@ mod tests {
         check_model("gemini-3.8-flash-medium").unwrap();
         for bad in ["", "-x", "gemini 3", "a/b", "x;y"] {
             assert!(check_model(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn only_macos_runs_antigravity() {
+        check_platform("macos").unwrap();
+        assert_eq!(
+            check_platform(std::env::consts::OS).is_ok(),
+            cfg!(target_os = "macos")
+        );
+        for os in ["linux", "windows", "freebsd", ""] {
+            let error = check_platform(os).unwrap_err().to_string();
+            assert!(
+                error.contains("Antigravity visits are macOS-only for now"),
+                "{os}: {error}"
+            );
+            assert!(!error.contains("not signed in"), "{os}: {error}");
         }
     }
 
