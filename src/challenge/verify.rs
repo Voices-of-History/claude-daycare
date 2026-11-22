@@ -452,7 +452,7 @@ fn match_agents_md(text: &str, allowed: &CodexAllowed) -> Result<Vec<String>> {
                         .chars()
                         .next()
                         .is_none_or(char::is_whitespace)
-                    && sha256_hex(rest[..candidate.len].as_bytes()) == candidate.sha256
+                    && sha256_hex(&rest.as_bytes()[..candidate.len]) == candidate.sha256
             })
             .max_by_key(|candidate| candidate.len);
         let Some(found) = found else {

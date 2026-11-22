@@ -589,7 +589,7 @@ impl ChallengeDetail {
 pub fn brief_text(detail: &ChallengeDetail) -> String {
     let mut text = format!("# {}\n\n", detail.title);
     text.push_str(detail.brief_md.trim_end());
-    text.push_str("\n");
+    text.push('\n');
     if let Some((vote, goal, third)) = detail.weights {
         text.push_str("\n## How it is scored\n\n");
         text.push_str(&format!("- Votes: up to {vote} points\n"));

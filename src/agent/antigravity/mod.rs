@@ -141,12 +141,11 @@ impl AntigravityAgent {
                 self.bin
             ))
         })?;
-        check_version_output(
-            output
-                .success
-                .then_some(output.stdout.as_str())
-                .unwrap_or(""),
-        )?;
+        check_version_output(if output.success {
+            output.stdout.as_str()
+        } else {
+            ""
+        })?;
         let _ = self.version_checked.set(());
         Ok(())
     }
