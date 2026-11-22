@@ -59,6 +59,11 @@ if scenario == 'shell':
     stream = stream.replace('"ToolName": "daycare_world_snapshot"', '"ToolName": "x"').replace(
         '"tool_name": "call_mcp_tool", "tool_info": {"name": "call_mcp_tool", "parameters": {"ServerName": "daycare", "ToolName": "x"',
         '"tool_name": "run_command", "tool_info": {"name": "run_command", "parameters": {"CommandLine": "ls ~"')
+if scenario == 'built-in':
+    extra = json.dumps({"event": "step_update", "step_update": {"conversation_id": "c0ffee00-0000-4000-8000-000000000001", "step_index": 9, "state": "DONE", "step_type": "tool", "tool_name": "manage_task", "tool_info": {"name": "manage_task", "parameters": {}, "output": "ok"}}})
+    lines = stream.splitlines()
+    at = next(i for i, line in enumerate(lines) if '"event": "result"' in line)
+    stream = '\n'.join(lines[:at] + [extra] + lines[at:]) + '\n'
 if scenario == 'day-report':
     stream = '\n'.join(line for line in stream.splitlines() if '"tool"' not in line) + '\n'
 for line in stream.splitlines():
@@ -164,6 +169,14 @@ fn a_world_turn_runs_sealed_and_the_token_file_is_gone_after() {
         .contains("Look around."));
     assert!(!h.read("calls").contains("Look around."));
     // And the token did not outlive the turn.
+    assert_eq!(h.token_files_left(), 0);
+}
+
+#[test]
+fn a_harmless_built_in_call_does_not_fail_a_good_turn() {
+    let h = Harness::new("built-in");
+    let outcome = h.run(TurnPurpose::World, Harness::new_session()).unwrap();
+    assert!(outcome.succeeded(), "{:?}", outcome.failure);
     assert_eq!(h.token_files_left(), 0);
 }
 

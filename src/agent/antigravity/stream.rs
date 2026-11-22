@@ -18,7 +18,8 @@
 //! `call_mcp_tool` with `parameters{ServerName, ToolName, Arguments}`; it is
 //! renamed `mcp__daycare__<ToolName>` so the shared checks read every agent's
 //! receipts the same way. Anything else the turn called lands in
-//! `foreign_reach`.
+//! `foreign_reach`, except `finish` and the custom agent's other built-ins that
+//! reach nothing (`HARMLESS_BUILTINS`).
 //!
 //! `init.tools` lists Antigravity's global tool set, not the custom agent's,
 //! so it proves nothing about the seal. What `init` does prove is which agent
@@ -42,6 +43,15 @@ pub const MCP_CALL_TOOL: &str = "call_mcp_tool";
 
 /// The built-in tool that ends a turn. It reaches nothing.
 const FINISH_TOOL: &str = "finish";
+
+/// The built-in tools the custom agent still has beside `finish` and
+/// `call_mcp_tool` (checked on 1.5.13; see `docs/ANTIGRAVITY.md`). A model may
+/// call them, and none touches the shell, files or network: `manage_task`
+/// keeps the turn's own task list, and `list_resources` and `read_resource`
+/// only see resources the one configured MCP server offers. A call to one is
+/// not reach, and, like `finish`, it is not a tool call the checks count.
+/// Everything else that is not a daycare MCP call stays foreign reach.
+const HARMLESS_BUILTINS: [&str; 3] = ["manage_task", "list_resources", "read_resource"];
 
 pub fn parse_stream(stream: &str) -> Result<StreamReceipt> {
     let mut session_id: Option<String> = None;
@@ -112,7 +122,7 @@ pub fn parse_stream(stream: &str) -> Result<StreamReceipt> {
                         let Some(call) = ToolCall::from_step(step) else {
                             continue;
                         };
-                        if call.is_finish() {
+                        if call.is_harmless() {
                             continue;
                         }
                         if !call.name.starts_with(MCP_TOOL_PREFIX) {
@@ -378,6 +388,13 @@ impl ToolCall {
     fn is_finish(&self) -> bool {
         self.name == FINISH_TOOL
     }
+
+    /// `finish` or one of the built-ins that reach nothing. Only a call the
+    /// agent reported by its own name counts: a `call_mcp_tool` to another
+    /// server is renamed with its server and stays foreign.
+    fn is_harmless(&self) -> bool {
+        self.is_finish() || HARMLESS_BUILTINS.contains(&self.name.as_str())
+    }
 }
 
 fn conversation_id(event: &Value) -> Option<&str> {
@@ -538,6 +555,77 @@ mod tests {
             r#""permission_mode": "default""#,
         );
         assert!(parse_stream(&mode).unwrap().foreign_reach[0].contains("permission mode"));
+    }
+
+    /// The world fixture with one finished tool step of `tool` inserted just
+    /// before the result.
+    fn world_with_step(tool: &str, state: &str) -> String {
+        let step = format!(
+            r#"{{"event": "step_update", "step_update": {{"conversation_id": "c0ffee00-0000-4000-8000-000000000001", "step_index": 9, "state": "{state}", "step_type": "tool", "tool_name": "{tool}", "tool_info": {{"name": "{tool}", "parameters": {{}}, "output": "ok"}}}}}}"#
+        );
+        let mut lines: Vec<String> = fixture("world.jsonl").lines().map(str::to_string).collect();
+        let result = lines
+            .iter()
+            .position(|line| line.contains(r#""event": "result""#))
+            .unwrap();
+        lines.insert(result, step);
+        lines.join("\n")
+    }
+
+    #[test]
+    fn the_harmless_built_ins_are_not_foreign_reach() {
+        for tool in HARMLESS_BUILTINS {
+            for state in ["DONE", "ERROR"] {
+                let receipt = parse_stream(&world_with_step(tool, state)).unwrap();
+                assert!(
+                    receipt.foreign_reach.is_empty(),
+                    "{tool} {state}: {:?}",
+                    receipt.foreign_reach
+                );
+                // Like `finish`, they are not counted as tool calls, so the
+                // purpose checks still see only daycare calls.
+                assert_eq!(
+                    receipt.tool_calls,
+                    [
+                        "mcp__daycare__daycare_identity_get",
+                        "mcp__daycare__daycare_world_snapshot"
+                    ],
+                    "{tool} {state}"
+                );
+                assert!(receipt.success);
+            }
+        }
+    }
+
+    #[test]
+    fn shell_file_and_network_tools_stay_foreign_reach() {
+        for tool in [
+            "command",
+            "run_command",
+            "read_file",
+            "write_file",
+            "read_url",
+            "execute_url",
+            "download_url",
+            "search_web",
+            "manage_task_extra",
+        ] {
+            let receipt = parse_stream(&world_with_step(tool, "DONE")).unwrap();
+            assert_eq!(receipt.foreign_reach, [tool], "{tool}");
+        }
+        // Naming a harmless built-in on another MCP server does not borrow its
+        // pass.
+        let world = fixture("world.jsonl")
+            .replace(r#""ServerName": "daycare""#, r#""ServerName": "github""#)
+            .replace(
+                r#""ToolName": "daycare_world_snapshot""#,
+                r#""ToolName": "manage_task""#,
+            );
+        let receipt = parse_stream(&world).unwrap();
+        assert!(receipt
+            .foreign_reach
+            .iter()
+            .any(|reach| reach.contains("github/manage_task")));
     }
 
     #[test]

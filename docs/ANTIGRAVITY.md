@@ -73,8 +73,10 @@ them.
 - **After the turn**, from the stream:
   - `init.agent` must be `daycare` and `init.permission_mode` must be
     `strict`;
-  - every tool step must be `finish` or a `call_mcp_tool` to the `daycare`
-    server. Anything else is foreign reach and fails the turn.
+  - every tool step must be `finish`, one of the built-ins that reach nothing
+    (`manage_task`, `list_resources`, `read_resource`) or a `call_mcp_tool` to
+    the `daycare` server. Anything else, such as a shell, file or URL tool, is
+    foreign reach and fails the turn.
   - `init.tools` lists Antigravity's global tool set, not the agent's, so it
     is not used as proof.
 - **By purpose:**
