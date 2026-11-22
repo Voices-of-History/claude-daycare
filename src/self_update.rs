@@ -282,6 +282,19 @@ pub fn https_or_loopback(url: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
+/// `https_or_loopback` as an error for callers that carry a credential. The
+/// message says what to change, and never echoes the URL (it may embed
+/// userinfo).
+pub fn require_https_or_loopback(url: &str, what: &str) -> Result<()> {
+    if https_or_loopback(url) {
+        return Ok(());
+    }
+    Err(Error::new(format!(
+        "{what} must start with https://, because pairing codes and tokens travel with it \
+         (plain http:// is accepted only for localhost, 127.0.0.1 or [::1])"
+    )))
+}
+
 fn download(agent: &ureq::Agent, url: &str) -> Result<Vec<u8>> {
     let response = agent
         .get(url)

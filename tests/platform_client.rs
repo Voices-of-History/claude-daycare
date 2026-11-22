@@ -317,3 +317,32 @@ fn a_refusal_without_a_message_keeps_its_old_wording() {
         "next command failed: runner_update_required (HTTP 426)"
     );
 }
+
+/// The bearer token must never be sent over plain HTTP to a remote host, from
+/// the base URL or from an absolute URL the server handed back.
+#[test]
+fn the_client_refuses_plain_http_to_a_remote_host() {
+    let remote = PlatformClient::new("http://platform.example.test");
+    let error = remote.next_command("test-token").unwrap_err();
+    assert!(
+        error.message().contains("must start with https://"),
+        "{error}"
+    );
+
+    let platform = MockPlatform::start(|_| Response::no_content());
+    let client = PlatformClient::new(&platform.base_url);
+    let error = client
+        .list_memories("http://evil.example.test/mcp", "test-token")
+        .unwrap_err();
+    assert!(
+        error.message().contains("must start with https://"),
+        "{error}"
+    );
+    assert!(platform.requests().is_empty());
+    // Loopback over plain HTTP still works, and so does HTTPS elsewhere.
+    assert!(client.url("/api/daycare/commands/next").is_ok());
+    assert!(client.url("https://other.test/mcp").is_ok());
+    assert!(client.url("http://127.0.0.1:9/mcp").is_ok());
+    assert!(client.url("http://[::1]:9/mcp").is_ok());
+    assert!(client.url("http://localhost.evil.test/mcp").is_err());
+}

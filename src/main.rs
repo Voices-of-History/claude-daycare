@@ -1394,9 +1394,7 @@ fn enroll(
     agent_choice: Option<AgentKind>,
     out: Out,
 ) -> Result<()> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err(Error::new("--url must start with http:// or https://"));
-    }
+    daycare_runner::self_update::require_https_or_loopback(url, "--url")?;
     let (installed_agents, ready_agents, default_agent) = preflight_agents(agent_choice)?;
     layout.ensure_root()?;
 
@@ -1449,7 +1447,7 @@ fn enroll(
         actor_id: claim.actor_id.clone(),
         actor_name: claim.actor_name.clone(),
         workspace_dir: layout.workspace_dir(&claim.actor_id),
-        mcp_url: client.url(&claim.mcp_path),
+        mcp_url: client.url(&claim.mcp_path)?,
         device_name,
         default_agent,
         installed_agents,
@@ -1723,7 +1721,7 @@ fn identity_command(
                 // response deliberately carries no per-identity path — if the
                 // endpoint ever moves per identity, that is a real change and
                 // should arrive as one, not as a field nothing has exercised.
-                mcp_url: client.url(&config.mcp_url),
+                mcp_url: client.url(&config.mcp_url)?,
                 created_at: now_rfc3339(),
             };
             identities.insert(identity.clone());

@@ -3768,3 +3768,23 @@ fn a_426_mid_visit_stops_cleanly_instead_of_failing_turns() {
     // owed and the next visit start after the update finishes it.
     assert_eq!(record["homecoming_state"], "awaiting_outcome", "{record}");
 }
+
+/// A pairing code and the device token must not travel over plain HTTP to a
+/// remote host. Refused before any request is made.
+#[test]
+fn enroll_refuses_plain_http_to_a_remote_host() {
+    let install = install("cli-enroll-http");
+    for url in [
+        "http://platform.example.test",
+        "ftp://platform.example.test",
+    ] {
+        let out = install.run(&["enroll", "--url", url, "--code", "PAIR-1234"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{url}: {stderr}");
+        assert!(
+            stderr.contains("must start with https://"),
+            "{url}: {stderr}"
+        );
+        assert!(stderr.contains("localhost"), "{url}: {stderr}");
+    }
+}
