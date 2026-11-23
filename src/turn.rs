@@ -81,6 +81,14 @@ pub struct TurnOutcome {
     pub over_token_ceiling: bool,
 }
 
+/// The archive id of a turn's follow-up run, beside `command_id`'s own
+/// archive. The homecoming transcript reads it as part of the same turn.
+pub fn move_follow_up_id(command_id: &str) -> String {
+    format!("{command_id}-move")
+}
+
+const NO_MOVE_THEN: &str = "the turn made no move, and the follow-up asking for one";
+
 impl TurnOutcome {
     pub fn succeeded(&self) -> bool {
         self.failure.is_none()
@@ -88,6 +96,53 @@ impl TurnOutcome {
 
     pub fn session_id(&self) -> Option<&str> {
         self.trusted_session_id.as_deref()
+    }
+
+    /// Whether the turn made a move the daycare records. A turn with no
+    /// receipt has no move this runner can show.
+    pub fn made_a_move(&self) -> bool {
+        self.receipt
+            .as_ref()
+            .is_some_and(StreamReceipt::made_a_move)
+    }
+
+    /// Fold in the follow-up run that asked this turn, which made no move, to
+    /// make one: same session, same command, one turn on the ledger. The
+    /// receipts merge (`StreamReceipt::absorb`), so both runs' calls and usage
+    /// are reported and charged; the turn ends however the follow-up ended,
+    /// and a follow-up failure is the turn's failure, said as such. A
+    /// follow-up killed before its stream could be read leaves no receipt, so
+    /// only the first run's usage is known — the same gap any killed turn has.
+    pub fn absorb_follow_up(mut self, follow_up: TurnOutcome) -> TurnOutcome {
+        self.receipt = match (self.receipt.take(), follow_up.receipt) {
+            (Some(mut first), Some(later)) => {
+                first.absorb(later);
+                Some(first)
+            }
+            (first, None) => first,
+            (None, later) => later,
+        };
+        if self.trusted_session_id.is_none() {
+            self.trusted_session_id = follow_up.trusted_session_id;
+        }
+        self.elapsed_ms = self.elapsed_ms.saturating_add(follow_up.elapsed_ms);
+        self.timed_out = follow_up.timed_out;
+        self.exit_code = follow_up.exit_code;
+        self.over_token_ceiling |= follow_up.over_token_ceiling;
+        self.held = self.held && follow_up.held;
+        self.failure = follow_up
+            .failure
+            .map(|failure| format!("{NO_MOVE_THEN} failed: {failure}"));
+        self
+    }
+
+    /// The follow-up never started (nothing reached the agent), so the turn
+    /// is this run alone, reported as failed so the gap is visible and the
+    /// platform offers its recovery turn.
+    pub fn follow_up_did_not_start(mut self, error: &Error) -> TurnOutcome {
+        self.held = false;
+        self.failure = Some(format!("{NO_MOVE_THEN} could not start: {error}"));
+        self
     }
 }
 
@@ -428,4 +483,102 @@ fn set_owner_only(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn set_owner_only(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stream::parse_stream;
+
+    /// One run of a turn: an optional daycare call, its final words, and the
+    /// input tokens it reported.
+    fn run(tool: Option<&str>, words: &str, input_tokens: u64, held: bool) -> TurnOutcome {
+        let call = tool
+            .map(|name| {
+                format!(
+                    r#"{{"type":"assistant","session_id":"s1","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"t1","name":"mcp__daycare__{name}","input":{{}}}}]}}}}"#
+                ) + "\n"
+            })
+            .unwrap_or_default();
+        let stream = format!(
+            r#"{call}{{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"s1","result":"{words}","usage":{{"input_tokens":{input_tokens}}}}}"#
+        );
+        let receipt = parse_stream(&stream).unwrap();
+        TurnOutcome {
+            trusted_session_id: Some(receipt.session_id.clone()),
+            receipt: Some(receipt),
+            archive_path: PathBuf::from("/tmp/turns/cmd-1.jsonl"),
+            elapsed_ms: 1000,
+            timed_out: false,
+            exit_code: Some(0),
+            failure: None,
+            held,
+            over_token_ceiling: false,
+        }
+    }
+
+    #[test]
+    fn a_follow_up_that_moves_makes_the_turn_a_move_and_charges_both_runs() {
+        let first = run(Some("daycare_identity_get"), "Nothing open.", 10, false);
+        assert!(!first.made_a_move());
+
+        let turn = first.absorb_follow_up(run(Some("daycare_essay_submit"), "Wrote.", 5, false));
+
+        assert!(turn.made_a_move());
+        assert!(turn.succeeded());
+        assert!(!turn.held);
+        assert_eq!(turn.session_id(), Some("s1"));
+        assert_eq!(turn.elapsed_ms, 2000);
+        assert_eq!(turn.archive_path, PathBuf::from("/tmp/turns/cmd-1.jsonl"));
+        let receipt = turn.receipt.as_ref().unwrap();
+        assert_eq!(receipt.usage.input_tokens, Some(15));
+        assert_eq!(receipt.result_text.as_deref(), Some("Wrote."));
+    }
+
+    #[test]
+    fn a_turn_is_held_only_when_both_runs_held() {
+        let held = || run(None, "I will watch.", 1, true);
+        assert!(held().absorb_follow_up(held()).held);
+        let moved = run(Some("daycare_chat_send"), "Said hi.", 1, false);
+        let turn = held().absorb_follow_up(moved);
+        assert!(!turn.held);
+        assert!(turn.made_a_move());
+    }
+
+    #[test]
+    fn a_failed_follow_up_fails_the_turn_and_says_why() {
+        let mut follow_up = run(None, "", 3, false);
+        follow_up.failure = Some("turn exceeded 300s and was killed".into());
+        follow_up.timed_out = true;
+        follow_up.exit_code = None;
+
+        let turn =
+            run(Some("daycare_identity_get"), "Looked.", 10, false).absorb_follow_up(follow_up);
+
+        assert!(!turn.succeeded());
+        assert!(turn.timed_out);
+        assert_eq!(turn.exit_code, None);
+        assert_eq!(
+            turn.failure.as_deref(),
+            Some("the turn made no move, and the follow-up asking for one failed: turn exceeded 300s and was killed")
+        );
+        // What both runs spent is still reported.
+        assert_eq!(turn.receipt.unwrap().usage.input_tokens, Some(13));
+    }
+
+    #[test]
+    fn a_follow_up_that_never_started_fails_the_turn_and_keeps_its_session() {
+        let turn = run(None, "I will watch.", 4, true)
+            .follow_up_did_not_start(&Error::new("claude closed stdin before accepting the turn"));
+        assert!(!turn.succeeded());
+        assert!(!turn.held);
+        assert_eq!(turn.session_id(), Some("s1"));
+        assert!(
+            turn.failure.as_deref().unwrap().starts_with(
+                "the turn made no move, and the follow-up asking for one could not start:"
+            ),
+            "{:?}",
+            turn.failure
+        );
+    }
 }

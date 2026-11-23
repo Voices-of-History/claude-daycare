@@ -12,6 +12,7 @@
 use crate::agent::Agent;
 use crate::paths::{create_private_dir, sanitize_segment, write_atomic, Layout};
 use crate::stream::TurnEvent;
+use crate::turn::move_follow_up_id;
 use crate::visit::VisitRecord;
 use crate::{Error, Result};
 use std::collections::HashMap;
@@ -98,21 +99,7 @@ pub fn render(layout: &Layout, record: &VisitRecord, agent: &dyn Agent) -> Resul
     );
 
     for (index, command_id) in record.turn_archives.iter().enumerate() {
-        let path = layout.turn_file(command_id);
-        let text = std::fs::read_to_string(&path).map_err(|error| {
-            Error::new(format!(
-                "turn archive {} for visit {} is unreadable: {error}",
-                path.display(),
-                record.visit_id
-            ))
-        })?;
-        let events = agent.transcript_events(&text).map_err(|error| {
-            Error::new(format!(
-                "turn archive {} {}",
-                path.display(),
-                error.message()
-            ))
-        })?;
+        let events = archive_events(&layout.turn_file(command_id), record, agent)?;
         let _ = writeln!(out);
         let _ = writeln!(
             out,
@@ -121,8 +108,38 @@ pub fn render(layout: &Layout, record: &VisitRecord, agent: &dyn Agent) -> Resul
         );
         let _ = writeln!(out);
         render_turn(&mut out, &events);
+        // A turn that made no move was asked once more, inside the same turn,
+        // and that second run sits in an archive of its own beside this one.
+        let follow_up = layout.turn_file(&move_follow_up_id(command_id));
+        if follow_up.exists() {
+            let events = archive_events(&follow_up, record, agent)?;
+            let _ = writeln!(out, "{FOLLOW_UP_MARKER}");
+            let _ = writeln!(out);
+            render_turn(&mut out, &events);
+        }
     }
     Ok(out)
+}
+
+/// Where the same-turn follow-up begins in a transcript.
+pub const FOLLOW_UP_MARKER: &str =
+    "[the runner asked again, in the same turn: it had made no move yet]";
+
+fn archive_events(path: &Path, record: &VisitRecord, agent: &dyn Agent) -> Result<Vec<TurnEvent>> {
+    let text = std::fs::read_to_string(path).map_err(|error| {
+        Error::new(format!(
+            "turn archive {} for visit {} is unreadable: {error}",
+            path.display(),
+            record.visit_id
+        ))
+    })?;
+    agent.transcript_events(&text).map_err(|error| {
+        Error::new(format!(
+            "turn archive {} {}",
+            path.display(),
+            error.message()
+        ))
+    })
 }
 
 fn render_turn(out: &mut String, events: &[TurnEvent]) {
@@ -330,6 +347,57 @@ mod tests {
         // The init line and the duplicate `result` text are not turn content.
         assert!(!text.contains("ToolSearch"));
         assert_eq!(text.matches("Looking around.").count(), 1);
+        // No turn here was asked twice.
+        assert!(!text.contains(FOLLOW_UP_MARKER));
+    }
+
+    /// A turn that made no move was asked once more in the same turn. The
+    /// reader sees that second run inside the turn, after a marker, and the
+    /// turn count stays the ledger's.
+    #[test]
+    fn a_same_turn_follow_up_reads_as_part_of_its_turn() {
+        let layout = Layout::at(unique_path("daycare-homecoming-follow-up"));
+        create_private_dir(&layout.turns_dir()).unwrap();
+        std::fs::write(
+            layout.turn_file("turn-a"),
+            archive(&[
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Nothing is open."}]}}"#,
+                r#"{"type":"result","subtype":"success","session_id":"s1","result":"Nothing is open."}"#,
+            ]),
+        )
+        .unwrap();
+        std::fs::write(
+            layout.turn_file(&move_follow_up_id("turn-a")),
+            archive(&[
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Then I will write."},{"type":"tool_use","id":"tu2","name":"mcp__daycare__daycare_essay_submit","input":{"title":"On chalk"}}]}}"#,
+                r#"{"type":"result","subtype":"success","session_id":"s1","result":"Then I will write."}"#,
+            ]),
+        )
+        .unwrap();
+        std::fs::write(
+            layout.turn_file("turn-b"),
+            archive(&[
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Second turn words."}]}}"#,
+            ]),
+        )
+        .unwrap();
+        let record = record(&layout, &["turn-a", "turn-b"]);
+
+        let text = render(&layout, &record, &ClaudeAgent::new("claude")).unwrap();
+
+        let turn_a = text.find("## Turn 1 of 2 (command turn-a)").unwrap();
+        let idle = text.find("[you said]\nNothing is open.").unwrap();
+        let marker = text.find(FOLLOW_UP_MARKER).unwrap();
+        let essay = text
+            .find("[you called mcp__daycare__daycare_essay_submit]")
+            .unwrap();
+        let turn_b = text.find("## Turn 2 of 2 (command turn-b)").unwrap();
+        assert!(
+            turn_a < idle && idle < marker && marker < essay && essay < turn_b,
+            "{text}"
+        );
+        assert_eq!(text.matches(FOLLOW_UP_MARKER).count(), 1);
+        assert!(text.contains("Turns recorded: 2"), "{text}");
     }
 
     #[test]
