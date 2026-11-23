@@ -194,7 +194,7 @@ impl AntigravityAgent {
         )?;
         write_atomic(
             &seal.agent_file(),
-            agent_file(&persona, &controller).as_bytes(),
+            agent_file(&persona, &turn_controller(spec.purpose, &controller)).as_bytes(),
             0o600,
         )?;
         // No MCP server until `launch_plan` writes this turn's.
@@ -505,6 +505,23 @@ pub fn sealed_settings(purpose: TurnPurpose, workspace: &Path) -> Value {
         "trustedWorkspaces": [workspace.to_string_lossy()],
         "permissions": {"allow": allow, "ask": [], "deny": deny},
     })
+}
+
+/// Added to the controller prompt on visit turns only. `agy` can drop the
+/// daycare server without failing the turn, and its stream doesn't list the
+/// agent's tools, so a daycare call is the only proof that a visit turn could
+/// reach the daycare (`verify_calls` keeps requiring one). On 2026-11-22 a
+/// production turn chose to rest, called nothing, and failed that check; this
+/// asks a resting turn to look first instead.
+pub const VISIT_TURN_NOTE: &str = "On Antigravity CLI, every visit turn makes at least one daycare tool call, even a turn where you choose to wait, watch or rest: if nothing else, call daycare_world_snapshot first. A turn with no daycare call can't show the daycare that you were there, so it counts as a failed turn, not a rest.";
+
+/// The controller prompt for this turn's purpose. The homecoming and the day
+/// report keep theirs as written: they may call only memory tools, or nothing.
+pub fn turn_controller(purpose: TurnPurpose, controller: &str) -> String {
+    match purpose {
+        TurnPurpose::World => format!("{}\n\n{VISIT_TURN_NOTE}", controller.trim()),
+        TurnPurpose::PrivateHomecoming | TurnPurpose::DayReport => controller.to_string(),
+    }
 }
 
 /// The custom agent: only `finish` among the built-in tools, and the persona
@@ -847,6 +864,22 @@ mod tests {
         assert!(text.starts_with("---\nname: daycare\n"));
         assert!(text.contains("tools:\n  - finish\nmainAgent: true\n"));
         assert!(text.contains("\n---\n\nYou are Pip.\n\nPlay nicely.\n"));
+    }
+
+    #[test]
+    fn only_a_visit_turn_is_asked_to_make_a_daycare_call_even_when_it_rests() {
+        let controller = crate::workspace::controller_prompt("Pip");
+        let visit = turn_controller(TurnPurpose::World, &controller);
+        assert!(visit.starts_with(controller.trim()));
+        assert!(visit.ends_with(VISIT_TURN_NOTE));
+        assert!(visit.contains("call daycare_world_snapshot first"));
+        // The homecoming may call only memory tools and the day report
+        // nothing, so neither is told to call a daycare tool.
+        for purpose in [TurnPurpose::PrivateHomecoming, TurnPurpose::DayReport] {
+            let text = turn_controller(purpose, &controller);
+            assert_eq!(text, controller);
+            assert!(!text.contains("daycare_world_snapshot"));
+        }
     }
 
     #[test]
