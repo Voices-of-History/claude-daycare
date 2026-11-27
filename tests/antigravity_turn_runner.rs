@@ -17,12 +17,15 @@ struct Harness {
 }
 
 impl Harness {
+    /// The adapter refuses any OS but macOS before it runs `agy`, so the
+    /// harness tells it it is on macOS: the fake `agy` and the seal run the
+    /// same on the Linux CI targets, which keeps these tests running there.
     fn new(scenario: &str) -> Self {
-        Self::on_platform(scenario, None)
+        Self::on_platform(scenario, "macos")
     }
 
     /// `os` makes the adapter believe it runs on that operating system.
-    fn on_platform(scenario: &str, os: Option<&str>) -> Self {
+    fn on_platform(scenario: &str, os: &str) -> Self {
         let dir = support::scratch_dir("antigravity-turn");
         let workspace = Workspace::new(dir.join("workspace"));
         workspace.scaffold("Pip", "http://127.0.0.1:1/mcp").unwrap();
@@ -82,10 +85,7 @@ for line in stream.splitlines():
     print(line, flush=True)
 "##,
         );
-        let mut agent = AntigravityAgent::new(bin.to_str().unwrap(), &Layout::at(&dir));
-        if let Some(os) = os {
-            agent = agent.on_platform(os);
-        }
+        let agent = AntigravityAgent::new(bin.to_str().unwrap(), &Layout::at(&dir)).on_platform(os);
         Self {
             dir,
             workspace,
@@ -312,7 +312,7 @@ fn signed_out_old_or_forked_turns_never_start() {
 #[test]
 fn linux_and_windows_are_refused_before_agy_is_run_at_all() {
     for os in ["linux", "windows"] {
-        let h = Harness::on_platform("world", Some(os));
+        let h = Harness::on_platform("world", os);
         let error = h
             .run(TurnPurpose::World, Harness::new_session())
             .unwrap_err()
