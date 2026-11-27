@@ -17,7 +17,15 @@ struct Harness {
 }
 
 impl Harness {
+    /// The adapter refuses any OS but macOS before it runs `agy`, so the
+    /// harness tells it it is on macOS: the fake `agy` and the seal run the
+    /// same on the Linux CI targets, which keeps these tests running there.
     fn new(scenario: &str) -> Self {
+        Self::on_platform(scenario, "macos")
+    }
+
+    /// `os` makes the adapter believe it runs on that operating system.
+    fn on_platform(scenario: &str, os: &str) -> Self {
         let dir = support::scratch_dir("antigravity-turn");
         let workspace = Workspace::new(dir.join("workspace"));
         workspace.scaffold("Pip", "http://127.0.0.1:1/mcp").unwrap();
@@ -33,16 +41,23 @@ import json, os, pathlib, sys
 root = pathlib.Path(__file__).parent
 scenario = (root / 'scenario').read_text()
 args = sys.argv[1:]
+with (root / 'probes').open('a') as log:
+    log.write(json.dumps(args) + '\n')
 if args == ['--version']:
-    print('1.5.12' if scenario == 'old' else '1.5.13'); sys.exit(0)
+    print({'old': '1.5.12', 'new-major': '2.0.0'}.get(scenario, '1.5.13')); sys.exit(0)
 home = pathlib.Path(os.environ['HOME'])
 assert 'DAYCARE_DEVICE_TOKEN' not in os.environ or args[:1] != ['models']
 if args == ['models']:
     if scenario == 'signed-out':
         print('Error: Please sign in to view available models.'); sys.exit(1)
-    print('gemini-3.8-flash-medium   Gemini 3.8 Flash (Medium)'); sys.exit(0)
+    print('gemini-3.8-flash-medium   Gemini 3.8 Flash (Medium)', flush=True)
+    if scenario == 'vanish':
+        # The last thing the guard asks of agy; the turn itself then cannot start.
+        os.remove(__file__)
+    sys.exit(0)
 with (root / 'calls').open('a') as log:
     log.write(json.dumps(args) + '\n')
+(root / 'token-env').write_text('set' if 'DAYCARE_DEVICE_TOKEN' in os.environ else 'unset')
 gemini = home / '.gemini'
 assert (home / 'Library' / 'Keychains').is_symlink()
 settings = json.loads((gemini / 'antigravity-cli' / 'settings.json').read_text())
@@ -59,13 +74,18 @@ if scenario == 'shell':
     stream = stream.replace('"ToolName": "daycare_world_snapshot"', '"ToolName": "x"').replace(
         '"tool_name": "call_mcp_tool", "tool_info": {"name": "call_mcp_tool", "parameters": {"ServerName": "daycare", "ToolName": "x"',
         '"tool_name": "run_command", "tool_info": {"name": "run_command", "parameters": {"CommandLine": "ls ~"')
+if scenario == 'built-in':
+    extra = json.dumps({"event": "step_update", "step_update": {"conversation_id": "c0ffee00-0000-4000-8000-000000000001", "step_index": 9, "state": "DONE", "step_type": "tool", "tool_name": "manage_task", "tool_info": {"name": "manage_task", "parameters": {}, "output": "ok"}}})
+    lines = stream.splitlines()
+    at = next(i for i, line in enumerate(lines) if '"event": "result"' in line)
+    stream = '\n'.join(lines[:at] + [extra] + lines[at:]) + '\n'
 if scenario == 'day-report':
     stream = '\n'.join(line for line in stream.splitlines() if '"tool"' not in line) + '\n'
 for line in stream.splitlines():
     print(line, flush=True)
 "##,
         );
-        let agent = AntigravityAgent::new(bin.to_str().unwrap(), &Layout::at(&dir));
+        let agent = AntigravityAgent::new(bin.to_str().unwrap(), &Layout::at(&dir)).on_platform(os);
         Self {
             dir,
             workspace,
@@ -74,6 +94,15 @@ for line in stream.splitlines():
     }
 
     fn run(&self, purpose: TurnPurpose, mode: SessionMode) -> daycare_runner::Result<TurnOutcome> {
+        self.run_archiving_to(purpose, mode, &self.dir.join("turn.jsonl"))
+    }
+
+    fn run_archiving_to(
+        &self,
+        purpose: TurnPurpose,
+        mode: SessionMode,
+        archive_path: &std::path::Path,
+    ) -> daycare_runner::Result<TurnOutcome> {
         run_turn(TurnRequest {
             agent: &self.agent,
             workspace: &self.workspace,
@@ -81,7 +110,7 @@ for line in stream.splitlines():
             message: "Look around.",
             actor_name: "Pip",
             device_token: "mock-device-token",
-            archive_path: &self.dir.join("turn.jsonl"),
+            archive_path,
             timeout: Duration::from_secs(20),
             purpose,
             model: "gemini-3.8-flash-medium",
@@ -168,6 +197,57 @@ fn a_world_turn_runs_sealed_and_the_token_file_is_gone_after() {
 }
 
 #[test]
+fn the_device_token_is_in_the_mcp_file_and_not_in_the_childs_environment() {
+    for purpose in [TurnPurpose::World, TurnPurpose::PrivateHomecoming] {
+        let h = Harness::new("world");
+        // The verdict does not matter here; what the child saw does.
+        h.run(purpose, Harness::new_session()).unwrap();
+        assert_eq!(h.read("token-env"), "unset", "{purpose:?}");
+        assert!(
+            h.read("saw-mcp").contains("mock-device-token"),
+            "{purpose:?}: the token must reach agy through its MCP file"
+        );
+    }
+}
+
+#[test]
+fn a_child_that_cannot_start_still_has_its_token_file_removed() {
+    let h = Harness::new("vanish");
+    let error = h
+        .run(TurnPurpose::World, Harness::new_session())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("could not start"), "{error}");
+    assert_eq!(h.token_files_left(), 0, "the MCP file kept the token");
+}
+
+#[test]
+fn an_archive_that_cannot_be_written_still_has_its_token_file_removed() {
+    let h = Harness::new("world");
+    // The archive's parent is a file, so the turn is refused after the plan
+    // wrote the token and before any child starts.
+    let blocker = h.dir.join("not-a-directory");
+    std::fs::write(&blocker, "x").unwrap();
+    assert!(h
+        .run_archiving_to(
+            TurnPurpose::World,
+            Harness::new_session(),
+            &blocker.join("turn.jsonl"),
+        )
+        .is_err());
+    assert!(h.read("calls").is_empty(), "a turn started");
+    assert_eq!(h.token_files_left(), 0, "the MCP file kept the token");
+}
+
+#[test]
+fn a_harmless_built_in_call_does_not_fail_a_good_turn() {
+    let h = Harness::new("built-in");
+    let outcome = h.run(TurnPurpose::World, Harness::new_session()).unwrap();
+    assert!(outcome.succeeded(), "{:?}", outcome.failure);
+    assert_eq!(h.token_files_left(), 0);
+}
+
+#[test]
 fn a_shell_call_fails_the_seal() {
     let h = Harness::new("shell");
     let outcome = h.run(TurnPurpose::World, Harness::new_session()).unwrap();
@@ -212,6 +292,7 @@ fn signed_out_old_or_forked_turns_never_start() {
     for (scenario, mode, expected) in [
         ("signed-out", Harness::new_session(), "not signed in"),
         ("old", Harness::new_session(), "1.5.13 or newer"),
+        ("new-major", Harness::new_session(), "is not supported yet"),
         (
             "world",
             SessionMode::Fork {
@@ -225,5 +306,25 @@ fn signed_out_old_or_forked_turns_never_start() {
         assert!(error.contains(expected), "{scenario}: {error}");
         assert!(h.read("calls").is_empty(), "{scenario} started a turn");
         assert_eq!(h.token_files_left(), 0);
+    }
+}
+
+#[test]
+fn linux_and_windows_are_refused_before_agy_is_run_at_all() {
+    for os in ["linux", "windows"] {
+        let h = Harness::on_platform("world", os);
+        let error = h
+            .run(TurnPurpose::World, Harness::new_session())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Antigravity visits are macOS-only for now"),
+            "{os}: {error}"
+        );
+        assert!(!error.contains("not signed in"), "{os}: {error}");
+        // Not even `agy --version` or `agy models` ran, and no seal was made.
+        assert!(h.read("probes").is_empty(), "{os} ran agy");
+        assert_eq!(h.token_files_left(), 0);
+        assert!(!h.dir.join("antigravity").exists(), "{os} made a seal");
     }
 }

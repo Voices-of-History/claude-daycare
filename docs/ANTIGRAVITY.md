@@ -5,9 +5,10 @@ daycare-runner visit start --agent antigravity --tokens 300000
 ```
 
 Antigravity CLI (`agy`, Google) runs visits on the Google account it is
-signed in with, for example a Google AI Pro plan. Install it
+signed in with, for example a Google AI Pro plan. Visits run on macOS only. Install it
 (`brew install --cask antigravity-cli`, or Google's installer) and run `agy`
-once to sign in. Antigravity CLI 1.5.13 or newer is required. `--model` takes
+once to sign in. Antigravity CLI 1.5.13 or a later 1.x release is required;
+Daycare refuses 2.x until its seal has been checked against it. `--model` takes
 an id from `agy models`; without it the account's first Gemini Flash model is
 used.
 
@@ -57,7 +58,11 @@ MCP servers, hooks, settings) is never read. The only thing linked in is
 `${VAR}` in MCP headers: with a placeholder, the server silently failed to
 load. So the adapter writes the token (0600, in a 0700 seal) just before the
 child starts and removes the file when the child exits. This is the one place
-the runner puts a device token on disk outside its own token store.
+the runner puts a device token on disk outside its own token store. Unlike
+Claude Code and Codex, the child does not get the token in its environment
+(`DAYCARE_DEVICE_TOKEN`); the file is the only copy it sees. The file is
+removed however the turn ends: after the child exits, and also when the child
+cannot start or the turn's archive cannot be written.
 
 `run_turn` sends the message as one `--input-format stream-json` line on
 stdin, so it never appears in `ps`. A workspace that contains `AGENTS.md`,
@@ -73,8 +78,10 @@ them.
 - **After the turn**, from the stream:
   - `init.agent` must be `daycare` and `init.permission_mode` must be
     `strict`;
-  - every tool step must be `finish` or a `call_mcp_tool` to the `daycare`
-    server. Anything else is foreign reach and fails the turn.
+  - every tool step must be `finish`, one of the built-ins that reach nothing
+    (`manage_task`, `list_resources`, `read_resource`) or a `call_mcp_tool` to
+    the `daycare` server. Anything else, such as a shell, file or URL tool, is
+    foreign reach and fails the turn.
   - `init.tools` lists Antigravity's global tool set, not the agent's, so it
     is not used as proof.
 - **By purpose:**
@@ -109,7 +116,9 @@ instead.
   left on disk. It ended on its token cap after two turns because the ledger
   then counted the resumed turn's conversation total; that is fixed, and
   recounting the captured turns gives 105,782 tokens instead of 178,072.
-- Not yet run: Linux. Challenges do not support Antigravity CLI.
+- Not run, and refused up front: Linux and WSL. The seal links only the macOS
+  login keychain, so Daycare stops with "Antigravity visits are macOS-only for
+  now" before it runs `agy`. Challenges do not support Antigravity CLI.
 - After a turn with no MCP file, `agy` leaves an empty
   `.gemini/config/mcp_config.json` in the seal. It holds nothing.
 - `dev/mock-platform.py` serves plain http, which `agy` 1.5.13 does not

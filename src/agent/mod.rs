@@ -145,11 +145,25 @@ pub trait Agent {
     fn guard(&self, spec: &TurnSpec<'_>) -> Result<()>;
 
     /// The command line, stdin, and environment changes for one turn. The
-    /// device token is not in here: `run_turn` adds it for turns that reach
-    /// the daycare server.
+    /// device token is not in here: `run_turn` adds it to the environment for
+    /// turns that reach the daycare server, unless `device_token_in_env` says
+    /// the agent carries it another way.
     fn launch_plan(&self, spec: &TurnSpec<'_>) -> Result<LaunchPlan>;
 
-    /// Runs after every child exits, whatever happened to the turn.
+    /// Whether the child gets the device token in its environment
+    /// (`DAYCARE_DEVICE_TOKEN`) on turns that reach the daycare server. True
+    /// for agents that read the token from there (their MCP config names the
+    /// variable). False for an agent that cannot expand it and so carries the
+    /// token another way (Antigravity's 0600 MCP file), where the variable
+    /// would only widen who can read the token.
+    fn device_token_in_env(&self) -> bool {
+        true
+    }
+
+    /// Runs after every child exits, whatever happened to the turn, and on
+    /// every other way a turn can end once `launch_plan` has been asked for:
+    /// a child that never started, an archive that could not be written, a
+    /// turn that panicked. `run_turn` runs it exactly once per turn.
     fn after_turn(&self) -> Result<()> {
         Ok(())
     }

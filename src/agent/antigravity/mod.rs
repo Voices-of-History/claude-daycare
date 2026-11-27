@@ -67,6 +67,13 @@ pub use stream::AGENT_NAME;
 /// The oldest `agy` the seal was checked against.
 pub const MIN_VERSION: (u64, u64, u64) = (1, 5, 13);
 
+/// The only operating system Antigravity visits run on: the seal links the
+/// macOS login keychain, where `agy` keeps its Google sign-in.
+pub const SUPPORTED_OS: &str = "macos";
+
+/// The first major `agy` release the seal was not checked against.
+pub const UNSUPPORTED_MAJOR: u64 = 2;
+
 /// The memory tools a homecoming may see.
 const HOMECOMING_TOOLS: [&str; 2] = ["daycare_memory_list", "daycare_memory_save"];
 
@@ -97,6 +104,8 @@ const MCP_TIMEOUT_SECONDS: u64 = 120;
 
 pub struct AntigravityAgent {
     bin: String,
+    /// `std::env::consts::OS`, unless a test says otherwise.
+    os: String,
     /// `<daycare root>/antigravity`: one sealed home per identity.
     root: PathBuf,
     version_checked: OnceLock<()>,
@@ -109,11 +118,19 @@ impl AntigravityAgent {
     pub fn new(bin: &str, layout: &Layout) -> Self {
         AntigravityAgent {
             bin: bin.to_string(),
+            os: std::env::consts::OS.to_string(),
             root: layout.root().join("antigravity"),
             version_checked: OnceLock::new(),
             login_checked: OnceLock::new(),
             token_file: Mutex::new(None),
         }
+    }
+
+    /// Run as if on operating system `os` (`std::env::consts::OS` names), so a
+    /// test can see the refusal on a machine where Antigravity does run.
+    pub fn on_platform(mut self, os: &str) -> Self {
+        self.os = os.to_string();
+        self
     }
 
     /// One sealed home per identity, keyed like its workspace directory.
@@ -130,6 +147,7 @@ impl AntigravityAgent {
     /// The release on PATH (or `--antigravity-bin`) is one the seal was
     /// checked against. Asked once per process.
     fn ensure_version(&self) -> Result<()> {
+        check_platform(&self.os)?;
         if self.version_checked.get().is_some() {
             return Ok(());
         }
@@ -330,6 +348,11 @@ impl Agent for AntigravityAgent {
             env_remove: env.remove,
             env: env.set,
         })
+    }
+
+    /// The token is in the 0600 MCP config, not in the child's environment.
+    fn device_token_in_env(&self) -> bool {
+        false
     }
 
     /// The token-bearing MCP config never outlives the child.
@@ -577,6 +600,21 @@ fn read_mcp_url(path: &Path) -> Result<String> {
     Ok(url.to_string())
 }
 
+/// Refuse an operating system the seal does not work on, before `agy` is run
+/// at all. `os` is a `std::env::consts::OS` name. Without it a Linux or WSL
+/// owner would be told they are not signed in: the sealed home links only
+/// `~/Library/Keychains` and drops the DBus and XDG variables a Linux `agy`
+/// needs for its sign-in, so the login check could never pass.
+pub fn check_platform(os: &str) -> Result<()> {
+    if os == SUPPORTED_OS {
+        return Ok(());
+    }
+    Err(Error::new(format!(
+        "Antigravity visits are macOS-only for now (this machine is {os}): the sealed home reaches \
+         the Google sign-in through the macOS login keychain. Use Claude Code, Codex or OpenCode here"
+    )))
+}
+
 /// A model id `agy --model` accepts: letters, digits, `-`, `_` and `.`.
 pub fn check_model(model: &str) -> Result<()> {
     let ok = !model.is_empty()
@@ -619,10 +657,19 @@ fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
     ))
 }
 
-/// Refuse anything older than the release the seal was checked against.
+/// Refuse anything but the release the seal was checked against or a later
+/// 1.x one. The seal rests on `agy`'s settings, agent and MCP file formats and
+/// its stream shape, none of which is documented as stable, so a new major
+/// release is refused until it has been checked.
 pub fn check_version_output(text: &str) -> Result<()> {
     let (major, minor, patch) = MIN_VERSION;
     match parse_version(text) {
+        Some((a, b, c)) if a >= UNSUPPORTED_MAJOR => Err(Error::new(format!(
+            "Daycare runs Antigravity CLI {major}.{minor}.{patch} or a later {major}.x release, and this is {a}.{b}.{c}. \
+             Antigravity CLI {UNSUPPORTED_MAJOR} may have changed the settings Daycare uses to keep a visit sealed, so it \
+             is not supported yet. Update the runner (`daycare-runner update`) in case a newer one supports it, or wait \
+             for a release that does; until then use Claude Code, Codex or OpenCode"
+        ))),
         Some(version) if version >= MIN_VERSION => Ok(()),
         Some((a, b, c)) => Err(Error::new(format!(
             "Daycare needs Antigravity CLI {major}.{minor}.{patch} or newer, and this is {a}.{b}.{c}. Update it with `brew upgrade --cask antigravity-cli` or `agy update`"
@@ -832,10 +879,51 @@ mod tests {
             .to_string()
             .contains("1.5.13 or newer"));
         assert!(check_version_output("nothing").is_err());
+        check_version_output("agy 1.99.0").unwrap();
         check_model("gemini-3.8-flash-medium").unwrap();
         for bad in ["", "-x", "gemini 3", "a/b", "x;y"] {
             assert!(check_model(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn only_macos_runs_antigravity() {
+        check_platform("macos").unwrap();
+        assert_eq!(
+            check_platform(std::env::consts::OS).is_ok(),
+            cfg!(target_os = "macos")
+        );
+        for os in ["linux", "windows", "freebsd", ""] {
+            let error = check_platform(os).unwrap_err().to_string();
+            assert!(
+                error.contains("Antigravity visits are macOS-only for now"),
+                "{os}: {error}"
+            );
+            assert!(!error.contains("not signed in"), "{os}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_new_major_release_is_refused_until_it_is_checked() {
+        for two in ["2.0.0", "agy v2.0.1\n", "3.1.0", "2.0.0-beta.1", "10.0"] {
+            let error = check_version_output(two).unwrap_err().to_string();
+            assert!(error.contains("is not supported yet"), "{two}: {error}");
+            assert!(
+                error.contains("1.5.13 or a later 1.x release"),
+                "{two}: {error}"
+            );
+            assert!(error.contains("Update the runner"), "{two}: {error}");
+            assert!(error.contains("or wait"), "{two}: {error}");
+        }
+        assert!(check_version_output("2.0.0")
+            .unwrap_err()
+            .to_string()
+            .contains("this is 2.0.0"));
+        // The floor still reads as a floor.
+        assert!(check_version_output("1.5.12")
+            .unwrap_err()
+            .to_string()
+            .contains("1.5.13 or newer"));
     }
 
     #[test]
