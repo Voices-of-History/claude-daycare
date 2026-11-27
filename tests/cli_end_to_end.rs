@@ -3683,3 +3683,112 @@ fn a_command_kind_this_build_cannot_run_is_reported_not_dropped() {
         "a turn was run anyway"
     );
 }
+
+const REINSTALL: &str = "curl -fsSL https://daycare.test/install.sh | sh";
+
+/// A platform release bump answers 426 to every poll. The detached visit loop
+/// must not count that as a failed turn (three of them end the visit as
+/// Failed): it stops at once, says to update and how, and keeps the visit
+/// record resumable.
+#[test]
+fn a_426_mid_visit_stops_cleanly_instead_of_failing_turns() {
+    let install = install("cli-visit-426");
+    let polls = Arc::new(AtomicUsize::new(0));
+    let poll_count = Arc::clone(&polls);
+    let platform = MockPlatform::start(move |request: &RecordedRequest| {
+        if request.path.ends_with("/pair/claim") {
+            return Response::json(
+                200,
+                &format!(
+                    r#"{{"device_token":"{TOKEN}","device_id":"device-1",
+                        "actor_id":"actor-1","actor_name":"Pip","mcp_path":"/api/daycare/mcp"}}"#
+                ),
+            );
+        }
+        if request.method == "POST" && request.path.ends_with("/daycare/visits") {
+            return Response::json(200, r#"{"visit_id":"visit-426"}"#);
+        }
+        if request.path.ends_with("/commands/next") {
+            poll_count.fetch_add(1, Ordering::SeqCst);
+            return Response::json(
+                426,
+                &format!(
+                    r#"{{"error":"runner_update_required","message":"Update the runner: {REINSTALL}"}}"#
+                ),
+            );
+        }
+        if request.path.ends_with("/visits/visit-426/end") {
+            return Response::json(
+                426,
+                &format!(
+                    r#"{{"error":"runner_update_required","message":"Update the runner: {REINSTALL}"}}"#
+                ),
+            );
+        }
+        if request.path.ends_with("/daycare/mcp") {
+            return Response::json(
+                200,
+                r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"total\":0,\"offset\":0,\"memories\":[]}"}]}}"#,
+            );
+        }
+        Response::json(200, r#"{"ok":true}"#)
+    });
+    install.run(&["enroll", "--url", &platform.base_url, "--code", "PAIR-1234"]);
+
+    let ran = install.run(&[
+        "visit",
+        "start",
+        "--foreground",
+        "--turns",
+        "10",
+        "--interval",
+        "0",
+        "--claude-bin",
+        install.claude_bin.to_str().unwrap(),
+    ]);
+    let stderr = String::from_utf8_lossy(&ran.stderr);
+
+    // One poll, one refusal, and the loop stopped; it did not retry into
+    // FAILURE_LIMIT.
+    assert_eq!(polls.load(Ordering::SeqCst), 1, "{stderr}");
+    assert!(!stderr.contains("too many turns"), "{stderr}");
+    assert!(stderr.contains(REINSTALL), "{stderr}");
+    assert!(stderr.contains("daycare-runner update"), "{stderr}");
+    assert!(stderr.contains("HTTP 426"), "{stderr}");
+
+    let record: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(install.home.join("visits/visit-426.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["ledger"]["turns_failed"], 0, "{record}");
+    assert_eq!(record["ledger"]["consecutive_failures"], 0, "{record}");
+    assert_ne!(record["end_reason"], "failed", "{record}");
+    assert_eq!(record["end_reason"], "interrupted", "{record}");
+    // The platform refused the end report too, so the homecoming is still
+    // owed and the next visit start after the update finishes it.
+    assert_eq!(record["homecoming_state"], "awaiting_outcome", "{record}");
+}
+
+/// A pairing code and the device token must not travel over plain HTTP to a
+/// remote host. Refused before any request is made.
+#[test]
+fn enroll_refuses_plain_http_to_a_remote_host() {
+    let install = install("cli-enroll-http");
+    for url in [
+        "http://platform.example.test",
+        "ftp://platform.example.test",
+    ] {
+        let out = install.run(&["enroll", "--url", url, "--code", "PAIR-1234"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{url}: {stderr}");
+        // The enroll-level guard speaks for `--url`; the client's own check
+        // says "the platform URL", so this fails if the guard is removed.
+        assert!(
+            stderr.contains("--url must start with https://"),
+            "{url}: {stderr}"
+        );
+        assert!(stderr.contains("localhost"), "{url}: {stderr}");
+        // And it ran first: nothing was created on this machine.
+        assert!(!install.home.exists(), "{url}: the root layout was created");
+    }
+}

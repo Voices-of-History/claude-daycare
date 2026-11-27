@@ -141,12 +141,11 @@ impl AntigravityAgent {
                 self.bin
             ))
         })?;
-        check_version_output(
-            output
-                .success
-                .then_some(output.stdout.as_str())
-                .unwrap_or(""),
-        )?;
+        check_version_output(if output.success {
+            output.stdout.as_str()
+        } else {
+            ""
+        })?;
         let _ = self.version_checked.set(());
         Ok(())
     }
@@ -569,11 +568,13 @@ fn refuse_workspace_customizations(workspace: &Path) -> Result<()> {
 fn read_mcp_url(path: &Path) -> Result<String> {
     let parsed: Value = serde_json::from_slice(&std::fs::read(path)?)
         .map_err(|_| Error::new("the workspace MCP config is not JSON"))?;
-    parsed["mcpServers"][MCP_SERVER]["url"]
+    let url = parsed["mcpServers"][MCP_SERVER]["url"]
         .as_str()
         .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
-        .map(str::to_string)
-        .ok_or_else(|| Error::new("MCP config has no daycare server URL"))
+        .ok_or_else(|| Error::new("MCP config has no daycare server URL"))?;
+    // The turn sends the identity's bearer token to this URL.
+    crate::self_update::require_https_or_loopback(url, "the daycare server URL in the MCP config")?;
+    Ok(url.to_string())
 }
 
 /// A model id `agy --model` accepts: letters, digits, `-`, `_` and `.`.
@@ -788,6 +789,39 @@ fn run_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bearer token goes to this URL, so it must be HTTPS (or loopback).
+    #[test]
+    fn the_mcp_url_must_be_https_or_loopback() {
+        let dir = crate::testdir::unique_dir("daycare-agy-mcp-url");
+        let path = dir.join("mcp.json");
+        let read = |url: &str| {
+            std::fs::write(
+                &path,
+                json!({"mcpServers": {MCP_SERVER: {"url": url}}}).to_string(),
+            )
+            .unwrap();
+            read_mcp_url(&path)
+        };
+        for ok in [
+            "https://daycare.test/api/daycare/mcp",
+            "http://127.0.0.1:3000/mcp",
+            "http://localhost:3000/mcp",
+            "http://[::1]:3000/mcp",
+        ] {
+            assert_eq!(read(ok).unwrap(), ok);
+        }
+        for bad in [
+            "http://daycare.test/api/daycare/mcp",
+            "http://localhost.evil.test/mcp",
+            "http://user@localhost/mcp",
+        ] {
+            let error = read(bad).unwrap_err().to_string();
+            assert!(error.contains("must start with https://"), "{bad}: {error}");
+        }
+        assert!(read("ftp://daycare.test/mcp").is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn versions_and_models_are_checked() {

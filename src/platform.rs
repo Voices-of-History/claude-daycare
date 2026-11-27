@@ -523,11 +523,21 @@ impl PlatformClient {
         &self.base_url
     }
 
-    pub fn url(&self, path: &str) -> String {
-        if path.starts_with("http://") || path.starts_with("https://") {
-            return path.to_string();
-        }
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+    /// The full URL for `path`. Every request carries a bearer token or a
+    /// pairing code, so a URL that is not HTTPS (or plain HTTP to this
+    /// machine, for tests and a local platform) is refused here, whether it
+    /// came from the base URL or from an absolute `path` the server supplied.
+    pub fn url(&self, path: &str) -> Result<String> {
+        let (url, what) = if path.starts_with("http://") || path.starts_with("https://") {
+            (path.to_string(), "a URL the platform supplied")
+        } else {
+            (
+                format!("{}/{}", self.base_url, path.trim_start_matches('/')),
+                "the platform URL",
+            )
+        };
+        crate::self_update::require_https_or_loopback(&url, what)?;
+        Ok(url)
     }
 
     /// Every request carries the build's release id so the server-side version
@@ -555,7 +565,10 @@ impl PlatformClient {
     /// or not a plausible release id — the version floor fails open; only a
     /// confirmed mismatch may stop a runner.
     pub fn current_release(&self) -> Option<String> {
-        let response = self.get(&self.url("releases/current.txt")).call().ok()?;
+        let response = self
+            .get(&self.url("releases/current.txt").ok()?)
+            .call()
+            .ok()?;
         let text = response.into_string().ok()?;
         let value = text.trim();
         let plausible = !value.is_empty()
@@ -575,7 +588,7 @@ impl PlatformClient {
             "device_name": device_name,
         });
         let response = self
-            .post(&self.url(PAIR_CLAIM_PATH))
+            .post(&self.url(PAIR_CLAIM_PATH)?)
             .set("Content-Type", "application/json")
             .send_string(&body.to_string());
         let text = read_body(response, "pairing claim")?;
@@ -589,7 +602,7 @@ impl PlatformClient {
     /// `None` means the queue is empty (HTTP 204), which is the normal case.
     pub fn next_command(&self, token: &str) -> Result<Option<WorldCommand>> {
         let response = self
-            .get(&self.url(NEXT_COMMAND_PATH))
+            .get(&self.url(NEXT_COMMAND_PATH)?)
             .set("Authorization", &format!("Bearer {token}"))
             .call();
 
@@ -626,7 +639,7 @@ impl PlatformClient {
     /// is a question about the machine.
     pub fn list_identities(&self, device_token: &str) -> Result<Vec<IdentitySummary>> {
         let response = self
-            .get(&self.url(paths::IDENTITIES))
+            .get(&self.url(paths::IDENTITIES)?)
             .set("Authorization", &format!("Bearer {device_token}"))
             .call();
         let text = read_body(response, "identity list")?;
@@ -654,7 +667,7 @@ impl PlatformClient {
             body["workspace_label"] = serde_json::json!(workspace.workspace_label);
         }
         let response = self
-            .post(&self.url(paths::IDENTITIES))
+            .post(&self.url(paths::IDENTITIES)?)
             .set("Authorization", &format!("Bearer {device_token}"))
             .set("Content-Type", "application/json")
             .send_string(&body.to_string());
@@ -702,7 +715,7 @@ impl PlatformClient {
             body["instructions"] = serde_json::json!(instructions);
         }
         let response = self
-            .post(&self.url(paths::VISITS))
+            .post(&self.url(paths::VISITS)?)
             .set("Authorization", &format!("Bearer {identity_token}"))
             .set("Content-Type", "application/json")
             .send_string(&body.to_string());
@@ -725,7 +738,7 @@ impl PlatformClient {
     ) -> Result<VisitResponse> {
         let body = serde_json::json!({ "end_reason": reason });
         let response = self
-            .post(&self.url(&paths::end_visit(visit_id)))
+            .post(&self.url(&paths::end_visit(visit_id))?)
             .set("Authorization", &format!("Bearer {identity_token}"))
             .set("Content-Type", "application/json")
             .send_string(&body.to_string());
@@ -751,7 +764,7 @@ impl PlatformClient {
     ) -> Result<()> {
         let body = serde_json::json!({ "report": report });
         let response = self
-            .post(&self.url(&paths::visit_report(visit_id)))
+            .post(&self.url(&paths::visit_report(visit_id))?)
             .set("Authorization", &format!("Bearer {identity_token}"))
             .set("Content-Type", "application/json")
             .send_string(&body.to_string());
@@ -775,7 +788,7 @@ impl PlatformClient {
     ) -> Result<()> {
         let body = serde_json::json!({ "transcript": transcript });
         let response = self
-            .post(&self.url(&paths::visit_transcript(visit_id)))
+            .post(&self.url(&paths::visit_transcript(visit_id))?)
             .set("Authorization", &format!("Bearer {identity_token}"))
             .set("Content-Type", "application/json")
             .send_string(&body.to_string());
@@ -785,7 +798,7 @@ impl PlatformClient {
 
     pub fn get_visit(&self, identity_token: &str, visit_id: &str) -> Result<VisitResponse> {
         let response = self
-            .get(&self.url(&paths::visit(visit_id)))
+            .get(&self.url(&paths::visit(visit_id))?)
             .set("Authorization", &format!("Bearer {identity_token}"))
             .call();
         let text = read_body(response, "visit status")?;
@@ -805,7 +818,7 @@ impl PlatformClient {
         let path = format!("/api/daycare/commands/{command_id}/complete");
         let body = serde_json::to_string(report)?;
         let response = self
-            .post(&self.url(&path))
+            .post(&self.url(&path)?)
             .set("Authorization", &format!("Bearer {token}"))
             .set("Content-Type", "application/json")
             .send_string(&body);
@@ -851,7 +864,7 @@ impl PlatformClient {
             },
         });
         let response = self
-            .post(&self.url(mcp_url))
+            .post(&self.url(mcp_url)?)
             .set("Authorization", &format!("Bearer {identity_token}"))
             .set("Content-Type", "application/json")
             .set("Accept", "application/json, text/event-stream")
@@ -864,7 +877,7 @@ impl PlatformClient {
     /// leniently by `challenge`: a bare array or `{ "challenges": [...] }`.
     pub fn list_challenges(&self, identity_token: &str) -> Result<serde_json::Value> {
         let response = self
-            .get(&self.url(paths::CHALLENGES))
+            .get(&self.url(paths::CHALLENGES)?)
             .set("Authorization", &format!("Bearer {identity_token}"))
             .call();
         let text = read_body(response, "challenge list")?;
@@ -879,7 +892,7 @@ impl PlatformClient {
         challenge_id: &str,
     ) -> Result<serde_json::Value> {
         let response = self
-            .get(&self.url(&paths::challenge(challenge_id)))
+            .get(&self.url(&paths::challenge(challenge_id))?)
             .set("Authorization", &format!("Bearer {identity_token}"))
             .call();
         let text = read_body(response, "challenge show")?;
@@ -898,7 +911,7 @@ impl PlatformClient {
     ) -> Result<serde_json::Value> {
         let body = serde_json::json!({ "actor_id": actor_id });
         let response = self
-            .post(&self.url(&paths::challenge_attempts(challenge_id)))
+            .post(&self.url(&paths::challenge_attempts(challenge_id))?)
             .set("Authorization", &format!("Bearer {identity_token}"))
             .set("Content-Type", "application/json")
             .send_string(&body.to_string());
@@ -918,7 +931,7 @@ impl PlatformClient {
         body: &serde_json::Value,
     ) -> Result<serde_json::Value> {
         let response = self
-            .post(&self.url(&paths::challenge_submissions(challenge_id)))
+            .post(&self.url(&paths::challenge_submissions(challenge_id))?)
             .set("Authorization", &format!("Bearer {identity_token}"))
             .set("Content-Type", "application/json")
             .send_string(&body.to_string());
@@ -941,7 +954,7 @@ impl PlatformClient {
             .post(&self.url(&paths::challenge_submission_confirm(
                 challenge_id,
                 submission_id,
-            )))
+            ))?)
             .set("Authorization", &format!("Bearer {identity_token}"))
             .set("Content-Type", "application/json")
             .send_string(&body.to_string());
@@ -964,7 +977,7 @@ impl PlatformClient {
         version: &str,
     ) -> Result<serde_json::Value> {
         let response = self
-            .get(&self.url(&paths::skill_version(name, version)))
+            .get(&self.url(&paths::skill_version(name, version))?)
             .set("Authorization", &format!("Bearer {identity_token}"))
             .call();
         let text = match response {
@@ -1239,6 +1252,14 @@ fn read_body(
 
 /// Errors must be safe to print and safe to send back to the platform, so this
 /// reports status and a short body excerpt — never the request headers.
+/// Server-supplied text is printed to the owner's terminal, so control
+/// characters (escape sequences, carriage returns) become spaces.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 fn request_error(what: &str, error: ureq::Error) -> Error {
     match error {
         ureq::Error::Status(401, response) => {
@@ -1260,11 +1281,21 @@ fn request_error(what: &str, error: ureq::Error) -> Error {
             // only a body without a sentence falls back to the status line.
             let sentence = serde_json::from_str::<serde_json::Value>(&body)
                 .ok()
-                .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
+                .and_then(|value| value.get("error")?.as_str().map(printable))
                 .filter(|text| !text.trim().is_empty());
-            let message = match sentence {
-                Some(text) => format!("{what} failed: {text} (HTTP {code})"),
-                None => {
+            // The platform's own `message` (a refusal's next step, such as the
+            // reinstall command for a 426) is kept when it adds to the error.
+            let detail = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| value.get("message")?.as_str().map(printable))
+                .map(|text| text.trim().chars().take(500).collect::<String>())
+                .filter(|text| !text.is_empty() && sentence.as_deref() != Some(text.as_str()));
+            let message = match (sentence, detail) {
+                (Some(text), Some(detail)) => {
+                    format!("{what} failed: {text}: {detail} (HTTP {code})")
+                }
+                (Some(text), None) => format!("{what} failed: {text} (HTTP {code})"),
+                (None, _) => {
                     let excerpt: String = body.chars().take(200).collect();
                     format!("{what} failed: HTTP {code} {excerpt}")
                 }
@@ -1285,15 +1316,15 @@ mod tests {
     fn urls_join_without_doubling_slashes() {
         let client = PlatformClient::new("https://example.test/");
         assert_eq!(
-            client.url("/api/daycare/pair/claim"),
+            client.url("/api/daycare/pair/claim").unwrap(),
             "https://example.test/api/daycare/pair/claim"
         );
         assert_eq!(
-            client.url("api/daycare/commands/next"),
+            client.url("api/daycare/commands/next").unwrap(),
             "https://example.test/api/daycare/commands/next"
         );
         assert_eq!(
-            client.url("https://other.test/mcp"),
+            client.url("https://other.test/mcp").unwrap(),
             "https://other.test/mcp"
         );
     }

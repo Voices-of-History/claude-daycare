@@ -1482,9 +1482,7 @@ fn enroll(
     agent_choice: Option<AgentKind>,
     out: Out,
 ) -> Result<()> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err(Error::new("--url must start with http:// or https://"));
-    }
+    daycare_runner::self_update::require_https_or_loopback(url, "--url")?;
     let (installed_agents, ready_agents, default_agent) = preflight_agents(agent_choice)?;
     layout.ensure_root()?;
 
@@ -1537,7 +1535,7 @@ fn enroll(
         actor_id: claim.actor_id.clone(),
         actor_name: claim.actor_name.clone(),
         workspace_dir: layout.workspace_dir(&claim.actor_id),
-        mcp_url: client.url(&claim.mcp_path),
+        mcp_url: client.url(&claim.mcp_path)?,
         device_name,
         default_agent,
         installed_agents,
@@ -1811,7 +1809,7 @@ fn identity_command(
                 // response deliberately carries no per-identity path — if the
                 // endpoint ever moves per identity, that is a real change and
                 // should arrive as one, not as a field nothing has exercised.
-                mcp_url: client.url(&config.mcp_url),
+                mcp_url: client.url(&config.mcp_url)?,
                 created_at: now_rfc3339(),
             };
             identities.insert(identity.clone());
@@ -3240,6 +3238,21 @@ fn run_visit(
             Err(RunOnceError::PollTransport(error)) => {
                 consecutive_poll_errors = consecutive_poll_errors.saturating_add(1);
                 eprintln!("platform unavailable; visit remains active: {error}");
+            }
+            // A platform that now demands a newer runner is not a failed turn:
+            // nothing ran wrong, and three of them in a row would end the
+            // visit as Failed. The visit stops here instead, keeps its local
+            // record, and finishes its homecoming once the runner is updated.
+            Err(RunOnceError::Turn(error))
+                if daycare_runner::self_update::is_update_required(&error) =>
+            {
+                eprintln!("error: {error}");
+                eprintln!(
+                    "The platform needs a newer daycare-runner, so this visit is stopping. \
+                     That is not a failed turn. Update the runner (`daycare-runner update`, \
+                     or run the command above if the platform gave one), then start a visit again."
+                );
+                break (LocalEndReason::Interrupted, None);
             }
             Err(RunOnceError::Turn(error)) => {
                 completed_turn = true;
