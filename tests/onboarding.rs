@@ -311,7 +311,9 @@ fn opencode_2_is_refused_without_claiming_a_code() {
 
 /// `agy models` fetches the model list from Google. On 2026-11-22 a fetch
 /// slower than the old five-second limit made a signed-in `agy` read as not
-/// signed in, and enroll refused it.
+/// signed in, and enroll refused it. Antigravity visits are macOS-only, so
+/// elsewhere `enroll` refuses it before the sign-in check runs.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_slow_antigravity_model_list_still_enrolls() {
     let m = Machine::new();
