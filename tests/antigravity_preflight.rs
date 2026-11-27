@@ -1,5 +1,11 @@
 //! `setup` probes the agents on PATH before anything is claimed or saved.
 //! Here only a fake `agy` is on PATH: no Google sign-in, no model, no network.
+//!
+//! Antigravity visits are macOS-only, so elsewhere `setup` refuses it before
+//! any of this runs. The whole file is macOS-only: gating each test left its
+//! helpers unused on the Linux targets, which `clippy -D warnings` rejects.
+#![cfg(target_os = "macos")]
+
 mod support;
 
 use std::path::PathBuf;
@@ -39,8 +45,6 @@ fn setup_with_agy(version: &str) -> (Output, PathBuf) {
     (output, dir)
 }
 
-// Antigravity visits are macOS-only, so elsewhere `setup` refuses it first.
-#[cfg(target_os = "macos")]
 #[test]
 fn a_supported_antigravity_is_ready() {
     let (output, dir) = setup_with_agy("1.5.13");
@@ -52,7 +56,6 @@ fn a_supported_antigravity_is_ready() {
     assert!(saved.contains("\"antigravity\""), "{saved}");
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn a_new_major_antigravity_is_refused_before_anything_is_claimed() {
     let (output, dir) = setup_with_agy("2.0.0");
